@@ -1,7 +1,8 @@
 fastapi
 uvicorn[standard]
 httpx
-psycopg2-binary
+asyncpg
 apscheduler
 pydantic-settings
 python-dotenv
+slowapi
