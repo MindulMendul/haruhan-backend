@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  haruhan-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: haruhan-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+    networks:
+      - haruhan-net
+
+networks:
+  haruhan-net:
+    external: true
+    name: bridge
