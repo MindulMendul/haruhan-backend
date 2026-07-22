@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+httpx
+psycopg2-binary
+apscheduler
+pydantic-settings
+python-dotenv
