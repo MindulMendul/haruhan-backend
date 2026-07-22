@@ -15,7 +15,7 @@ services:
     networks:
       - haruhan-net
 
+# 외부 bridge 네트워크 대신, compose가 알아서 사용자 정의 네트워크를 만들도록 수정
 networks:
   haruhan-net:
-    external: true
-    name: bridge
+    driver: bridge
