@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     default_quiz_question_count: int = 5
     max_quiz_question_count: int = 20
 
+    # 면접 연습 세션 하나당 최대 질문 수. 도달하면 다음 질문을 생성하지 않고
+    # 클라이언트가 /complete를 호출해 종합 피드백을 받도록 유도한다.
+    max_interview_questions: int = 5
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

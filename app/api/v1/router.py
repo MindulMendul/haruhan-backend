@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.routes import auth, chat, health, quiz, study, users
+from app.api.v1.routes import auth, chat, health, interview_practice, quiz, study, users
 
 # 헬스체크는 버전 없이 루트에 둔다 (k8s/로드밸런서 probe 관례).
 api_router = APIRouter()
@@ -12,5 +12,6 @@ v1_router.include_router(users.router)
 v1_router.include_router(chat.router)
 v1_router.include_router(study.router)
 v1_router.include_router(quiz.router)
+v1_router.include_router(interview_practice.router)
 
 api_router.include_router(v1_router)

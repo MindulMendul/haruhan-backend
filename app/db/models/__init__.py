@@ -1,3 +1,5 @@
+from app.db.models.interview_practice_session import InterviewPracticeSession
+from app.db.models.interview_practice_turn import InterviewPracticeTurn
 from app.db.models.quiz import Quiz
 from app.db.models.quiz_answer import QuizAnswer
 from app.db.models.quiz_attempt import QuizAttempt
@@ -16,4 +18,6 @@ __all__ = [
     "QuizQuestion",
     "QuizAttempt",
     "QuizAnswer",
+    "InterviewPracticeSession",
+    "InterviewPracticeTurn",
 ]
