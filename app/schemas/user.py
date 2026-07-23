@@ -1,15 +1,20 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, model_validator
 
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    email: EmailStr
+    email: EmailStr | None
     created_at: datetime
+
+    @computed_field
+    @property
+    def is_guest(self) -> bool:
+        return self.email is None
 
 
 class UserUpdateRequest(BaseModel):

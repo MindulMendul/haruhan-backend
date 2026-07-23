@@ -23,3 +23,10 @@ class UserRepository:
         self._session.add(user)
         await self._session.flush()
         return user
+
+    async def create_guest(self) -> User:
+        """로그인 폼 없이 자동으로 발급되는 익명 사용자. email/hashed_password가 없다."""
+        user = User(email=None, hashed_password=None)
+        self._session.add(user)
+        await self._session.flush()
+        return user
