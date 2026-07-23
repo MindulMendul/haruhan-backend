@@ -22,8 +22,13 @@ services:
       - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-14}
     networks:
       - haruhan-net
+      - mindul-net
 
 # 외부 bridge 네트워크 대신, compose가 알아서 사용자 정의 네트워크를 만들도록 수정
 networks:
   haruhan-net:
     driver: bridge
+  # Ollama 등 다른 스택과 같은 네트워크에서 통신하기 위한 외부 네트워크.
+  # Portainer에서 미리 만들어둔 네트워크를 그대로 참조한다 (여기서 새로 만들지 않음).
+  mindul-net:
+    external: true
