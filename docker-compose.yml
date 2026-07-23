@@ -7,8 +7,8 @@ services:
       dockerfile: Dockerfile
     container_name: haruhan-backend
     restart: unless-stopped
-    ports:
-      - "18000:8000"
+    # 외부 접근은 caddy가 대신 받으므로 호스트 포트를 열어두지 않는다
+    # (필요하면 디버깅용으로 "18000:8000"을 임시로 되살려도 됨).
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
@@ -24,6 +24,26 @@ services:
       - haruhan-net
       - mindul-net
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: haruhan-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 발급받을 도메인 (예: api.haruhan.example.com). DNS가 이 서버 IP를 가리켜야
+      # Let's Encrypt HTTP-01 챌린지가 통과해서 인증서가 자동 발급/갱신된다.
+      - DOMAIN=${DOMAIN:?DOMAIN must be set (e.g. api.example.com)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - haruhan-backend
+    networks:
+      - haruhan-net
+
 # 외부 bridge 네트워크 대신, compose가 알아서 사용자 정의 네트워크를 만들도록 수정
 networks:
   haruhan-net:
@@ -32,3 +52,9 @@ networks:
   # Portainer에서 미리 만들어둔 네트워크를 그대로 참조한다 (여기서 새로 만들지 않음).
   mindul-net:
     external: true
+
+volumes:
+  # Let's Encrypt 인증서/계정 정보. 컨테이너 재배포해도 유지되도록 볼륨에 저장한다
+  # (없으면 재배포 때마다 인증서를 새로 발급받으려다 rate limit에 걸릴 수 있음).
+  caddy_data:
+  caddy_config:
