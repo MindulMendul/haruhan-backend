@@ -1,8 +1,9 @@
-fastapi
-uvicorn[standard]
-httpx
-asyncpg
-apscheduler
-pydantic-settings
-python-dotenv
-slowapi
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
+httpx==0.28.1
+asyncpg==0.31.0
+apscheduler==3.11.3
+pydantic-settings==2.14.2
+python-dotenv==1.2.2
+slowapi==0.1.10
+redis==8.0.1

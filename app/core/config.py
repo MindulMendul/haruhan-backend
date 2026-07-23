@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     chat_rate_limit: str = "10/minute"
     max_prompt_length: int = 4000
 
+    # 요청 바디 최대 크기 (바이트). 기본 1MB.
+    max_body_size_bytes: int = 1_048_576
+
+    # 설정하면 slowapi 레이트 리밋이 Redis를 공유 스토리지로 사용한다 (다중 워커/인스턴스 환경용).
+    # 비워두면 인메모리 스토리지를 사용한다 (단일 프로세스에서만 정확함).
+    redis_url: str | None = None
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

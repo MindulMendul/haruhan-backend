@@ -9,6 +9,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 소스코드 복사
 COPY app ./app
 
+# 컨테이너가 탈취되어도 권한 상승이 되지 않도록 non-root 유저로 실행
+RUN useradd --create-home --shell /usr/sbin/nologin appuser
+USER appuser
+
 EXPOSE 8000
 
 # FastAPI Uvicorn 실행
