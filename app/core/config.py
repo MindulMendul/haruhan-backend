@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # 클라이언트가 /complete를 호출해 종합 피드백을 받도록 유도한다.
     max_interview_questions: int = 5
 
+    # 면접 복기 content 최대 길이 (문자 수).
+    max_review_content_length: int = 10_000
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
