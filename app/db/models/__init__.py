@@ -1,6 +1,19 @@
+from app.db.models.quiz import Quiz
+from app.db.models.quiz_answer import QuizAnswer
+from app.db.models.quiz_attempt import QuizAttempt
+from app.db.models.quiz_question import QuizQuestion
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.study_message import StudyMessage
 from app.db.models.study_session import StudySession
 from app.db.models.user import User
 
-__all__ = ["User", "RefreshToken", "StudySession", "StudyMessage"]
+__all__ = [
+    "User",
+    "RefreshToken",
+    "StudySession",
+    "StudyMessage",
+    "Quiz",
+    "QuizQuestion",
+    "QuizAttempt",
+    "QuizAnswer",
+]

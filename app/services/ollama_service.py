@@ -41,3 +41,21 @@ class OllamaService:
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
         return response.json().get("message", {}).get("content", "")
+
+    async def generate_json(self, prompt: str, model: str, schema: dict) -> str:
+        """JSON 스키마로 출력 형식을 강제한다 (Ollama structured outputs).
+
+        모델이 자유 텍스트 대신 스키마에 맞는 JSON만 생성하도록 constrained decoding을
+        건다. 퀴즈 문제처럼 파싱 가능한 구조화 데이터가 필요할 때 사용한다.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            try:
+                response = await client.post(
+                    f"{self._base_url}/api/generate",
+                    json={"model": model, "prompt": prompt, "stream": False, "format": schema},
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.error("Ollama API 호출 에러: %s", exc)
+                raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
+        return response.json().get("response", "")

@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
 
+    # 퀴즈 생성 소스 텍스트 최대 길이 (문자 수). 학습 세션 전체를 소스로 쓸 수 있어
+    # 일반 프롬프트(max_prompt_length)보다 넉넉하게 둔다.
+    max_quiz_source_length: int = 20_000
+    default_quiz_question_count: int = 5
+    max_quiz_question_count: int = 20
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
