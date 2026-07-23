@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import Header, HTTPException, status
 
 from app.core.config import get_settings
@@ -12,7 +14,8 @@ async def verify_api_key(x_api_key: str | None = Header(default=None, alias="X-A
     settings = get_settings()
     if not settings.api_key:
         return
-    if x_api_key != settings.api_key:
+    # 타이밍 공격을 막기 위해 상수 시간 비교를 사용한다.
+    if x_api_key is None or not secrets.compare_digest(x_api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",

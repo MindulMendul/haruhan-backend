@@ -10,21 +10,21 @@ from slowapi.errors import RateLimitExceeded
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.middleware import MaxBodySizeMiddleware, SecurityHeadersMiddleware
 from app.core.rate_limit import limiter
 from app.core.scheduler import scheduler, setup_scheduler_jobs
-from app.repositories.database import close_db_pool, init_db_pool, keep_supabase_alive
+from app.db.session import close_engine, init_engine, keep_supabase_alive
 
-settings = get_settings()
-configure_logging(settings.log_level)
 logger = logging.getLogger("haruhan")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
     if not settings.api_key:
         logger.warning("API_KEY가 설정되지 않아 /api/chat 인증이 비활성화된 상태로 실행됩니다.")
 
-    await init_db_pool(settings.database_url)
+    await init_engine(settings.database_url)
     await keep_supabase_alive()
 
     setup_scheduler_jobs()
@@ -33,11 +33,25 @@ async def lifespan(app: FastAPI):
     yield
 
     scheduler.shutdown()
-    await close_db_pool()
+    await close_engine()
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+    # 매 호출 시점의 설정을 읽는다 (테스트에서 env를 바꾸고 재생성하는 시나리오 포함).
+    settings = get_settings()
+    configure_logging(settings.log_level)
+
+    # 프로덕션에서는 Swagger/ReDoc(유일하게 실제 HTML을 서빙하는 지점)을 꺼서 공격 표면을 줄인다.
+    is_production = settings.environment == "production"
+
+    app = FastAPI(
+        title=settings.app_name,
+        version=settings.app_version,
+        lifespan=lifespan,
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
+        openapi_url=None if is_production else "/openapi.json",
+    )
 
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -46,9 +60,12 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["*"],
     )
+    app.add_middleware(SecurityHeadersMiddleware)
+    # 가장 바깥쪽(가장 나중에 add된 미들웨어)에서 본문을 읽기 전에 크기부터 차단한다.
+    app.add_middleware(MaxBodySizeMiddleware, max_body_size=settings.max_body_size_bytes)
 
     app.include_router(api_router)
 

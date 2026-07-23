@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Response, status
 
-from app.repositories.database import check_db_health
+from app.db.session import check_db_health
 
 router = APIRouter(tags=["health"])
 
