@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 
+from app.core.clock import utcnow_naive
 from app.core.config import Settings
 
 ACCESS_TOKEN_TYPE = "access"
@@ -36,16 +37,6 @@ def generate_refresh_token() -> str:
 
 def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def utcnow_naive() -> datetime:
-    """DB에는 tz 정보 없이 UTC 기준 naive datetime으로 통일해서 저장/비교한다.
-
-    SQLite(테스트)와 Postgres(운영)에서 tz-aware datetime 처리 방식이 달라
-    naive/aware를 섞어 비교하면 둘 중 한쪽에서 예외나 오동작이 날 수 있어,
-    애플리케이션 레벨에서 항상 UTC naive로 통일한다.
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def refresh_token_expiry(settings: Settings) -> datetime:

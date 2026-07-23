@@ -27,3 +27,17 @@ class OllamaService:
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
         return response.json().get("response", "")
+
+    async def chat(self, messages: list[dict[str, str]], model: str) -> str:
+        """멀티턴 대화용: role/content 히스토리를 그대로 Ollama /api/chat에 전달한다."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            try:
+                response = await client.post(
+                    f"{self._base_url}/api/chat",
+                    json={"model": model, "messages": messages, "stream": False},
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.error("Ollama API 호출 에러: %s", exc)
+                raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
+        return response.json().get("message", {}).get("content", "")

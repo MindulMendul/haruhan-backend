@@ -3,7 +3,8 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from app.core.tokens import hash_refresh_token, utcnow_naive
+from app.core.clock import utcnow_naive
+from app.core.tokens import hash_refresh_token
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
 

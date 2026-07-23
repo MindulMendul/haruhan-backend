@@ -16,7 +16,7 @@ class RefreshToken(Base):
     )
     # 원문 토큰은 저장하지 않고 SHA-256 해시만 저장한다 (DB 유출 시에도 토큰 재사용 불가).
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
-    # 아래 두 시각 컬럼은 tz 없이 UTC 기준 naive datetime으로 통일해서 다룬다 (app.core.tokens.utcnow_naive).
+    # 아래 두 시각 컬럼은 tz 없이 UTC 기준 naive datetime으로 통일해서 다룬다 (app.core.clock.utcnow_naive).
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

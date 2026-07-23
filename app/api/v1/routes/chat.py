@@ -1,16 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.core.config import Settings, get_settings
+from app.core.config import get_settings
+from app.core.dependencies import get_ollama_service
 from app.core.rate_limit import limiter
 from app.core.security import verify_api_key
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.ollama_service import OllamaService, OllamaServiceError
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(verify_api_key)])
-
-
-def get_ollama_service(settings: Settings = Depends(get_settings)) -> OllamaService:
-    return OllamaService(base_url=settings.ollama_base_url)
 
 
 @router.post("", response_model=ChatResponse)

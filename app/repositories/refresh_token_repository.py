@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.tokens import utcnow_naive
+from app.core.clock import utcnow_naive
 from app.db.models.refresh_token import RefreshToken
 
 

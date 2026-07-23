@@ -5,11 +5,12 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.tokens import decode_access_token
 from app.db.models.user import User
 from app.db.session import get_db
 from app.repositories.user_repository import UserRepository
+from app.services.ollama_service import OllamaService
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -38,3 +39,7 @@ async def get_current_user(
     if user is None:
         raise _CREDENTIALS_ERROR
     return user
+
+
+def get_ollama_service(settings: Settings = Depends(get_settings)) -> OllamaService:
+    return OllamaService(base_url=settings.ollama_base_url)

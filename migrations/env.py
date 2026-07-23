@@ -9,7 +9,7 @@ from alembic import context
 
 from app.core.config import get_settings
 from app.db.base import Base
-from app.db.models import RefreshToken, User  # noqa: F401  (Base.metadata에 테이블을 등록하기 위해 임포트)
+import app.db.models  # noqa: F401  (Base.metadata에 모든 테이블을 등록하기 위해 임포트)
 from app.db.session import to_asyncpg_url
 
 # this is the Alembic Config object, which provides

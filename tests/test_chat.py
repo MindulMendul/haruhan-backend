@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.v1.routes.chat import get_ollama_service
+from app.core.dependencies import get_ollama_service
 from app.core.config import get_settings
 from app.main import create_app
 from app.services.ollama_service import OllamaServiceError
