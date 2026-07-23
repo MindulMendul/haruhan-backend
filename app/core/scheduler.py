@@ -1,6 +1,6 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.repositories.database import keep_supabase_alive
+from app.db.session import keep_supabase_alive
 
 scheduler = AsyncIOScheduler()
 

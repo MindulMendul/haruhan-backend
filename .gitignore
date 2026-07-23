@@ -35,3 +35,7 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# === 로컬 임시 DB (alembic 검증용 SQLite 등) ===
+*.db
+*.sqlite3

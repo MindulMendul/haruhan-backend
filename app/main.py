@@ -13,7 +13,7 @@ from app.core.logging import configure_logging
 from app.core.middleware import MaxBodySizeMiddleware
 from app.core.rate_limit import limiter
 from app.core.scheduler import scheduler, setup_scheduler_jobs
-from app.repositories.database import close_db_pool, init_db_pool, keep_supabase_alive
+from app.db.session import close_engine, init_engine, keep_supabase_alive
 
 logger = logging.getLogger("haruhan")
 
@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
     if not settings.api_key:
         logger.warning("API_KEY가 설정되지 않아 /api/chat 인증이 비활성화된 상태로 실행됩니다.")
 
-    await init_db_pool(settings.database_url)
+    await init_engine(settings.database_url)
     await keep_supabase_alive()
 
     setup_scheduler_jobs()
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     yield
 
     scheduler.shutdown()
-    await close_db_pool()
+    await close_engine()
 
 
 def create_app() -> FastAPI:

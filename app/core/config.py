@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # 비워두면 인메모리 스토리지를 사용한다 (단일 프로세스에서만 정확함).
     redis_url: str | None = None
 
+    # JWT 서명 키. 안전한 기본값이 존재하지 않으므로 필수값으로 둔다 (미설정 시 앱이 시작되지 않음).
+    # openssl rand -hex 32 등으로 생성해서 설정할 것.
+    jwt_secret_key: str
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 14
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

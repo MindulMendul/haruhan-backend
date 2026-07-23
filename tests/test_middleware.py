@@ -10,7 +10,7 @@ def test_body_size_limit_rejects_large_payload(monkeypatch):
     app = create_app()
     with TestClient(app) as client:
         response = client.post(
-            "/api/chat", json={"prompt": "this payload is definitely longer than 10 bytes"}
+            "/api/v1/chat", json={"prompt": "this payload is definitely longer than 10 bytes"}
         )
     assert response.status_code == 413
 

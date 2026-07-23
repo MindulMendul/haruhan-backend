@@ -48,7 +48,15 @@
 
 ```bash
 pip install -r requirements-dev.txt
-cp .env.example .env  # 필요한 값 채우기
+cp .env.example .env  # 필요한 값 채우기 (JWT_SECRET_KEY는 openssl rand -hex 32로 생성)
+alembic upgrade head   # DB 스키마 최신화
 pytest -v
 uvicorn app.main:app --reload
 ```
+
+## DB 마이그레이션 (Alembic)
+
+- 모델(`app/db/models/`)을 바꾸면 반드시 마이그레이션을 함께 커밋합니다.
+- 새 마이그레이션 생성: `alembic revision --autogenerate -m "설명"` 실행 후 `migrations/versions/`에 생성된 파일을 **직접 검토**합니다 (autogenerate가 완벽하지 않으므로 diff를 눈으로 확인).
+- 적용: `alembic upgrade head`. 되돌리기: `alembic downgrade -1`.
+- 배포 환경에도 배포 시 `alembic upgrade head`를 실행해야 스키마가 반영됩니다 (Dockerfile CMD에는 포함되어 있지 않음 — 별도 운영 절차로 실행).
