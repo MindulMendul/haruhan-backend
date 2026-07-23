@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     chat_rate_limit: str = "10/minute"
     max_prompt_length: int = 4000
 
+    # 로그인/회원가입/비밀번호 변경처럼 브루트포스 대상이 될 수 있는 엔드포인트용 제한.
+    # LLM 호출 비용 때문에 두는 chat_rate_limit과는 성격이 달라 분리해둔다.
+    auth_rate_limit: str = "5/minute"
+
     # 요청 바디 최대 크기 (바이트). 기본 1MB.
     max_body_size_bytes: int = 1_048_576
 

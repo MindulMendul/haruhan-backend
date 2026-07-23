@@ -4,6 +4,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from app.core.clock import utcnow_naive
+from app.core.config import get_settings
 from app.core.tokens import hash_refresh_token
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
@@ -102,3 +103,21 @@ def test_refresh_rejects_expired_token(client, db_session_factory):
 
     response = client.post("/api/v1/auth/refresh", json={"refresh_token": raw_expired_token})
     assert response.status_code == 401
+
+
+def test_login_is_rate_limited(client, monkeypatch):
+    monkeypatch.setenv("AUTH_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+
+    client.post(
+        "/api/v1/auth/signup", json={"email": "ratelimit@example.com", "password": "supersecret"}
+    )
+
+    payload = {"email": "ratelimit@example.com", "password": "wrongpass"}
+    first = client.post("/api/v1/auth/login", json=payload)
+    second = client.post("/api/v1/auth/login", json=payload)
+    third = client.post("/api/v1/auth/login", json=payload)
+
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert third.status_code == 429
