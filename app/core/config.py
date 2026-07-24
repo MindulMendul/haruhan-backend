@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # 면접 복기 content 최대 길이 (문자 수).
     max_review_content_length: int = 10_000
 
+    # RAG 검색용 임베딩 모델. Ollama에 별도로 pull 되어 있어야 한다.
+    embedding_model: str = "nomic-embed-text"
+    # 학습챗 답변 생성 시 참고자료로 첨부할 최대 청크 개수.
+    rag_top_k: int = 3
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

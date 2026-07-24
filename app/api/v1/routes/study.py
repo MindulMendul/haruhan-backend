@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user, get_ollama_service
+from app.core.dependencies import get_current_user, get_ollama_service, get_rag_service
 from app.core.rate_limit import limiter
 from app.db.models.user import User
 from app.db.session import get_db
@@ -17,6 +17,7 @@ from app.schemas.study import (
     StudySessionResponse,
 )
 from app.services.ollama_service import OllamaService
+from app.services.rag_service import RagService
 from app.services.study_service import StudyService
 
 router = APIRouter(prefix="/study/sessions", tags=["study"])
@@ -25,8 +26,9 @@ router = APIRouter(prefix="/study/sessions", tags=["study"])
 def get_study_service(
     session: AsyncSession = Depends(get_db),
     ollama_service: OllamaService = Depends(get_ollama_service),
+    rag_service: RagService = Depends(get_rag_service),
 ) -> StudyService:
-    return StudyService(session=session, ollama_service=ollama_service)
+    return StudyService(session=session, ollama_service=ollama_service, rag_service=rag_service)
 
 
 @router.post("", response_model=StudySessionResponse, status_code=status.HTTP_201_CREATED)

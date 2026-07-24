@@ -18,10 +18,12 @@ class UserService:
         password: str | None,
         current_password: str | None,
     ) -> User:
-        if current_password is not None and not verify_password(current_password, user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
-            )
+        if current_password is not None:
+            # 게스트 계정은 hashed_password가 없어 비교 자체가 불가능하다 (아직 계정 전환 기능 없음).
+            if user.hashed_password is None or not verify_password(current_password, user.hashed_password):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
+                )
 
         if email is not None and email != user.email:
             existing = await self._users.get_by_email(email)

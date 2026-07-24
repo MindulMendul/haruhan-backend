@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user, get_ollama_service
+from app.core.dependencies import get_current_user, get_ollama_service, get_rag_service
 from app.core.rate_limit import limiter
 from app.db.models.user import User
 from app.db.session import get_db
@@ -15,6 +15,7 @@ from app.schemas.interview_review import (
 )
 from app.services.interview_review_service import InterviewReviewService
 from app.services.ollama_service import OllamaService
+from app.services.rag_service import RagService
 
 router = APIRouter(prefix="/interview/reviews", tags=["interview-review"])
 
@@ -22,8 +23,9 @@ router = APIRouter(prefix="/interview/reviews", tags=["interview-review"])
 def get_interview_review_service(
     session: AsyncSession = Depends(get_db),
     ollama_service: OllamaService = Depends(get_ollama_service),
+    rag_service: RagService = Depends(get_rag_service),
 ) -> InterviewReviewService:
-    return InterviewReviewService(session=session, ollama_service=ollama_service)
+    return InterviewReviewService(session=session, ollama_service=ollama_service, rag_service=rag_service)
 
 
 @router.post("", response_model=InterviewReviewResponse, status_code=status.HTTP_201_CREATED)

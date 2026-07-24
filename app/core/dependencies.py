@@ -11,6 +11,7 @@ from app.db.models.user import User
 from app.db.session import get_db
 from app.repositories.user_repository import UserRepository
 from app.services.ollama_service import OllamaService
+from app.services.rag_service import RagService
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -43,3 +44,11 @@ async def get_current_user(
 
 def get_ollama_service(settings: Settings = Depends(get_settings)) -> OllamaService:
     return OllamaService(base_url=settings.ollama_base_url)
+
+
+def get_rag_service(
+    session: AsyncSession = Depends(get_db),
+    ollama_service: OllamaService = Depends(get_ollama_service),
+    settings: Settings = Depends(get_settings),
+) -> RagService:
+    return RagService(session=session, ollama_service=ollama_service, settings=settings)
