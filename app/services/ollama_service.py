@@ -42,6 +42,20 @@ class OllamaService:
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
         return response.json().get("message", {}).get("content", "")
 
+    async def embed(self, text: str, model: str) -> list[float]:
+        """텍스트를 임베딩 벡터로 변환한다 (RAG 검색용)."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            try:
+                response = await client.post(
+                    f"{self._base_url}/api/embeddings",
+                    json={"model": model, "prompt": text},
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.error("Ollama API 호출 에러: %s", exc)
+                raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
+        return response.json().get("embedding", [])
+
     async def generate_json(self, prompt: str, model: str, schema: dict) -> str:
         """JSON 스키마로 출력 형식을 강제한다 (Ollama structured outputs).
 
