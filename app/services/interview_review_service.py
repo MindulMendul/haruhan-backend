@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.interview_review import InterviewReview
 from app.repositories.interview_review_repository import InterviewReviewRepository
 from app.services.ollama_service import OllamaService, OllamaServiceError
+from app.services.rag_service import RagService
 
 _NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview review not found")
 _GENERATION_FAILED = HTTPException(
@@ -28,10 +29,11 @@ def _build_review_feedback_prompt(company: str, position: str, content: str) -> 
 
 
 class InterviewReviewService:
-    def __init__(self, session: AsyncSession, ollama_service: OllamaService) -> None:
+    def __init__(self, session: AsyncSession, ollama_service: OllamaService, rag_service: RagService) -> None:
         self._session = session
         self._reviews = InterviewReviewRepository(session)
         self._ollama = ollama_service
+        self._rag = rag_service
 
     async def create_review(
         self,
@@ -54,6 +56,11 @@ class InterviewReviewService:
         )
         review.ai_feedback = feedback
         await self._session.commit()
+
+        # 복기 내용도 학습챗 그라운딩 자료로 쓰일 수 있도록 색인해둔다.
+        await self._rag.index_content(
+            user_id=user_id, source_type="interview_review", source_id=review.id, content=content
+        )
         return review
 
     async def list_reviews(self, user_id: uuid.UUID) -> list[InterviewReview]:
@@ -86,12 +93,18 @@ class InterviewReviewService:
             review.interview_date = interview_date
 
         # 정답/피드백은 content에 의존하므로, content가 실제로 바뀔 때만 다시 생성한다.
-        if content is not None and content != review.content:
+        content_changed = content is not None and content != review.content
+        if content_changed:
             feedback = await self._generate_feedback(review.company, review.position, content, review.model)
             review.content = content
             review.ai_feedback = feedback
 
         await self._session.commit()
+
+        if content_changed:
+            await self._rag.index_content(
+                user_id=user_id, source_type="interview_review", source_id=review.id, content=review.content
+            )
         return review
 
     async def delete_review(self, review_id: uuid.UUID, user_id: uuid.UUID) -> None:
@@ -100,6 +113,7 @@ class InterviewReviewService:
             raise _NOT_FOUND
         await self._reviews.delete(review)
         await self._session.commit()
+        await self._rag.forget_content(source_type="interview_review", source_id=review_id)
 
     async def _generate_feedback(self, company: str, position: str, content: str, model: str) -> str:
         prompt = _build_review_feedback_prompt(company, position, content)

@@ -30,6 +30,9 @@ class FakeOllamaService:
     async def chat(self, messages, model):
         return "n/a"
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
 
 class MalformedJsonOllamaService:
     async def generate_json(self, prompt, model, schema):

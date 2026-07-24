@@ -6,6 +6,9 @@ class FakeOllamaService:
     async def chat(self, messages, model):
         return f"assistant reply to: {messages[-1]['content']}"
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
 
 class FailingOllamaService:
     async def chat(self, messages, model):
@@ -98,6 +101,67 @@ def test_delete_session(client):
         f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token)
     )
     assert get_after_delete.status_code == 404
+
+
+class GroundingFakeOllamaService:
+    """chat()에 전달된 메시지를 기록해두고, 태그가 포함된 텍스트만 서로 가까운 벡터로 임베딩한다."""
+
+    def __init__(self):
+        self.last_messages = None
+
+    async def chat(self, messages, model):
+        self.last_messages = messages
+        return "assistant reply"
+
+    async def embed(self, text, model):
+        if "기억할 사실" in text:
+            return [1.0, 0.0]
+        return [0.0, 1.0]
+
+
+def test_first_message_has_no_grounding_when_corpus_is_empty(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "그라운딩 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    assert fake.last_messages is not None
+    assert not any(m["role"] == "system" for m in fake.last_messages)
+
+
+def test_later_message_is_grounded_with_relevant_legacy_content(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "그라운딩 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실 관련해서 다시 설명해줘"},
+        headers=_auth_headers(token),
+    )
+
+    system_messages = [m for m in fake.last_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert "기억할 사실: 스레드는 프로세스 안에서 돈다" in system_messages[0]["content"]
 
 
 def test_user_message_preserved_when_ai_call_fails(client):

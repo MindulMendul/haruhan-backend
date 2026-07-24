@@ -11,6 +11,9 @@ class FakeOllamaService:
         self.call_count += 1
         return f"feedback-{self.call_count}"
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
 
 class FailingOllamaService:
     async def chat(self, messages, model):
