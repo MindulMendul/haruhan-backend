@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -21,6 +21,7 @@ def get_auth_service(
 @limiter.limit(lambda: get_settings().auth_rate_limit)
 async def signup(
     request: Request,
+    response: Response,
     payload: SignupRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
@@ -31,6 +32,7 @@ async def signup(
 @limiter.limit(lambda: get_settings().auth_rate_limit)
 async def login(
     request: Request,
+    response: Response,
     payload: LoginRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
@@ -41,6 +43,7 @@ async def login(
 @limiter.limit(lambda: get_settings().auth_rate_limit)
 async def create_guest(
     request: Request,
+    response: Response,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
     """로그인 폼 없이 방문자마다 자동으로 익명 계정을 발급한다. 요청 바디 없음."""

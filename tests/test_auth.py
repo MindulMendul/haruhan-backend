@@ -17,6 +17,9 @@ def test_signup_login_refresh_logout_flow(client):
     assert signup.status_code == 201
     tokens = signup.json()
     assert set(tokens) == {"access_token", "refresh_token", "token_type"}
+    # 레이트리밋 헤더는 실패(429)뿐 아니라 성공 응답에도 항상 실려야 한다
+    # (headers_enabled=True로 켠 뒤 라우트마다 response: Response를 안 받으면 500이 났던 회귀).
+    assert "X-RateLimit-Limit" in signup.headers
 
     me = client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {tokens['access_token']}"})
     assert me.status_code == 200
@@ -121,3 +124,5 @@ def test_login_is_rate_limited(client, monkeypatch):
     assert first.status_code == 401
     assert second.status_code == 401
     assert third.status_code == 429
+    assert "Retry-After" in third.headers
+    assert int(third.headers["Retry-After"]) >= 0

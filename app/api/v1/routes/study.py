@@ -90,6 +90,7 @@ async def delete_session(
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def send_message(
     request: Request,
+    response: Response,
     session_id: uuid.UUID,
     payload: StudyMessageCreateRequest,
     current_user: User = Depends(get_current_user),

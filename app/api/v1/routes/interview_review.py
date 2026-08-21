@@ -32,6 +32,7 @@ def get_interview_review_service(
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def create_review(
     request: Request,
+    response: Response,
     payload: InterviewReviewCreateRequest,
     current_user: User = Depends(get_current_user),
     service: InterviewReviewService = Depends(get_interview_review_service),
@@ -74,6 +75,7 @@ async def get_review(
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def update_review(
     request: Request,
+    response: Response,
     review_id: uuid.UUID,
     payload: InterviewReviewUpdateRequest,
     current_user: User = Depends(get_current_user),

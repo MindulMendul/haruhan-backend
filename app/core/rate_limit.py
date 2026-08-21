@@ -13,4 +13,7 @@ _settings = get_settings()
 limiter = Limiter(
     key_func=get_remote_address,
     storage_uri=_settings.redis_url or "memory://",
+    # 클라이언트가 몇 초 후에 재시도하면 되는지 알 수 있도록 Retry-After 등
+    # 레이트리밋 관련 헤더를 응답에 싣는다 (기본값 False라 명시적으로 켜야 함).
+    headers_enabled=True,
 )

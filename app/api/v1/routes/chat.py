@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
@@ -14,6 +14,7 @@ router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(verify_a
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def chat_with_ollama(
     request: Request,
+    response: Response,
     payload: ChatRequest,
     ollama_service: OllamaService = Depends(get_ollama_service),
 ) -> ChatResponse:

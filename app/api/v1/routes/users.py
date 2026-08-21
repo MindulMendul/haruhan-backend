@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -21,6 +21,7 @@ async def get_me(current_user: User = Depends(get_current_user)) -> User:
 @limiter.limit(lambda: get_settings().auth_rate_limit)
 async def update_me(
     request: Request,
+    response: Response,
     payload: UserUpdateRequest,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
@@ -38,6 +39,7 @@ async def update_me(
 @limiter.limit(lambda: get_settings().auth_rate_limit)
 async def upgrade_guest(
     request: Request,
+    response: Response,
     payload: GuestUpgradeRequest,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),

@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -38,6 +38,7 @@ def get_interview_practice_service(
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def create_session(
     request: Request,
+    response: Response,
     payload: InterviewPracticeCreateRequest,
     current_user: User = Depends(get_current_user),
     service: InterviewPracticeService = Depends(get_interview_practice_service),
@@ -91,6 +92,7 @@ async def get_session(
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def submit_answer(
     request: Request,
+    response: Response,
     session_id: uuid.UUID,
     payload: InterviewPracticeAnswerRequest,
     current_user: User = Depends(get_current_user),
