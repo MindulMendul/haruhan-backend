@@ -1,7 +1,7 @@
 import logging
 from collections.abc import AsyncIterator
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.repositories.refresh_token_repository import RefreshTokenRepository
@@ -23,6 +23,23 @@ def to_asyncpg_url(url: str) -> str:
     return url
 
 
+def enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
+    """SQLite는 기본적으로 외래키 제약을 검사하지 않아서 모델에 걸어둔
+    ON DELETE CASCADE/SET NULL이 조용히 무시된다 (Postgres는 기본으로 검사하므로
+    프로덕션에서는 원래도 문제없었음). 연결마다 PRAGMA로 켜서 SQLite를 쓰는
+    테스트/로컬 개발에서도 같은 cascade 동작을 보장한다. sqlite가 아니면 아무것도
+    하지 않는다.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
 async def init_engine(database_url: str | None) -> None:
     """앱 시작 시 DB 엔진/세션 팩토리를 만든다. DATABASE_URL이 없으면 건너뛴다."""
     global _engine, _session_factory
@@ -30,6 +47,7 @@ async def init_engine(database_url: str | None) -> None:
         logger.warning("DATABASE_URL이 설정되지 않아 DB 엔진을 생성하지 않습니다.")
         return
     _engine = create_async_engine(to_asyncpg_url(database_url), pool_size=5, max_overflow=5)
+    enable_sqlite_foreign_keys(_engine)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
 

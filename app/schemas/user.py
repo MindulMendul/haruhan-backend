@@ -28,6 +28,14 @@ class GuestUpgradeRequest(BaseModel):
     password: str = Field(min_length=8, max_length=72)
 
 
+class AccountDeletionRequest(BaseModel):
+    """계정과 연관 데이터 전체를 영구 삭제할 때 쓴다. 실계정은 탈취된 access
+    token만으로 계정을 통째로 지우지 못하도록 현재 비밀번호로 재확인해야 하고,
+    게스트 계정은 비교할 비밀번호가 없으므로 생략 가능하다."""
+
+    current_password: str | None = None
+
+
 class UserUpdateRequest(BaseModel):
     email: EmailStr | None = None
     password: str | None = Field(default=None, min_length=8, max_length=72)

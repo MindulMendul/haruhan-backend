@@ -104,7 +104,7 @@
 
 ## 백로그 (4라운드)
 
-- [ ] 24. 계정 삭제(회원 탈퇴) API — JSON export(`/api/v1/export/me`)는
+- [x] 24. 계정 삭제(회원 탈퇴) API — JSON export(`/api/v1/export/me`)는
       있는데 대칭되는 "내 계정 + 관련 데이터 전체 삭제"는 없음. `DELETE
       /api/v1/users/me` 추가. CASCADE 제약이 이미 대부분의 테이블에 걸려
       있으니(FK ondelete="CASCADE") User 로우만 지우면 나머지가 따라

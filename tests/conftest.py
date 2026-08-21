@@ -15,7 +15,7 @@ from app.api.v1.routes.models import _models_cache
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
 from app.db.base import Base
-from app.db.session import get_db
+from app.db.session import enable_sqlite_foreign_keys, get_db
 from app.main import create_app
 
 
@@ -43,6 +43,7 @@ def db_session_factory():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    enable_sqlite_foreign_keys(engine)
 
     async def _create_all():
         async with engine.begin() as conn:

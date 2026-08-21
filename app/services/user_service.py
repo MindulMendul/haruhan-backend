@@ -63,3 +63,21 @@ class UserService:
         await self._session.commit()
         guest_conversions_total.inc()
         return user
+
+    async def delete_account(self, user: User, current_password: str | None) -> None:
+        """계정과 연관 데이터(학습챗/퀴즈/면접연습/면접복기/RAG 색인/refresh
+        token) 전체를 영구 삭제한다. User row만 지우면 나머지는 DB의
+        ON DELETE CASCADE로 함께 지워진다.
+
+        실계정은 탈취된 access token만으로 계정을 통째로 지우지 못하도록
+        현재 비밀번호로 재확인해야 한다. 게스트는 hashed_password가 없어
+        비교 자체가 불가능하므로 확인 없이 진행한다.
+        """
+        if user.hashed_password is not None:
+            if current_password is None or not verify_password(current_password, user.hashed_password):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
+                )
+
+        await self._users.delete(user)
+        await self._session.commit()

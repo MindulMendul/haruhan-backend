@@ -30,3 +30,9 @@ class UserRepository:
         self._session.add(user)
         await self._session.flush()
         return user
+
+    async def delete(self, user: User) -> None:
+        """User row만 지우면 나머지(학습챗/퀴즈/면접연습/면접복기/RAG 색인/refresh
+        token)는 전부 DB의 ON DELETE CASCADE로 함께 지워진다."""
+        await self._session.delete(user)
+        await self._session.flush()

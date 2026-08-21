@@ -80,3 +80,59 @@ def test_update_without_any_field_requires_no_current_password(client):
         "/api/v1/users/me", json={}, headers=_auth_headers(tokens["access_token"])
     )
     assert response.status_code == 200
+
+
+def test_delete_account_requires_current_password_for_real_account(client):
+    tokens = _signup_and_get_tokens(client, email="delete-noconfirm@example.com")
+    response = client.request(
+        "DELETE",
+        "/api/v1/users/me",
+        json={},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 401
+
+
+def test_delete_account_wrong_current_password(client):
+    tokens = _signup_and_get_tokens(client, email="delete-wrongpw@example.com")
+    response = client.request(
+        "DELETE",
+        "/api/v1/users/me",
+        json={"current_password": "wrongpass"},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 401
+
+
+def test_delete_account_success_for_real_account(client):
+    tokens = _signup_and_get_tokens(client, email="delete-ok@example.com")
+    response = client.request(
+        "DELETE",
+        "/api/v1/users/me",
+        json={"current_password": "supersecret"},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 204
+
+    me = client.get("/api/v1/users/me", headers=_auth_headers(tokens["access_token"]))
+    assert me.status_code == 401
+
+    # 이메일이 자유로워졌으니 같은 이메일로 다시 가입할 수 있어야 한다.
+    resignup = client.post(
+        "/api/v1/auth/signup", json={"email": "delete-ok@example.com", "password": "anotherpass"}
+    )
+    assert resignup.status_code == 201
+
+
+def test_delete_guest_account_without_password(client):
+    guest = client.post("/api/v1/auth/guest")
+    assert guest.status_code == 201
+    token = guest.json()["access_token"]
+
+    response = client.request(
+        "DELETE", "/api/v1/users/me", json={}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 204
+
+    me = client.get("/api/v1/users/me", headers=_auth_headers(token))
+    assert me.status_code == 401
