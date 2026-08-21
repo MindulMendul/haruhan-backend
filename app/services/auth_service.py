@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +13,7 @@ from app.core.tokens import (
     hash_refresh_token,
     refresh_token_expiry,
 )
+from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
 from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
@@ -23,6 +26,10 @@ _INVALID_CREDENTIALS = HTTPException(
 _INVALID_REFRESH_TOKEN = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
     detail={"code": "invalid_refresh_token", "message": "Invalid refresh token"},
+)
+_SESSION_NOT_FOUND = HTTPException(
+    status_code=status.HTTP_404_NOT_FOUND,
+    detail={"code": "session_not_found", "message": "Session not found"},
 )
 
 
@@ -105,6 +112,25 @@ class AuthService:
         stored = await self._refresh_tokens.get_by_hash(token_hash)
         if stored is not None and stored.revoked_at is None:
             await self._refresh_tokens.revoke(stored)
+        await self._session.commit()
+
+    async def list_active_sessions(self, user_id: uuid.UUID) -> list[RefreshToken]:
+        """현재 로그인 상태인(폐기되지 않고 만료되지 않은) refresh token 목록을
+        "세션"으로 노출한다. 이 API는 access token으로 인증하므로, 지금 요청을
+        보내는 클라이언트 자신이 어느 세션에 해당하는지는 알 수 없다 - RefreshToken이
+        발급 당시의 access token과 연결되어 있지 않기 때문이다. 그래도 활성 세션
+        개수 확인과 특정/전체 세션 강제 로그아웃에는 충분히 유용하다."""
+        return await self._refresh_tokens.list_active_for_user(user_id)
+
+    async def revoke_session(self, user_id: uuid.UUID, session_id: uuid.UUID) -> None:
+        token = await self._refresh_tokens.get_active_by_id_for_user(session_id, user_id)
+        if token is None:
+            raise _SESSION_NOT_FOUND
+        await self._refresh_tokens.revoke(token)
+        await self._session.commit()
+
+    async def revoke_all_sessions(self, user_id: uuid.UUID) -> None:
+        await self._refresh_tokens.revoke_all_for_user(user_id)
         await self._session.commit()
 
     async def _issue_tokens(self, user: User) -> TokenResponse:

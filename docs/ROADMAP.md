@@ -163,3 +163,19 @@
         피드백은 `chat()`을 써서 기술적으로는 가능하지만, 세션당 한 번만
         발생하는 일회성 동작이라 이번엔 우선순위를 낮게 봄 - 필요해지면
         후속 항목으로 분리할 것.
+
+## 백로그 (6라운드)
+
+- [x] 30. 세션(refresh token) 관리 API — 19번 항목(refresh token 재사용 탐지)의
+      자연스러운 후속. 사용자가 자신의 활성 로그인 세션 목록을 보고, 특정
+      세션 또는 전체 세션을 강제 로그아웃할 수 있도록
+      `GET/DELETE /auth/sessions`, `DELETE /auth/sessions/{id}` 추가.
+      `RefreshTokenRepository`에 `list_active_for_user`/
+      `get_active_by_id_for_user`(소유권 확인 포함) 추가, `AuthService`에
+      `list_active_sessions`/`revoke_session`/`revoke_all_sessions` 추가.
+      **알려진 한계**: 이 API는 access_token으로 인증하는데,
+      RefreshToken은 발급 당시의 access_token과 연결된 정보가 없어서
+      "지금 요청을 보내는 이 기기가 목록의 몇 번째 세션인지"는 구분할 수
+      없음 - 세션 개수 확인/특정·전체 로그아웃 용도로만 유효. 필요해지면
+      RefreshToken에 device/user-agent 같은 식별 메타데이터를 추가하는
+      후속 작업으로 개선 가능.

@@ -22,6 +22,31 @@ class RefreshTokenRepository:
         result = await self._session.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
         return result.scalar_one_or_none()
 
+    async def list_active_for_user(self, user_id: uuid.UUID) -> list[RefreshToken]:
+        now = utcnow_naive()
+        result = await self._session.execute(
+            select(RefreshToken)
+            .where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.expires_at > now,
+            )
+            .order_by(RefreshToken.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_active_by_id_for_user(self, token_id: uuid.UUID, user_id: uuid.UUID) -> RefreshToken | None:
+        now = utcnow_naive()
+        result = await self._session.execute(
+            select(RefreshToken).where(
+                RefreshToken.id == token_id,
+                RefreshToken.user_id == user_id,
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.expires_at > now,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def revoke(self, token: RefreshToken) -> None:
         token.revoked_at = utcnow_naive()
         await self._session.flush()

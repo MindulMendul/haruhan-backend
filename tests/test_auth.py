@@ -152,6 +152,92 @@ def test_signup_rejects_password_over_byte_limit_despite_passing_char_limit(clie
     assert response.status_code == 400
 
 
+def _signup_and_get_tokens(client, email="sessions@example.com"):
+    signup = client.post("/api/v1/auth/signup", json={"email": email, "password": "supersecret"})
+    assert signup.status_code == 201
+    return signup.json()
+
+
+def test_list_sessions_returns_active_sessions_only(client):
+    tokens = _signup_and_get_tokens(client)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    listing = client.get("/api/v1/auth/sessions", headers=headers)
+    assert listing.status_code == 200
+    sessions = listing.json()
+    assert len(sessions) == 1
+    assert set(sessions[0]) == {"id", "created_at", "expires_at"}
+
+    refresh = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert refresh.status_code == 200
+
+    # 로테이션으로 옛 토큰은 폐기됐으니 활성 세션은 여전히 1개여야 한다.
+    listing_after_refresh = client.get("/api/v1/auth/sessions", headers=headers)
+    assert len(listing_after_refresh.json()) == 1
+
+
+def test_revoke_session_logs_out_that_refresh_token(client):
+    tokens = _signup_and_get_tokens(client, email="revoke-session@example.com")
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    session_id = client.get("/api/v1/auth/sessions", headers=headers).json()[0]["id"]
+
+    revoke = client.delete(f"/api/v1/auth/sessions/{session_id}", headers=headers)
+    assert revoke.status_code == 204
+
+    listing = client.get("/api/v1/auth/sessions", headers=headers)
+    assert listing.json() == []
+
+    refresh = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert refresh.status_code == 401
+
+
+def test_revoke_session_rejects_other_users_session(client):
+    tokens_a = _signup_and_get_tokens(client, email="session-a@example.com")
+    tokens_b = _signup_and_get_tokens(client, email="session-b@example.com")
+    headers_a = {"Authorization": f"Bearer {tokens_a['access_token']}"}
+    headers_b = {"Authorization": f"Bearer {tokens_b['access_token']}"}
+
+    session_id_b = client.get("/api/v1/auth/sessions", headers=headers_b).json()[0]["id"]
+
+    response = client.delete(f"/api/v1/auth/sessions/{session_id_b}", headers=headers_a)
+    assert response.status_code == 404
+
+    # 다른 사람의 세션은 여전히 살아있어야 한다.
+    still_valid = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens_b["refresh_token"]})
+    assert still_valid.status_code == 200
+
+
+def test_revoke_session_rejects_unknown_session_id(client):
+    tokens = _signup_and_get_tokens(client, email="unknown-session@example.com")
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    response = client.delete(
+        "/api/v1/auth/sessions/00000000-0000-0000-0000-000000000000", headers=headers
+    )
+    assert response.status_code == 404
+
+
+def test_revoke_all_sessions_logs_out_everywhere(client):
+    tokens = _signup_and_get_tokens(client, email="revoke-all@example.com")
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    refresh = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert refresh.status_code == 200
+    new_tokens = refresh.json()
+
+    revoke_all = client.delete("/api/v1/auth/sessions", headers=headers)
+    assert revoke_all.status_code == 204
+
+    listing = client.get("/api/v1/auth/sessions", headers=headers)
+    assert listing.json() == []
+
+    refresh_after = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": new_tokens["refresh_token"]}
+    )
+    assert refresh_after.status_code == 401
+
+
 def test_login_is_rate_limited(client, monkeypatch):
     monkeypatch.setenv("AUTH_RATE_LIMIT", "2/minute")
     get_settings.cache_clear()
