@@ -190,3 +190,17 @@
       `QuizAttemptRepository.list_for_quiz`(신규), `QuizService.list_attempts`
       (소유권 검증 후 404 처리) 추가. 문항별 상세는 기존 `/result`가
       이미 담당하므로 이 응답은 점수 요약만 가볍게 준다.
+
+## 백로그 (8라운드)
+
+- [x] 32. 면접 연습 세션 목록에 페이지네이션 적용 — `GET
+      /interview/practice-sessions`가 FRONTEND_INTEGRATION.md에 "페이지네이션
+      없음 - 필요해지면 3-1(학습챗)처럼 추가 예정"이라고 이미 명시돼 있던
+      후속 과제였음. 학습챗(`StudySessionRepository`/`StudyService`)과 동일한
+      패턴으로 `InterviewPracticeSessionRepository.list_for_user`에
+      limit/offset을 추가하고 `count_for_user`를 신설, 응답 헤더
+      `X-Total-Count`로 전체 개수를 실어보냄. 기존 `list_for_user(user_id)`
+      (인자 없음)를 쓰던 `ExportService`는 전량이 필요하므로
+      `list_all_for_user(user_id)`(신규, 페이지네이션 없음)로 옮겨 분리했다 -
+      `StudySessionRepository`가 이미 쓰던 것과 같은 list_for_user/
+      list_all_for_user 이원화 패턴.

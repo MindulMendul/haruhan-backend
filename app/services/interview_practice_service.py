@@ -144,8 +144,12 @@ class InterviewPracticeService:
         await self._session.commit()
         return practice_session, first_turn
 
-    async def list_sessions(self, user_id: uuid.UUID) -> list[InterviewPracticeSession]:
-        return await self._sessions.list_for_user(user_id)
+    async def list_sessions(
+        self, user_id: uuid.UUID, limit: int, offset: int
+    ) -> tuple[list[InterviewPracticeSession], int]:
+        sessions = await self._sessions.list_for_user(user_id, limit=limit, offset=offset)
+        total = await self._sessions.count_for_user(user_id)
+        return sessions, total
 
     async def get_session_with_turns(
         self, session_id: uuid.UUID, user_id: uuid.UUID

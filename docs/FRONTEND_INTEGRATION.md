@@ -295,10 +295,12 @@ GET /api/v1/quizzes/wrong-answers
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/interview/practice-sessions` | `{ "topic": "백엔드 개발자", "model"?: ... }` → 생성, 첫 질문 자동 포함 |
-| GET | `/interview/practice-sessions` | 목록 (페이지네이션 없음 — 필요해지면 3-1처럼 추가 예정) |
+| GET | `/interview/practice-sessions` | 내 세션 목록 (페이지네이션, 아래 참고) |
 | GET | `/interview/practice-sessions/{id}` | 상세 (질문/답변/피드백 turns 배열) |
 | POST | `/interview/practice-sessions/{id}/answers` | `{ "answer": "..." }` → 피드백 + 다음 질문 |
 | POST | `/interview/practice-sessions/{id}/complete` | 종료 → 종합 피드백 생성 |
+
+목록 조회는 3-1(학습 채팅)과 동일한 방식으로 `?limit=20&offset=0` 쿼리 파라미터를 받고(`limit` 기본 20, 최대 100), 전체 개수는 `X-Total-Count` 응답 헤더로 옵니다.
 
 답변 응답:
 ```json

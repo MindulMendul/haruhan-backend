@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -18,13 +18,34 @@ class InterviewPracticeSessionRepository:
         await self._session.flush()
         return practice_session
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[InterviewPracticeSession]:
+    async def list_for_user(
+        self, user_id: uuid.UUID, limit: int, offset: int
+    ) -> list[InterviewPracticeSession]:
+        result = await self._session.execute(
+            select(InterviewPracticeSession)
+            .where(InterviewPracticeSession.user_id == user_id)
+            .order_by(InterviewPracticeSession.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
+
+    async def list_all_for_user(self, user_id: uuid.UUID) -> list[InterviewPracticeSession]:
+        """페이지네이션 없이 전체를 가져온다 - 데이터 export처럼 전량이 필요할 때 쓴다."""
         result = await self._session.execute(
             select(InterviewPracticeSession)
             .where(InterviewPracticeSession.user_id == user_id)
             .order_by(InterviewPracticeSession.updated_at.desc())
         )
         return list(result.scalars().all())
+
+    async def count_for_user(self, user_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(InterviewPracticeSession)
+            .where(InterviewPracticeSession.user_id == user_id)
+        )
+        return result.scalar_one()
 
     async def get_for_user(
         self, session_id: uuid.UUID, user_id: uuid.UUID

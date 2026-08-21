@@ -103,7 +103,7 @@ class ExportService:
 
     async def _build_practice_sessions(self, user_id: uuid.UUID) -> list[InterviewPracticeSessionExport]:
         exports = []
-        for practice_session in await self._practice_sessions.list_for_user(user_id):
+        for practice_session in await self._practice_sessions.list_all_for_user(user_id):
             turns = await self._practice_turns.list_for_session(practice_session.id)
             exports.append(
                 InterviewPracticeSessionExport(

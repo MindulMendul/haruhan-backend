@@ -85,6 +85,46 @@ def test_create_session_generates_first_question(client):
     assert body["turns"][0]["feedback"] is None
 
 
+def test_list_sessions_pagination(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    for i in range(5):
+        client.post(
+            "/api/v1/interview/practice-sessions",
+            json={"topic": f"주제 {i}"},
+            headers=_auth_headers(token),
+        )
+
+    first_page = client.get(
+        "/api/v1/interview/practice-sessions?limit=2&offset=0", headers=_auth_headers(token)
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert first_page.headers["X-Total-Count"] == "5"
+
+    second_page = client.get(
+        "/api/v1/interview/practice-sessions?limit=2&offset=2", headers=_auth_headers(token)
+    )
+    assert len(second_page.json()) == 2
+
+    first_ids = {s["id"] for s in first_page.json()}
+    second_ids = {s["id"] for s in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_list_sessions_default_pagination_returns_all_when_under_limit(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    client.post(
+        "/api/v1/interview/practice-sessions", json={"topic": "백엔드"}, headers=_auth_headers(token)
+    )
+
+    listing = client.get("/api/v1/interview/practice-sessions", headers=_auth_headers(token))
+    assert listing.status_code == 200
+    assert len(listing.json()) == 1
+    assert listing.headers["X-Total-Count"] == "1"
+
+
 def test_create_session_ai_failure_returns_502(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
     token = _signup_and_get_token(client)
