@@ -100,6 +100,9 @@ class FakeOllamaService:
             }
         )
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
 
 def test_quiz_creation_increments_quiz_created_counter(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()

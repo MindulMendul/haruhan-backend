@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user, get_ollama_service
+from app.core.dependencies import get_current_user, get_ollama_service, get_rag_service
 from app.core.rate_limit import limiter
 from app.db.models.user import User
 from app.db.session import get_db
@@ -21,6 +21,7 @@ from app.schemas.quiz import (
 )
 from app.services.ollama_service import OllamaService
 from app.services.quiz_service import QuizService
+from app.services.rag_service import RagService
 
 router = APIRouter(prefix="/quizzes", tags=["quiz"])
 
@@ -28,8 +29,9 @@ router = APIRouter(prefix="/quizzes", tags=["quiz"])
 def get_quiz_service(
     session: AsyncSession = Depends(get_db),
     ollama_service: OllamaService = Depends(get_ollama_service),
+    rag_service: RagService = Depends(get_rag_service),
 ) -> QuizService:
-    return QuizService(session=session, ollama_service=ollama_service)
+    return QuizService(session=session, ollama_service=ollama_service, rag_service=rag_service)
 
 
 @router.post("", response_model=QuizResponse, status_code=status.HTTP_201_CREATED)

@@ -14,6 +14,13 @@ class UnusedOllamaService:
         raise AssertionError("퀴즈 재제출 테스트에서는 Ollama가 호출되면 안 됨")
 
 
+class UnusedRagService:
+    """RAG 색인은 퀴즈 생성 시에만 일어나므로, 제출(채점) 테스트에서는 호출되면 안 된다."""
+
+    async def index_content(self, user_id, source_type, source_id, content):
+        raise AssertionError("퀴즈 재제출 테스트에서는 RAG 색인이 호출되면 안 됨")
+
+
 def test_resubmitting_identical_answers_after_window_creates_new_attempt(db_session_factory):
     async def _run():
         async with db_session_factory() as session:
@@ -31,7 +38,9 @@ def test_resubmitting_identical_answers_after_window_creates_new_attempt(db_sess
             )
             await session.commit()
 
-            service = QuizService(session=session, ollama_service=UnusedOllamaService())
+            service = QuizService(
+                session=session, ollama_service=UnusedOllamaService(), rag_service=UnusedRagService()
+            )
 
             first_attempt, _ = await service.submit_answers(
                 quiz_id=quiz.id, user_id=user.id, answers=[(question.id, 0)]
@@ -68,7 +77,9 @@ def test_resubmitting_identical_answers_within_window_reuses_attempt(db_session_
             )
             await session.commit()
 
-            service = QuizService(session=session, ollama_service=UnusedOllamaService())
+            service = QuizService(
+                session=session, ollama_service=UnusedOllamaService(), rag_service=UnusedRagService()
+            )
 
             first_attempt, first_graded = await service.submit_answers(
                 quiz_id=quiz.id, user_id=user.id, answers=[(question.id, 0)]

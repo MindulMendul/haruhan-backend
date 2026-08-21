@@ -18,6 +18,7 @@ from app.repositories.quiz_repository import QuizQuestionRepository, QuizReposit
 from app.repositories.study_message_repository import StudyMessageRepository
 from app.repositories.study_session_repository import StudySessionRepository
 from app.services.ollama_service import OllamaService, OllamaServiceError
+from app.services.rag_service import RagService
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,9 @@ def _build_quiz_prompt(source_text: str, question_count: int) -> str:
 
 
 class QuizService:
-    def __init__(self, session: AsyncSession, ollama_service: OllamaService) -> None:
+    def __init__(
+        self, session: AsyncSession, ollama_service: OllamaService, rag_service: RagService
+    ) -> None:
         self._session = session
         self._quizzes = QuizRepository(session)
         self._questions = QuizQuestionRepository(session)
@@ -69,6 +72,7 @@ class QuizService:
         self._study_sessions = StudySessionRepository(session)
         self._study_messages = StudyMessageRepository(session)
         self._ollama = ollama_service
+        self._rag = rag_service
 
     async def create_quiz(
         self,
@@ -111,6 +115,16 @@ class QuizService:
             )
         await self._session.commit()
         quiz_created_total.inc()
+
+        if study_session_id is None:
+            # source_text가 스터디 세션에서 파생된 게 아니라 사용자가 직접 붙여넣은
+            # 내용이라 다른 곳에는 색인되어 있지 않다 - RAG 검색 대상에 포함시킨다.
+            # study_session_id로 만든 퀴즈는 원본 메시지가 이미 study_message로
+            # 색인돼 있으므로 중복 색인하지 않는다.
+            await self._rag.index_content(
+                user_id=user_id, source_type="quiz_source", source_id=quiz.id, content=source_text
+            )
+
         return quiz
 
     async def _generate_quiz(self, prompt: str, model: str) -> _GeneratedQuiz:

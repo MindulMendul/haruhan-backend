@@ -72,6 +72,9 @@ class RecoversOnRetryOllamaService:
             return "not valid json {{{"
         return SAMPLE_QUIZ_JSON
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
 
 def _signup_and_get_token(client, email="quiz@example.com"):
     response = client.post(
