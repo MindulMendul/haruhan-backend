@@ -49,7 +49,7 @@
 - [x] 14. 구조화된 액세스 로그 미들웨어 — 지금은 처리되지 않은 예외만
       로깅됨. 정상 요청도 method/path/status/처리시간/user_id(있으면)를
       구조화된 형태로 로깅.
-- [ ] 15. RAG 백필 스크립트 스케줄러 자동화 — `scripts/backfill_knowledge_chunks.py`가
+- [x] 15. RAG 백필 스크립트 스케줄러 자동화 — `scripts/backfill_knowledge_chunks.py`가
       지금은 수동 실행 스크립트로만 존재. 색인 실패했던 항목을 주기적으로
       재시도하는 용도로 스케줄러 job화 (매번 전체를 다시 긁는 게 아니라,
       아직 색인 안 된 것만 대상으로 하는 방식 고민할 것).
