@@ -75,7 +75,7 @@ class ExportService:
             attempts_by_quiz.setdefault(attempt.quiz_id, []).append(attempt)
 
         exports = []
-        for quiz in await self._quizzes.list_for_user(user_id):
+        for quiz in await self._quizzes.list_all_for_user(user_id):
             questions = await self._questions.list_for_quiz(quiz.id)
             attempt_exports = []
             for attempt in attempts_by_quiz.get(quiz.id, []):

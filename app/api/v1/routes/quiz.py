@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -59,10 +59,14 @@ async def create_quiz(
 
 @router.get("", response_model=list[QuizResponse])
 async def list_quizzes(
+    response: Response,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     quiz_service: QuizService = Depends(get_quiz_service),
 ) -> list[QuizResponse]:
-    quizzes = await quiz_service.list_quizzes(user_id=current_user.id)
+    quizzes, total = await quiz_service.list_quizzes(user_id=current_user.id, limit=limit, offset=offset)
+    response.headers["X-Total-Count"] = str(total)
     return [QuizResponse.model_validate(q) for q in quizzes]
 
 

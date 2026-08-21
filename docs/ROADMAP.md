@@ -204,3 +204,16 @@
       `list_all_for_user(user_id)`(신규, 페이지네이션 없음)로 옮겨 분리했다 -
       `StudySessionRepository`가 이미 쓰던 것과 같은 list_for_user/
       list_all_for_user 이원화 패턴.
+
+## 백로그 (9라운드)
+
+- [x] 33. 퀴즈 목록에도 페이지네이션 적용 — 32번(면접 연습 세션 페이지네이션)과
+      같은 이유로, `GET /quizzes`도 학습챗/면접연습과 동일한
+      limit/offset + `X-Total-Count` 패턴을 적용했다.
+      `QuizRepository.list_for_user`에 limit/offset을 추가하고
+      `count_for_user`를 신설. 오답노트(`get_wrong_answer_notebook`)와
+      `ExportService`처럼 전량이 필요한 곳은 신설한
+      `list_all_for_user(user_id)`(페이지네이션 없음)로 옮겼다 - 지금까지
+      나온 3개 목록 엔드포인트(학습챗/면접연습/퀴즈)가 전부 같은
+      list_for_user(paginated)/list_all_for_user(전량) 이원화 패턴을
+      공유하게 됐다.

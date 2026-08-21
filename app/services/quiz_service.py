@@ -156,8 +156,10 @@ class QuizService:
 
         raise _GENERATION_FAILED from last_exc
 
-    async def list_quizzes(self, user_id: uuid.UUID) -> list[Quiz]:
-        return await self._quizzes.list_for_user(user_id)
+    async def list_quizzes(self, user_id: uuid.UUID, limit: int, offset: int) -> tuple[list[Quiz], int]:
+        quizzes = await self._quizzes.list_for_user(user_id, limit=limit, offset=offset)
+        total = await self._quizzes.count_for_user(user_id)
+        return quizzes, total
 
     async def get_quiz_with_questions(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID
@@ -176,7 +178,7 @@ class QuizService:
         같은 퀴즈를 다시 풀어서 맞혔다면 더 이상 오답노트에 나오지 않는다(최신 제출
         기준이라서). 새 테이블 없이 기존 Quiz/QuizAttempt/QuizAnswer만으로 계산한다.
         """
-        quizzes = await self._quizzes.list_for_user(user_id)
+        quizzes = await self._quizzes.list_all_for_user(user_id)
         entries: list[tuple[Quiz, QuizQuestion, QuizAnswer]] = []
         for quiz in quizzes:
             attempt = await self._attempts.get_latest_for_quiz(quiz.id, user_id)

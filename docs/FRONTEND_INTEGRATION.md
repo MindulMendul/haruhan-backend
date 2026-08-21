@@ -226,12 +226,14 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/quizzes` | 생성 (아래 참고) |
-| GET | `/quizzes` | 목록 |
+| GET | `/quizzes` | 내 퀴즈 목록 (페이지네이션, 3-1과 동일한 방식) |
 | GET | `/quizzes/{id}` | 상세 — **정답/해설 미노출** |
 | POST | `/quizzes/{id}/submit` | 답안 제출 → 채점 |
 | GET | `/quizzes/{id}/result` | 마지막 제출 결과 재조회 |
 | GET | `/quizzes/{id}/attempts` | 재도전 이력 전체 (아래 참고) |
 | GET | `/quizzes/wrong-answers` | 오답노트 (아래 참고) |
+
+목록 조회는 3-1(학습 채팅)과 동일하게 `?limit=20&offset=0` 쿼리 파라미터를 받고(`limit` 기본 20, 최대 100), 전체 개수는 `X-Total-Count` 응답 헤더로 옵니다.
 
 생성 요청:
 ```json
