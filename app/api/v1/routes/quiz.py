@@ -39,6 +39,8 @@ async def create_quiz(
     current_user: User = Depends(get_current_user),
     quiz_service: QuizService = Depends(get_quiz_service),
 ) -> QuizResponse:
+    # question_count는 요청 스키마의 model_validator가 None이면 기본값으로 채워둔다.
+    assert payload.question_count is not None
     quiz = await quiz_service.create_quiz(
         user_id=current_user.id,
         title=payload.title,

@@ -18,6 +18,9 @@ jobs:
       - name: Install dependencies
         run: pip install --no-cache-dir -r requirements-dev.txt
 
+      - name: Type check (mypy)
+        run: mypy app tests
+
       - name: Run tests
         run: pytest -v --cov=app
 

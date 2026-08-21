@@ -46,7 +46,9 @@ class AuthService:
 
     async def login(self, email: str, password: str) -> TokenResponse:
         user = await self._users.get_by_email(email)
-        if user is None or not verify_password(password, user.hashed_password):
+        # 게스트는 email이 없어 여기 도달할 일이 없지만(hashed_password도 항상 None),
+        # 방어적으로 명시 검사한다.
+        if user is None or user.hashed_password is None or not verify_password(password, user.hashed_password):
             raise _INVALID_CREDENTIALS
 
         tokens = await self._issue_tokens(user)

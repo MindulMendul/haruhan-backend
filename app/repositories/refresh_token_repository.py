@@ -46,4 +46,6 @@ class RefreshTokenRepository:
         이미 재사용 불가능한 상태라 남겨둘 이유가 없다."""
         result = await self._session.execute(delete(RefreshToken).where(RefreshToken.expires_at < utcnow_naive()))
         await self._session.commit()
-        return result.rowcount
+        # DELETE 실행 결과는 실제로 CursorResult라 rowcount가 있다 - mypy 스텁이 이 경우
+        # 반환 타입을 Result[Any]로만 좁혀서 생기는 오탐이다.
+        return result.rowcount  # type: ignore[attr-defined]

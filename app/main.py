@@ -54,7 +54,9 @@ def create_app() -> FastAPI:
     )
 
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # slowapi 핸들러 시그니처가 starlette의 범용 예외 핸들러 타입보다 좁게 잡혀 있어
+    # 생기는 오탐이다 (slowapi/starlette 생태계에서 흔히 쓰이는 정상 패턴).
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
     app.add_middleware(
         CORSMiddleware,

@@ -99,6 +99,7 @@ class InterviewReviewService:
         # 정답/피드백은 content에 의존하므로, content가 실제로 바뀔 때만 다시 생성한다.
         content_changed = content is not None and content != review.content
         if content_changed:
+            assert content is not None  # content_changed가 True면 content는 항상 not None
             feedback = await self._generate_feedback(review.company, review.position, content, review.model)
             review.content = content
             review.ai_feedback = feedback

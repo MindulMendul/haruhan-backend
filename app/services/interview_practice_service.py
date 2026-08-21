@@ -88,6 +88,13 @@ def _build_final_feedback_prompt(topic: str, question: str, answer: str, groundi
     )
 
 
+def _as_answered_qa(turn: InterviewPracticeTurn) -> tuple[str, str, str]:
+    """answer/feedback이 채워진 turn만 넘어온다는 걸 호출부에서 필터링으로 보장한다 -
+    ORM 컬럼 타입 자체는 nullable이라 mypy가 그 보장을 못 봐서 명시적으로 좁혀준다."""
+    assert turn.answer is not None and turn.feedback is not None
+    return turn.question, turn.answer, turn.feedback
+
+
 def _build_overall_feedback_prompt(
     topic: str, qa_pairs: list[tuple[str, str, str]], grounding: str
 ) -> str:
@@ -238,7 +245,7 @@ class InterviewPracticeService:
         grounding = _build_grounding_section(relevant_chunks)
 
         prompt = _build_overall_feedback_prompt(
-            practice_session.topic, [(t.question, t.answer, t.feedback) for t in answered_turns], grounding
+            practice_session.topic, [_as_answered_qa(t) for t in answered_turns], grounding
         )
         try:
             overall_feedback = await self._ollama.chat(

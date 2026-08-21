@@ -11,7 +11,7 @@ class UserResponse(BaseModel):
     email: EmailStr | None
     created_at: datetime
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # pydantic v2 computed_field + property, mypy plugin gap
     @property
     def is_guest(self) -> bool:
         return self.email is None

@@ -84,6 +84,9 @@ class QuizService:
                     detail="학습 세션에 메시지가 없어 퀴즈를 생성할 수 없습니다.",
                 )
 
+        # 둘 중 하나는 반드시 있어야 한다는 건 요청 스키마(QuizCreateRequest)가 이미
+        # 검증했다 - study_session_id 분기에서 못 채웠다면 source_text가 채워져 있어야 함.
+        assert source_text is not None
         prompt = _build_quiz_prompt(source_text, question_count)
         generated = await self._generate_quiz(prompt, model)
 
