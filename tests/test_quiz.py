@@ -292,3 +292,76 @@ def test_other_user_cannot_access_quiz(client):
 
     response = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token_b))
     assert response.status_code == 404
+
+
+def test_wrong_answer_notebook_lists_wrong_questions(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "오답노트 테스트", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    questions = detail.json()["questions"]
+
+    client.post(
+        f"/api/v1/quizzes/{quiz_id}/submit",
+        json={
+            "answers": [
+                {"question_id": questions[0]["id"], "selected_index": 1},  # 정답
+                {"question_id": questions[1]["id"], "selected_index": 0},  # 오답
+            ]
+        },
+        headers=_auth_headers(token),
+    )
+
+    notebook = client.get("/api/v1/quizzes/wrong-answers", headers=_auth_headers(token))
+    assert notebook.status_code == 200
+    entries = notebook.json()["entries"]
+    assert len(entries) == 1
+    assert entries[0]["quiz_id"] == quiz_id
+    assert entries[0]["question_id"] == questions[1]["id"]
+    assert entries[0]["selected_index"] == 0
+    assert entries[0]["correct_answer"] == "다"
+
+
+def test_wrong_answer_notebook_excludes_questions_fixed_on_retake(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "재도전 테스트", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    questions = detail.json()["questions"]
+
+    wrong_answers = {
+        "answers": [
+            {"question_id": questions[0]["id"], "selected_index": 1},
+            {"question_id": questions[1]["id"], "selected_index": 0},
+        ]
+    }
+    client.post(f"/api/v1/quizzes/{quiz_id}/submit", json=wrong_answers, headers=_auth_headers(token))
+
+    # 재도전: 이번엔 전부 맞춘다.
+    correct_answers = {
+        "answers": [
+            {"question_id": questions[0]["id"], "selected_index": 1},
+            {"question_id": questions[1]["id"], "selected_index": 2},
+        ]
+    }
+    client.post(f"/api/v1/quizzes/{quiz_id}/submit", json=correct_answers, headers=_auth_headers(token))
+
+    notebook = client.get("/api/v1/quizzes/wrong-answers", headers=_auth_headers(token))
+    assert notebook.json()["entries"] == []
+
+
+def test_wrong_answer_notebook_empty_when_no_attempts(client):
+    token = _signup_and_get_token(client)
+    notebook = client.get("/api/v1/quizzes/wrong-answers", headers=_auth_headers(token))
+    assert notebook.status_code == 200
+    assert notebook.json()["entries"] == []

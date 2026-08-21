@@ -16,6 +16,8 @@ from app.schemas.quiz import (
     QuizResponse,
     QuizResultResponse,
     QuizSubmitRequest,
+    WrongAnswerEntry,
+    WrongAnswerNotebookResponse,
 )
 from app.services.ollama_service import OllamaService
 from app.services.quiz_service import QuizService
@@ -59,6 +61,30 @@ async def list_quizzes(
 ) -> list[QuizResponse]:
     quizzes = await quiz_service.list_quizzes(user_id=current_user.id)
     return [QuizResponse.model_validate(q) for q in quizzes]
+
+
+@router.get("/wrong-answers", response_model=WrongAnswerNotebookResponse)
+async def get_wrong_answer_notebook(
+    current_user: User = Depends(get_current_user),
+    quiz_service: QuizService = Depends(get_quiz_service),
+) -> WrongAnswerNotebookResponse:
+    """내가 만든 모든 퀴즈에서, 퀴즈별 최근 제출 기준으로 틀린 문제만 모아 보여준다."""
+    entries = await quiz_service.get_wrong_answer_notebook(user_id=current_user.id)
+    return WrongAnswerNotebookResponse(
+        entries=[
+            WrongAnswerEntry(
+                quiz_id=quiz.id,
+                quiz_title=quiz.title,
+                question_id=question.id,
+                question_text=question.question_text,
+                choices=question.choices,
+                selected_index=answer.selected_index,
+                correct_answer=question.correct_answer,
+                explanation=question.explanation,
+            )
+            for quiz, question, answer in entries
+        ]
+    )
 
 
 @router.get("/{quiz_id}", response_model=QuizDetailResponse)

@@ -201,6 +201,7 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 | GET | `/quizzes/{id}` | 상세 — **정답/해설 미노출** |
 | POST | `/quizzes/{id}/submit` | 답안 제출 → 채점 |
 | GET | `/quizzes/{id}/result` | 마지막 제출 결과 재조회 |
+| GET | `/quizzes/wrong-answers` | 오답노트 (아래 참고) |
 
 생성 요청:
 ```json
@@ -223,6 +224,25 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 { "answers": [{ "question_id": "uuid", "selected_index": 1 }, ...] }
 ```
 — **모든 문항에 정확히 한 번씩** 답해야 함 (누락/중복 시 `400`). 결과 응답엔 `correct_answer`/`explanation`이 포함됨.
+
+#### 3-2-1. 오답노트
+
+```
+GET /api/v1/quizzes/wrong-answers
+```
+→ `200`
+```json
+{
+  "entries": [
+    {
+      "quiz_id": "uuid", "quiz_title": "OS 퀴즈",
+      "question_id": "uuid", "question_text": "...", "choices": ["A","B","C","D"],
+      "selected_index": 0, "correct_answer": "B", "explanation": "..."
+    }
+  ]
+}
+```
+내가 만든 모든 퀴즈를 통틀어, **퀴즈별 가장 최근 제출 기준**으로 틀린 문제만 모아서 보여줍니다. 같은 퀴즈를 다시 풀어서 맞히면 그 문제는 오답노트에서 바로 빠집니다. 별도 페이지네이션은 없음(개인 학습 데이터라 규모가 크지 않을 거라 가정).
 
 ### 3-3. 면접 연습 (`/api/v1/interview/practice-sessions`)
 

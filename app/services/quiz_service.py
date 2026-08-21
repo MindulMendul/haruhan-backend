@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.quiz import Quiz
+from app.db.models.quiz_answer import QuizAnswer
 from app.db.models.quiz_attempt import QuizAttempt
 from app.db.models.quiz_question import QuizQuestion
 from app.repositories.quiz_attempt_repository import QuizAnswerRepository, QuizAttemptRepository
@@ -145,6 +146,30 @@ class QuizService:
             raise _QUIZ_NOT_FOUND
         questions = await self._questions.list_for_quiz(quiz_id)
         return quiz, questions
+
+    async def get_wrong_answer_notebook(
+        self, user_id: uuid.UUID
+    ) -> list[tuple[Quiz, QuizQuestion, QuizAnswer]]:
+        """사용자의 모든 퀴즈에서, 퀴즈별 가장 최근 제출 기준으로 틀린 문제만 모은다.
+
+        같은 퀴즈를 다시 풀어서 맞혔다면 더 이상 오답노트에 나오지 않는다(최신 제출
+        기준이라서). 새 테이블 없이 기존 Quiz/QuizAttempt/QuizAnswer만으로 계산한다.
+        """
+        quizzes = await self._quizzes.list_for_user(user_id)
+        entries: list[tuple[Quiz, QuizQuestion, QuizAnswer]] = []
+        for quiz in quizzes:
+            attempt = await self._attempts.get_latest_for_quiz(quiz.id, user_id)
+            if attempt is None:
+                continue
+            wrong_answers = [a for a in await self._answers.list_for_attempt(attempt.id) if not a.is_correct]
+            if not wrong_answers:
+                continue
+            questions_by_id = {q.id: q for q in await self._questions.list_for_quiz(quiz.id)}
+            for answer in wrong_answers:
+                question = questions_by_id.get(answer.question_id)
+                if question is not None:
+                    entries.append((quiz, question, answer))
+        return entries
 
     async def submit_answers(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID, answers: list[tuple[uuid.UUID, int]]

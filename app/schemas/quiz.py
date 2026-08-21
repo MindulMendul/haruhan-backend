@@ -79,3 +79,18 @@ class QuizResultResponse(BaseModel):
     total: int
     submitted_at: datetime
     answers: list[QuizAnswerResult]
+
+
+class WrongAnswerEntry(BaseModel):
+    quiz_id: uuid.UUID
+    quiz_title: str
+    question_id: uuid.UUID
+    question_text: str
+    choices: list[str]
+    selected_index: int
+    correct_answer: str
+    explanation: str
+
+
+class WrongAnswerNotebookResponse(BaseModel):
+    entries: list[WrongAnswerEntry]
