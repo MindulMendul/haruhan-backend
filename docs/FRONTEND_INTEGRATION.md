@@ -232,6 +232,7 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 | POST | `/quizzes/{id}/submit` | 답안 제출 → 채점 |
 | GET | `/quizzes/{id}/result` | 마지막 제출 결과 재조회 |
 | GET | `/quizzes/{id}/attempts` | 재도전 이력 전체 (아래 참고) |
+| DELETE | `/quizzes/{id}` | 퀴즈 삭제 → `204` (문항/제출 이력도 함께 삭제) |
 | GET | `/quizzes/wrong-answers` | 오답노트 (아래 참고) |
 
 목록 조회는 3-1(학습 채팅)과 동일하게 `?limit=20&offset=0` 쿼리 파라미터를 받고(`limit` 기본 20, 최대 100), 전체 개수는 `X-Total-Count` 응답 헤더로 옵니다.

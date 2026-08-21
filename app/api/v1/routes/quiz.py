@@ -141,6 +141,15 @@ async def submit_quiz(
     )
 
 
+@router.delete("/{quiz_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_quiz(
+    quiz_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    quiz_service: QuizService = Depends(get_quiz_service),
+) -> None:
+    await quiz_service.delete_quiz(quiz_id=quiz_id, user_id=current_user.id)
+
+
 @router.get("/{quiz_id}/attempts", response_model=list[QuizAttemptSummary])
 async def list_quiz_attempts(
     quiz_id: uuid.UUID,

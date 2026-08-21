@@ -276,6 +276,17 @@ class QuizService:
             raise _QUIZ_NOT_FOUND
         return await self._attempts.list_for_quiz(quiz_id, user_id)
 
+    async def delete_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        quiz = await self._quizzes.get_for_user(quiz_id, user_id)
+        if quiz is None:
+            raise _QUIZ_NOT_FOUND
+        await self._quizzes.delete(quiz)
+        await self._session.commit()
+        # source_text를 직접 붙여넣어 만든 퀴즈라면 RAG에 색인돼 있었을 수 있다
+        # (study_session에서 만든 퀴즈는 원본 메시지 쪽에 이미 색인돼 있어 여기
+        # 색인된 게 없다 - forget_content는 없는 걸 지워도 안전하다).
+        await self._rag.forget_content(source_type="quiz_source", source_id=quiz_id)
+
     async def get_latest_result(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID
     ) -> tuple[QuizAttempt, list[tuple]]:

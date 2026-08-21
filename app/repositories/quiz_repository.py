@@ -47,6 +47,10 @@ class QuizRepository:
         )
         return result.scalar_one_or_none()
 
+    async def delete(self, quiz: Quiz) -> None:
+        await self._session.delete(quiz)
+        await self._session.flush()
+
 
 class QuizQuestionRepository:
     def __init__(self, session: AsyncSession) -> None:

@@ -227,3 +227,16 @@
       검증, 존재하지 않거나 남의 세션이면 404)를 추가해 제목만 가볍게
       바꿀 수 있게 함. 세션의 실질 데이터(메시지 히스토리)는 제목과
       무관하므로 재생성 로직은 필요 없어 면접복기의 PATCH보다 훨씬 단순함.
+
+## 백로그 (11라운드)
+
+- [x] 35. 퀴즈 삭제 API — 학습챗 세션(`DELETE /study/sessions/{id}`)과
+      면접복기(`DELETE /interview/reviews/{id}`)는 이미 삭제를 지원하는데
+      퀴즈만 삭제 방법이 없었음(반복 생성으로 계속 쌓이기만 함). `DELETE
+      /quizzes/{id}` 추가 - 문항(QuizQuestion)/제출 이력(QuizAttempt)/
+      답안(QuizAnswer)은 전부 `ondelete=CASCADE`로 이미 걸려있어(24번
+      항목에서 고친 SQLite FK 강제 활성화 덕에 테스트 환경에서도 동작)
+      Quiz 로우만 지우면 자동으로 함께 삭제됨. source_text를 직접
+      붙여넣어 만든 퀴즈는 RAG에 색인돼 있을 수 있어 `forget_content`도
+      같이 호출(study_session에서 만든 퀴즈는 애초에 색인된 게 없어
+      안전하게 no-op).
