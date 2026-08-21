@@ -245,6 +245,77 @@ def test_submit_and_get_result(client):
     assert result.json()["score"] == 1
 
 
+def test_resubmitting_identical_answers_quickly_returns_same_attempt(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "중복 제출 테스트", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    questions = detail.json()["questions"]
+    answers = [
+        {"question_id": questions[0]["id"], "selected_index": 1},
+        {"question_id": questions[1]["id"], "selected_index": 0},
+    ]
+
+    first = client.post(
+        f"/api/v1/quizzes/{quiz_id}/submit", json={"answers": answers}, headers=_auth_headers(token)
+    )
+    assert first.status_code == 200
+
+    # 네트워크 재시도 등으로 완전히 같은 답안이 곧바로 다시 제출된 상황을 흉내낸다.
+    second = client.post(
+        f"/api/v1/quizzes/{quiz_id}/submit", json={"answers": answers}, headers=_auth_headers(token)
+    )
+    assert second.status_code == 200
+    assert second.json()["attempt_id"] == first.json()["attempt_id"]
+    assert second.json() == first.json()
+
+
+def test_resubmitting_different_answers_quickly_creates_new_attempt(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "정상 재시도 테스트", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    questions = detail.json()["questions"]
+
+    first = client.post(
+        f"/api/v1/quizzes/{quiz_id}/submit",
+        json={
+            "answers": [
+                {"question_id": questions[0]["id"], "selected_index": 1},
+                {"question_id": questions[1]["id"], "selected_index": 0},
+            ]
+        },
+        headers=_auth_headers(token),
+    )
+    assert first.status_code == 200
+
+    # 답이 다르면(진짜로 다시 푼 것) 짧은 시간 안이어도 새 시도로 기록돼야 한다.
+    second = client.post(
+        f"/api/v1/quizzes/{quiz_id}/submit",
+        json={
+            "answers": [
+                {"question_id": questions[0]["id"], "selected_index": 1},
+                {"question_id": questions[1]["id"], "selected_index": 2},
+            ]
+        },
+        headers=_auth_headers(token),
+    )
+    assert second.status_code == 200
+    assert second.json()["attempt_id"] != first.json()["attempt_id"]
+
+
 def test_submit_requires_all_questions_answered(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

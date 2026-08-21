@@ -1,11 +1,13 @@
 import json
 import logging
 import uuid
+from datetime import timedelta
 
 from fastapi import HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import utcnow_naive
 from app.core.metrics import quiz_created_total
 from app.db.models.quiz import Quiz
 from app.db.models.quiz_answer import QuizAnswer
@@ -20,6 +22,9 @@ from app.services.ollama_service import OllamaService, OllamaServiceError
 logger = logging.getLogger(__name__)
 
 _MAX_QUIZ_GENERATION_ATTEMPTS = 2
+# 네트워크 재시도 등으로 완전히 같은 답안이 이 시간 안에 다시 제출되면 새로 채점하지
+# 않고 직전 결과를 그대로 돌려준다 (QuizAttempt 중복 생성 방지).
+_DUPLICATE_SUBMISSION_WINDOW = timedelta(seconds=5)
 
 
 class _GeneratedQuestion(BaseModel):
@@ -188,13 +193,18 @@ class QuizService:
             raise HTTPException(status_code=400, detail="중복된 문항 답안이 있습니다.")
         if set(submitted_ids) != set(questions_by_id.keys()):
             raise HTTPException(status_code=400, detail="모든 문항에 정확히 한 번씩 답해야 합니다.")
+        for question_id, selected_index in answers:
+            if not (0 <= selected_index < len(questions_by_id[question_id].choices)):
+                raise HTTPException(status_code=400, detail="선택지 인덱스가 올바르지 않습니다.")
+
+        duplicate = await self._find_recent_duplicate_attempt(quiz_id, user_id, answers, questions_by_id)
+        if duplicate is not None:
+            return duplicate
 
         graded: list[tuple[QuizQuestion, int, bool]] = []
         score = 0
         for question_id, selected_index in answers:
             question = questions_by_id[question_id]
-            if not (0 <= selected_index < len(question.choices)):
-                raise HTTPException(status_code=400, detail="선택지 인덱스가 올바르지 않습니다.")
             is_correct = question.choices[selected_index] == question.correct_answer
             if is_correct:
                 score += 1
@@ -212,6 +222,34 @@ class QuizService:
             )
         await self._session.commit()
         return attempt, graded
+
+    async def _find_recent_duplicate_attempt(
+        self,
+        quiz_id: uuid.UUID,
+        user_id: uuid.UUID,
+        answers: list[tuple[uuid.UUID, int]],
+        questions_by_id: dict[uuid.UUID, QuizQuestion],
+    ) -> tuple[QuizAttempt, list[tuple[QuizQuestion, int, bool]]] | None:
+        """네트워크 재시도 등으로 완전히 같은 답안 조합이 짧은 시간 안에 다시 제출되면,
+        새로 채점/저장하지 않고 직전 제출 결과를 그대로 반환한다 (QuizAttempt 중복
+        생성 방지). Idempotency-Key 헤더 같은 별도 메커니즘 없이, 가장 최근 제출과
+        완전히 같은 답안이 짧은 시간 안에 다시 오는 경우만 잡아내는 단순한 접근이다 -
+        사용자가 퀴즈를 실제로 다시 풀어서 제출한 경우(시간이 지났거나 답이 다름)는
+        정상적으로 새 시도로 기록된다.
+        """
+        latest = await self._attempts.get_latest_for_quiz(quiz_id, user_id)
+        if latest is None or utcnow_naive() - latest.submitted_at > _DUPLICATE_SUBMISSION_WINDOW:
+            return None
+
+        previous_answers = await self._answers.list_for_attempt(latest.id)
+        if {a.question_id: a.selected_index for a in previous_answers} != dict(answers):
+            return None
+
+        graded = [
+            (questions_by_id[a.question_id], a.selected_index, a.is_correct)
+            for a in previous_answers
+        ]
+        return latest, graded
 
     async def get_latest_result(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID
