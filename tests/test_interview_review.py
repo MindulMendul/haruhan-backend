@@ -100,6 +100,33 @@ def test_list_and_get_review(client):
     assert detail.json()["id"] == review_id
 
 
+def test_list_reviews_pagination(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    for i in range(5):
+        client.post(
+            "/api/v1/interview/reviews",
+            json=_create_payload(company=f"회사{i}"),
+            headers=_auth_headers(token),
+        )
+
+    first_page = client.get(
+        "/api/v1/interview/reviews?limit=2&offset=0", headers=_auth_headers(token)
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert first_page.headers["X-Total-Count"] == "5"
+
+    second_page = client.get(
+        "/api/v1/interview/reviews?limit=2&offset=2", headers=_auth_headers(token)
+    )
+    assert len(second_page.json()) == 2
+
+    first_ids = {r["id"] for r in first_page.json()}
+    second_ids = {r["id"] for r in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
 def test_update_without_content_keeps_feedback(client):
     fake = FakeOllamaService()
     client.app.dependency_overrides[get_ollama_service] = lambda: fake

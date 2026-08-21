@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -49,10 +49,14 @@ async def create_review(
 
 @router.get("", response_model=list[InterviewReviewResponse])
 async def list_reviews(
+    response: Response,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     service: InterviewReviewService = Depends(get_interview_review_service),
 ) -> list[InterviewReviewResponse]:
-    reviews = await service.list_reviews(user_id=current_user.id)
+    reviews, total = await service.list_reviews(user_id=current_user.id, limit=limit, offset=offset)
+    response.headers["X-Total-Count"] = str(total)
     return [InterviewReviewResponse.model_validate(r) for r in reviews]
 
 

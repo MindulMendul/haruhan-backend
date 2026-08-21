@@ -148,12 +148,16 @@ PATCH /api/v1/users/me
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/study/sessions` | `{ "title": "...", "model"?: "qwen2.5:3b" }` → 세션 생성 |
-| GET | `/study/sessions` | 내 세션 목록 |
+| GET | `/study/sessions` | 내 세션 목록 (페이지네이션, 아래 참고) |
 | GET | `/study/sessions/{id}` | 세션 상세 + 메시지 히스토리 |
 | DELETE | `/study/sessions/{id}` | 세션 삭제 → `204` |
 | POST | `/study/sessions/{id}/messages` | `{ "content": "..." }` → `{ user_message, assistant_message }` |
 
 메시지 전송은 LLM 호출이라 레이트리밋(`chat_rate_limit`, 기본 분당 10회) 적용됨.
+
+목록 조회는 `?limit=20&offset=0` 쿼리 파라미터를 받음(`limit` 기본 20, 최대 100). 응답 바디는
+그대로 배열이고, 전체 개수는 `X-Total-Count` 응답 헤더로 옴 — 다음 페이지가 있는지는
+`받은 개수 + offset < X-Total-Count`로 판단하면 됨.
 
 ### 3-2. 퀴즈 (`/api/v1/quizzes`)
 
@@ -192,7 +196,7 @@ PATCH /api/v1/users/me
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/interview/practice-sessions` | `{ "topic": "백엔드 개발자", "model"?: ... }` → 생성, 첫 질문 자동 포함 |
-| GET | `/interview/practice-sessions` | 목록 |
+| GET | `/interview/practice-sessions` | 목록 (페이지네이션 없음 — 필요해지면 3-1처럼 추가 예정) |
 | GET | `/interview/practice-sessions/{id}` | 상세 (질문/답변/피드백 turns 배열) |
 | POST | `/interview/practice-sessions/{id}/answers` | `{ "answer": "..." }` → 피드백 + 다음 질문 |
 | POST | `/interview/practice-sessions/{id}/complete` | 종료 → 종합 피드백 생성 |
@@ -213,7 +217,7 @@ PATCH /api/v1/users/me
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/interview/reviews` | `{ company, position, interview_date(YYYY-MM-DD), content, model? }` → 생성 시 AI 피드백 즉시 생성 |
-| GET | `/interview/reviews` | 목록 |
+| GET | `/interview/reviews` | 목록 (페이지네이션, 3-1과 동일한 방식) |
 | GET | `/interview/reviews/{id}` | 상세 |
 | PATCH | `/interview/reviews/{id}` | 부분 수정. **`content`를 실제로 바꿀 때만 피드백 재생성** (company/position/date만 바꾸면 기존 피드백 유지) |
 | DELETE | `/interview/reviews/{id}` | 삭제 → `204` |

@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -45,10 +45,16 @@ async def create_session(
 
 @router.get("", response_model=list[StudySessionResponse])
 async def list_sessions(
+    response: Response,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     study_service: StudyService = Depends(get_study_service),
 ) -> list[StudySessionResponse]:
-    sessions = await study_service.list_sessions(user_id=current_user.id)
+    sessions, total = await study_service.list_sessions(
+        user_id=current_user.id, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
     return [StudySessionResponse.model_validate(s) for s in sessions]
 
 

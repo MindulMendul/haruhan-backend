@@ -63,8 +63,12 @@ class InterviewReviewService:
         )
         return review
 
-    async def list_reviews(self, user_id: uuid.UUID) -> list[InterviewReview]:
-        return await self._reviews.list_for_user(user_id)
+    async def list_reviews(
+        self, user_id: uuid.UUID, limit: int, offset: int
+    ) -> tuple[list[InterviewReview], int]:
+        reviews = await self._reviews.list_for_user(user_id, limit=limit, offset=offset)
+        total = await self._reviews.count_for_user(user_id)
+        return reviews, total
 
     async def get_review(self, review_id: uuid.UUID, user_id: uuid.UUID) -> InterviewReview:
         review = await self._reviews.get_for_user(review_id, user_id)

@@ -43,6 +43,40 @@ def test_create_and_list_sessions(client):
     assert len(listing.json()) == 1
 
 
+def test_list_sessions_pagination(client):
+    token = _signup_and_get_token(client)
+    for i in range(5):
+        client.post(
+            "/api/v1/study/sessions", json={"title": f"세션 {i}"}, headers=_auth_headers(token)
+        )
+
+    first_page = client.get(
+        "/api/v1/study/sessions?limit=2&offset=0", headers=_auth_headers(token)
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert first_page.headers["X-Total-Count"] == "5"
+
+    second_page = client.get(
+        "/api/v1/study/sessions?limit=2&offset=2", headers=_auth_headers(token)
+    )
+    assert len(second_page.json()) == 2
+
+    first_ids = {s["id"] for s in first_page.json()}
+    second_ids = {s["id"] for s in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_list_sessions_default_pagination_returns_all_when_under_limit(client):
+    token = _signup_and_get_token(client)
+    client.post("/api/v1/study/sessions", json={"title": "세션"}, headers=_auth_headers(token))
+
+    listing = client.get("/api/v1/study/sessions", headers=_auth_headers(token))
+    assert listing.status_code == 200
+    assert len(listing.json()) == 1
+    assert listing.headers["X-Total-Count"] == "1"
+
+
 def test_session_requires_auth(client):
     response = client.get("/api/v1/study/sessions")
     assert response.status_code == 401

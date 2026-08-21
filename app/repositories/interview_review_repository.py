@@ -1,7 +1,7 @@
 import uuid
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.interview_review import InterviewReview
@@ -32,13 +32,21 @@ class InterviewReviewRepository:
         await self._session.flush()
         return review
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[InterviewReview]:
+    async def list_for_user(self, user_id: uuid.UUID, limit: int, offset: int) -> list[InterviewReview]:
         result = await self._session.execute(
             select(InterviewReview)
             .where(InterviewReview.user_id == user_id)
             .order_by(InterviewReview.interview_date.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def count_for_user(self, user_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count()).select_from(InterviewReview).where(InterviewReview.user_id == user_id)
+        )
+        return result.scalar_one()
 
     async def get_for_user(self, review_id: uuid.UUID, user_id: uuid.UUID) -> InterviewReview | None:
         result = await self._session.execute(

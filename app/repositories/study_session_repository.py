@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -17,13 +17,21 @@ class StudySessionRepository:
         await self._session.flush()
         return study_session
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[StudySession]:
+    async def list_for_user(self, user_id: uuid.UUID, limit: int, offset: int) -> list[StudySession]:
         result = await self._session.execute(
             select(StudySession)
             .where(StudySession.user_id == user_id)
             .order_by(StudySession.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def count_for_user(self, user_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count()).select_from(StudySession).where(StudySession.user_id == user_id)
+        )
+        return result.scalar_one()
 
     async def get_for_user(self, session_id: uuid.UUID, user_id: uuid.UUID) -> StudySession | None:
         result = await self._session.execute(
