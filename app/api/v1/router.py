@@ -7,15 +7,17 @@ from app.api.v1.routes import (
     health,
     interview_practice,
     interview_review,
+    metrics,
     models,
     quiz,
     study,
     users,
 )
 
-# 헬스체크는 버전 없이 루트에 둔다 (k8s/로드밸런서 probe 관례).
+# 헬스체크/메트릭은 버전 없이 루트에 둔다 (k8s probe, Prometheus 스크레이프 관례).
 api_router = APIRouter()
 api_router.include_router(health.router)
+api_router.include_router(metrics.router)
 
 v1_router = APIRouter(prefix="/api/v1")
 v1_router.include_router(auth.router)

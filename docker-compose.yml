@@ -40,6 +40,38 @@ services:
     networks:
       - haruhan-net
 
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: haruhan-prometheus
+    restart: unless-stopped
+    # haruhan-backend의 /metrics를 스크레이프한다. 대시보드 UI는 아직 아무도 안 쓰므로
+    # 외부 포트는 열지 않는다 (필요하면 SSH 터널로 접근).
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - haruhan-backend
+    networks:
+      - haruhan-net
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: haruhan-grafana
+    restart: unless-stopped
+    # Prometheus 데이터소스는 자동 프로비저닝되지만, 대시보드 패널 구성은 사람이
+    # 직접 만든다 (이번 자동화 범위 밖). 사람이 실제로 들여다볼 UI라 호스트 포트를 연다.
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - haruhan-net
+
   caddy:
     image: caddy:2-alpine
     container_name: haruhan-caddy
@@ -74,3 +106,6 @@ volumes:
   # (없으면 재배포 때마다 인증서를 새로 발급받으려다 rate limit에 걸릴 수 있음).
   caddy_data:
   caddy_config:
+  # 시계열 데이터/대시보드 설정도 재배포 후에 유지되도록 볼륨에 저장한다.
+  prometheus_data:
+  grafana_data:

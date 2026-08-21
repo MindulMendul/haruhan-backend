@@ -56,7 +56,7 @@
 - [x] 16. 데이터 export(JSON) — 사용자가 자기 학습챗/퀴즈/면접 기록을
       JSON으로 내보낼 수 있는 엔드포인트. PDF는 이번 라운드 범위 밖(별도
       라이브러리 의존성 검토 필요) - JSON만.
-- [ ] 17. Prometheus 메트릭 + Grafana — FastAPI에 `/metrics` 엔드포인트를
+- [x] 17. Prometheus 메트릭 + Grafana — FastAPI에 `/metrics` 엔드포인트를
       노출(요청 수/지연시간/상태코드 등 기본 메트릭 + 가능하면 회원가입/게스트
       전환/퀴즈 생성 같은 비즈니스 카운터 몇 개). docker-compose에 prometheus,
       grafana 서비스 추가하고 prometheus가 haruhan-backend의 /metrics를

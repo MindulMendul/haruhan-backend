@@ -10,6 +10,7 @@ from slowapi.errors import RateLimitExceeded
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.metrics import MetricsMiddleware
 from app.core.middleware import AccessLogMiddleware, MaxBodySizeMiddleware, SecurityHeadersMiddleware
 from app.core.rate_limit import limiter
 from app.core.scheduler import scheduler, setup_scheduler_jobs
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.add_middleware(MaxBodySizeMiddleware, max_body_size=settings.max_body_size_bytes)
     # 응답 헤더/본문 크기 검사까지 포함한 전체 왕복 시간을 재기 위해 가장 바깥쪽에 둔다.
     app.add_middleware(AccessLogMiddleware)
+    app.add_middleware(MetricsMiddleware)
 
     app.include_router(api_router)
 

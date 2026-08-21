@@ -1,6 +1,7 @@
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics import guest_conversions_total
 from app.core.password import PasswordTooLongError, hash_password, verify_password
 from app.db.models.user import User
 from app.repositories.user_repository import UserRepository
@@ -60,4 +61,5 @@ class UserService:
         user.email = email
 
         await self._session.commit()
+        guest_conversions_total.inc()
         return user

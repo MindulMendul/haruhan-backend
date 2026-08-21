@@ -2,6 +2,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.metrics import user_signups_total
 from app.core.password import PasswordTooLongError, hash_password, verify_password
 from app.core.tokens import (
     create_access_token,
@@ -42,6 +43,7 @@ class AuthService:
         user = await self._users.create(email=email, hashed_password=hashed)
         tokens = await self._issue_tokens(user)
         await self._session.commit()
+        user_signups_total.inc()
         return tokens
 
     async def login(self, email: str, password: str) -> TokenResponse:

@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics import quiz_created_total
 from app.db.models.quiz import Quiz
 from app.db.models.quiz_answer import QuizAnswer
 from app.db.models.quiz_attempt import QuizAttempt
@@ -104,6 +105,7 @@ class QuizService:
                 explanation=question.explanation,
             )
         await self._session.commit()
+        quiz_created_total.inc()
         return quiz
 
     async def _generate_quiz(self, prompt: str, model: str) -> _GeneratedQuiz:
