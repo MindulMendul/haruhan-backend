@@ -58,6 +58,36 @@ def test_signup_login_refresh_logout_flow(client):
     assert refresh_after_logout.status_code == 401
 
 
+def test_refresh_rejects_unknown_token(client):
+    response = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": "never-issued-token"}
+    )
+    assert response.status_code == 401
+
+
+def test_refresh_token_reuse_revokes_all_sessions(client):
+    signup = client.post(
+        "/api/v1/auth/signup", json={"email": "reuse@example.com", "password": "supersecret"}
+    )
+    assert signup.status_code == 201
+    tokens = signup.json()
+
+    refresh = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert refresh.status_code == 200
+    new_tokens = refresh.json()
+
+    # 탈취범이 이미 로테이션되어 폐기된 옛 토큰을 재사용 시도한다.
+    reuse = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert reuse.status_code == 401
+
+    # 재사용 탐지로 정상 사용자가 갖고 있던, 아직 한 번도 안 쓴 최신 토큰까지
+    # 강제로 끊겼어야 한다 (단순 로테이션이라면 이 토큰은 여전히 유효했을 것).
+    still_using_latest = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": new_tokens["refresh_token"]}
+    )
+    assert still_using_latest.status_code == 401
+
+
 def test_signup_duplicate_email_conflict(client):
     payload = {"email": "dup@example.com", "password": "supersecret"}
     first = client.post("/api/v1/auth/signup", json=payload)

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -18,27 +18,22 @@ class RefreshTokenRepository:
         await self._session.flush()
         return token
 
-    async def get_valid_by_hash(self, token_hash: str) -> RefreshToken | None:
-        """폐기되지 않았고 만료되지 않은 토큰만 반환한다.
-
-        만료 비교를 SQL WHERE 절에서 처리해, naive/aware datetime을 섞어
-        Python에서 직접 비교할 때 생기는 문제를 피한다.
-        """
-        result = await self._session.execute(
-            select(RefreshToken).where(
-                RefreshToken.token_hash == token_hash,
-                RefreshToken.revoked_at.is_(None),
-                RefreshToken.expires_at > utcnow_naive(),
-            )
-        )
-        return result.scalar_one_or_none()
-
     async def get_by_hash(self, token_hash: str) -> RefreshToken | None:
         result = await self._session.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
         return result.scalar_one_or_none()
 
     async def revoke(self, token: RefreshToken) -> None:
         token.revoked_at = utcnow_naive()
+        await self._session.flush()
+
+    async def revoke_all_for_user(self, user_id: uuid.UUID) -> None:
+        """이미 폐기된 토큰이 재사용되면(탈취 의심) 해당 유저의 살아있는 토큰을
+        전부 끊어서 공격자와 정상 사용자 모두 강제 로그아웃시킨다."""
+        await self._session.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=utcnow_naive())
+        )
         await self._session.flush()
 
     async def delete_expired(self) -> int:

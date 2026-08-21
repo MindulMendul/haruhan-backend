@@ -1,6 +1,7 @@
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import utcnow_naive
 from app.core.config import Settings
 from app.core.metrics import user_signups_total
 from app.core.password import PasswordTooLongError, hash_password, verify_password
@@ -59,8 +60,20 @@ class AuthService:
 
     async def refresh(self, refresh_token: str) -> TokenResponse:
         token_hash = hash_refresh_token(refresh_token)
-        stored = await self._refresh_tokens.get_valid_by_hash(token_hash)
+        stored = await self._refresh_tokens.get_by_hash(token_hash)
         if stored is None:
+            raise _INVALID_REFRESH_TOKEN
+
+        if stored.revoked_at is not None:
+            # 이미 폐기된(=한 번 로테이션됐거나 로그아웃된) 토큰이 다시 제시됐다 - 탈취
+            # 의심 신호다. 정상 사용자라면 로테이션된 최신 토큰을 쓰고 있을 테니, 이
+            # 낡은 토큰이 다시 나타났다는 건 누군가 훔쳐 쓰고 있을 가능성이 크다.
+            # 공격자와 정상 사용자 모두 강제 로그아웃시켜 세션을 안전한 상태로 되돌린다.
+            await self._refresh_tokens.revoke_all_for_user(stored.user_id)
+            await self._session.commit()
+            raise _INVALID_REFRESH_TOKEN
+
+        if stored.expires_at <= utcnow_naive():
             raise _INVALID_REFRESH_TOKEN
 
         user = await self._users.get_by_id(stored.user_id)
