@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 
 from fastapi import HTTPException, status
@@ -13,6 +14,10 @@ from app.repositories.quiz_repository import QuizQuestionRepository, QuizReposit
 from app.repositories.study_message_repository import StudyMessageRepository
 from app.repositories.study_session_repository import StudySessionRepository
 from app.services.ollama_service import OllamaService, OllamaServiceError
+
+logger = logging.getLogger(__name__)
+
+_MAX_QUIZ_GENERATION_ATTEMPTS = 2
 
 
 class _GeneratedQuestion(BaseModel):
@@ -80,20 +85,12 @@ class QuizService:
                 )
 
         prompt = _build_quiz_prompt(source_text, question_count)
-
-        try:
-            raw = await self._ollama.generate_json(prompt=prompt, model=model, schema=_QUIZ_JSON_SCHEMA)
-            generated = _GeneratedQuiz.model_validate_json(raw)
-        except (OllamaServiceError, ValidationError, json.JSONDecodeError) as exc:
-            raise _GENERATION_FAILED from exc
+        generated = await self._generate_quiz(prompt, model)
 
         quiz = await self._quizzes.create(
             user_id=user_id, title=title, source_study_session_id=study_session_id
         )
         for index, question in enumerate(generated.questions):
-            # 스키마는 구조만 보장한다 - 정답이 실제로 보기 중 하나인지는 별도로 검증해야 한다.
-            if question.correct_answer not in question.choices:
-                raise _GENERATION_FAILED
             await self._questions.create(
                 quiz_id=quiz.id,
                 order_index=index,
@@ -104,6 +101,35 @@ class QuizService:
             )
         await self._session.commit()
         return quiz
+
+    async def _generate_quiz(self, prompt: str, model: str) -> _GeneratedQuiz:
+        """모델이 스키마에 안 맞는 JSON을 뱉거나 정답이 보기에 없는 경우, 같은 프롬프트로
+        한 번 더 시도한다. Ollama 호출 자체가 실패하면(OllamaServiceError) 재시도해도
+        나아질 게 없으니 바로 실패 처리한다."""
+        last_exc: Exception = _GENERATION_FAILED
+        for attempt in range(1, _MAX_QUIZ_GENERATION_ATTEMPTS + 1):
+            try:
+                raw = await self._ollama.generate_json(prompt=prompt, model=model, schema=_QUIZ_JSON_SCHEMA)
+                generated = _GeneratedQuiz.model_validate_json(raw)
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+            except (ValidationError, json.JSONDecodeError) as exc:
+                last_exc = exc
+                logger.warning(
+                    "퀴즈 생성 JSON 파싱 실패 (시도 %d/%d): %s", attempt, _MAX_QUIZ_GENERATION_ATTEMPTS, exc
+                )
+                continue
+
+            # 스키마는 구조만 보장한다 - 정답이 실제로 보기 중 하나인지는 별도로 검증해야 한다.
+            if all(q.correct_answer in q.choices for q in generated.questions):
+                return generated
+            logger.warning(
+                "퀴즈 생성 검증 실패 (시도 %d/%d): correct_answer가 choices에 없음",
+                attempt,
+                _MAX_QUIZ_GENERATION_ATTEMPTS,
+            )
+
+        raise _GENERATION_FAILED from last_exc
 
     async def list_quizzes(self, user_id: uuid.UUID) -> list[Quiz]:
         return await self._quizzes.list_for_user(user_id)

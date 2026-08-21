@@ -60,6 +60,19 @@ class FailingOllamaService:
         raise OllamaServiceError("boom")
 
 
+class RecoversOnRetryOllamaService:
+    """첫 호출은 깨진 JSON을 뱉고, 두 번째 호출부터는 정상 응답을 준다."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    async def generate_json(self, prompt, model, schema):
+        self.call_count += 1
+        if self.call_count == 1:
+            return "not valid json {{{"
+        return SAMPLE_QUIZ_JSON
+
+
 def _signup_and_get_token(client, email="quiz@example.com"):
     response = client.post(
         "/api/v1/auth/signup", json={"email": email, "password": "supersecret"}
@@ -186,6 +199,19 @@ def test_create_quiz_answer_not_in_choices_returns_502(client):
         headers=_auth_headers(token),
     )
     assert response.status_code == 502
+
+
+def test_create_quiz_retries_once_and_recovers_from_malformed_json(client):
+    fake = RecoversOnRetryOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "재시도로 성공", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 201
+    assert fake.call_count == 2
 
 
 def test_submit_and_get_result(client):
