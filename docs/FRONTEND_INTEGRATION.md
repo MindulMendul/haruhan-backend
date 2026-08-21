@@ -204,8 +204,10 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
   비어있거나 너무 길면 이 형태로 옴).
 - 같은 연결로 여러 메시지를 계속 보낼 수 있음 (한 번 연결하면 세션 하나에 대해 대화 계속
   가능). 연결을 끊고 싶으면 그냥 소켓을 닫으면 됨.
-- ⚠️ 아직 레이트리밋이 안 걸려 있음 (slowapi가 HTTP 전용이라 WebSocket에는 별도 구현이
-  필요해서 이번엔 범위 밖으로 뺌) — 남용 방지가 필요하면 알려주세요.
+- REST 엔드포인트와 같은 `CHAT_RATE_LIMIT`(기본 10/minute, IP 기준)이 이 경로에도
+  독립적으로 적용됩니다 (REST 쪽 카운트와는 별도 버킷). 초과하면 연결이 끊기지 않고
+  `{ "type": "error", "detail": "...", "retry_after": <초> }`가 옴 - `retry_after`초
+  뒤에 다시 보내면 됨.
 
 ### 3-2. 퀴즈 (`/api/v1/quizzes`)
 

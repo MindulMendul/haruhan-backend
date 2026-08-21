@@ -1,3 +1,6 @@
+import time
+
+from limits import parse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -17,3 +20,18 @@ limiter = Limiter(
     # 레이트리밋 관련 헤더를 응답에 싣는다 (기본값 False라 명시적으로 켜야 함).
     headers_enabled=True,
 )
+
+
+def check_rate_limit(key: str, rate_limit: str) -> tuple[bool, int]:
+    """WebSocket처럼 @limiter.limit() 데코레이터를 못 쓰는 경로(HTTP 요청/응답 사이클
+    바깥)에서 수동으로 레이트리밋을 확인한다. limiter와 같은 storage(메모리 또는
+    REDIS_URL 설정 시 Redis)를 공유하므로 다중 워커 환경에서도 정확하다.
+
+    (허용 여부, 거부됐을 때 재시도까지 남은 초) 튜플을 반환한다. 허용된 호출은 즉시
+    카운트를 소비한다(test-then-hit이 아니라 hit 자체가 원자적).
+    """
+    item = parse(rate_limit)
+    if limiter.limiter.hit(item, key):
+        return True, 0
+    stats = limiter.limiter.get_window_stats(item, key)
+    return False, max(0, round(stats.reset_time - time.time()))

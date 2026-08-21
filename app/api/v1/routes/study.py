@@ -20,7 +20,7 @@ from app.core.dependencies import (
     get_ollama_service,
     get_rag_service,
 )
-from app.core.rate_limit import limiter
+from app.core.rate_limit import check_rate_limit, limiter
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.study import (
@@ -135,11 +135,15 @@ async def stream_message(
     → {"type": "done", "data": {...}} 를 보낸다. 실패하면 {"type": "error", "detail": "..."}.
 
     기존 REST 엔드포인트(POST /{session_id}/messages)는 그대로 남겨둔다 - 이건
-    완전히 별도 경로라 하위호환을 깨지 않는다. slowapi의 레이트리밋 데코레이터는
-    HTTP 라우트 전용이라 이 WebSocket 경로에는 아직 적용되어 있지 않다(후속 과제).
+    완전히 별도 경로라 하위호환을 깨지 않는다. slowapi의 @limiter.limit() 데코레이터는
+    HTTP 요청/응답 사이클 전용이라 이 WebSocket 경로에는 못 붙이므로, 같은 storage를
+    공유하는 core.rate_limit.check_rate_limit()로 메시지 하나하나마다 수동으로
+    확인한다 (REST 엔드포인트와는 별도 버킷 - IP당 chat_rate_limit을 이 경로에도
+    독립적으로 적용).
     """
     await websocket.accept()
     max_length = get_settings().max_prompt_length
+    client_ip = websocket.client.host if websocket.client else "127.0.0.1"
     try:
         while True:
             payload = await websocket.receive_json()
@@ -150,6 +154,19 @@ async def stream_message(
             if len(content) > max_length:
                 await websocket.send_json(
                     {"type": "error", "detail": f"메시지는 최대 {max_length}자까지 허용됩니다."}
+                )
+                continue
+
+            allowed, retry_after = check_rate_limit(
+                f"ws:study:{client_ip}", get_settings().chat_rate_limit
+            )
+            if not allowed:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "detail": "요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
+                        "retry_after": retry_after,
+                    }
                 )
                 continue
 

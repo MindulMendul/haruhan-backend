@@ -339,3 +339,39 @@ def test_stream_message_ai_failure_sends_error_event(client):
     messages = detail.json()["messages"]
     assert len(messages) == 1
     assert messages[0]["content"] == "실패해라"
+
+
+def test_stream_message_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("CHAT_RATE_LIMIT", "1/minute")
+    get_settings.cache_clear()
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="stream-ratelimit@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "레이트리밋 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "첫 메시지"})
+        ws.receive_json()  # user_message
+        ws.receive_json()  # delta
+        ws.receive_json()  # delta
+        ws.receive_json()  # done
+
+        ws.send_json({"content": "두 번째 메시지"})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+        assert error_event["retry_after"] >= 0
+
+        ws.close()
+
+    # 레이트리밋에 걸린 두 번째 메시지는 세션에 저장되지 않았어야 한다.
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 2
+    assert messages[0]["content"] == "첫 메시지"
