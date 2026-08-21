@@ -259,6 +259,22 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 
 이건 JWT가 아니라 `X-API-Key` 헤더로 별도 인증합니다 (`API_KEY` 환경변수 미설정 시 인증 없음). 위 4개 기능과 무관한 초기 프로토타입용 엔드포인트라, 신규 프론트 연동에서는 안 쓰는 걸 추천합니다.
 
+### 3-6. 사용 가능한 모델 목록 `/api/v1/models`
+
+```
+GET /api/v1/models   (인증 불필요)
+```
+→ `200`
+```json
+{
+  "models": [
+    { "name": "qwen2.5:3b", "size": 1929601456, "parameter_size": "3.1B", "quantization_level": "Q4_0" },
+    { "name": "nomic-embed-text:latest", "size": 274302450, "parameter_size": null, "quantization_level": null }
+  ]
+}
+```
+학습챗/퀴즈/면접연습/면접복기 생성 시 넘기는 `model` 필드를 하드코딩하지 말고, 여기서 받은 `name` 중 하나를 쓰면 됩니다. Ollama 엔진 자체가 응답을 못 하면 `502`.
+
 ## 4. 헬스체크 (인증 불필요, 버전 프리픽스 없음)
 
 - `GET /health` — 프로세스 생존 확인

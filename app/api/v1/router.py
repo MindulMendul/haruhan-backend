@@ -6,6 +6,7 @@ from app.api.v1.routes import (
     health,
     interview_practice,
     interview_review,
+    models,
     quiz,
     study,
     users,
@@ -19,6 +20,7 @@ v1_router = APIRouter(prefix="/api/v1")
 v1_router.include_router(auth.router)
 v1_router.include_router(users.router)
 v1_router.include_router(chat.router)
+v1_router.include_router(models.router)
 v1_router.include_router(study.router)
 v1_router.include_router(quiz.router)
 v1_router.include_router(interview_practice.router)

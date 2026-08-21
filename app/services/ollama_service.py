@@ -85,6 +85,17 @@ class OllamaService:
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
         return response.json().get("embedding", [])
 
+    async def list_models(self) -> list[dict]:
+        """Ollama 엔진에 pull되어 있는(=바로 쓸 수 있는) 모델 목록을 그대로 반환한다."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            try:
+                response = await client.get(f"{self._base_url}/api/tags")
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.error("Ollama API 호출 에러: %s", exc)
+                raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
+        return response.json().get("models", [])
+
     async def generate_json(self, prompt: str, model: str, schema: dict) -> str:
         """JSON 스키마로 출력 형식을 강제한다 (Ollama structured outputs).
 
