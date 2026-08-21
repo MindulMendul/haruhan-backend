@@ -316,7 +316,7 @@ GET /api/v1/export/me   (인증 필요)
 ## 4. 헬스체크/메트릭 (인증 불필요, 버전 프리픽스 없음)
 
 - `GET /health` — 프로세스 생존 확인
-- `GET /health/ready` — DB 연결까지 확인 (안 되면 `503`)
+- `GET /health/ready` — DB/Redis/Ollama 연결까지 확인. 응답 바디에 `database`/`redis`/`ollama` 각각의 상태가 들어있어서 뭐가 죽었는지 바로 구분할 수 있습니다 (`redis`는 `REDIS_URL` 미설정 시 `not_configured`로 표시되고 전체 판정에서 제외됨). 하나라도 문제면 `503`.
 - `GET /metrics` — Prometheus 스크레이프용. 프론트에서 호출할 일은 없습니다.
 
 ## 5. 최소 구현 순서 제안

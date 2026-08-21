@@ -66,7 +66,7 @@
 
 ## 백로그 (3라운드)
 
-- [ ] 18. `/health/ready`에 Redis/Ollama 상태 포함 — 지금은 DB 연결만 확인함.
+- [x] 18. `/health/ready`에 Redis/Ollama 상태 포함 — 지금은 DB 연결만 확인함.
       레이트리밋을 떠받치는 Redis, 모든 LLM 기능의 기반인 Ollama 중 하나라도
       응답이 없으면 함께 unavailable(503) 처리할 것. 응답 바디에 의존성별
       상태를 구분해서 넣어(예: `{"database": "connected", "redis": "...",
