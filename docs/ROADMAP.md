@@ -111,7 +111,7 @@
       지워지는지 먼저 확인하고, 그렇지 않은 관계가 있으면 명시적으로 정리할
       것. 삭제 전 확인(비밀번호 재입력 등) 필요 여부는 기존 UserService
       패턴(update_profile의 current_password 검증)에 맞춰 판단할 것.
-- [ ] 25. docker-compose 헬스체크 — haruhan-backend/redis/prometheus/grafana
+- [x] 25. docker-compose 헬스체크 — haruhan-backend/redis/prometheus/grafana
       전부 `healthcheck:` 블록이 없음. 각 서비스에 적절한 healthcheck(예:
       haruhan-backend는 `GET /health`, redis는 `redis-cli ping`)를 추가하고,
       `depends_on`을 `condition: service_healthy`로 바꿔서 실제로 뜬 뒤에만
