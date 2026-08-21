@@ -27,6 +27,15 @@ class StudySessionRepository:
         )
         return list(result.scalars().all())
 
+    async def list_all_for_user(self, user_id: uuid.UUID) -> list[StudySession]:
+        """페이지네이션 없이 전체를 가져온다 - 데이터 export처럼 전량이 필요할 때 쓴다."""
+        result = await self._session.execute(
+            select(StudySession)
+            .where(StudySession.user_id == user_id)
+            .order_by(StudySession.created_at)
+        )
+        return list(result.scalars().all())
+
     async def count_for_user(self, user_id: uuid.UUID) -> int:
         result = await self._session.execute(
             select(func.count()).select_from(StudySession).where(StudySession.user_id == user_id)

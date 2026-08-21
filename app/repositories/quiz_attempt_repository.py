@@ -25,6 +25,15 @@ class QuizAttemptRepository:
         )
         return result.scalars().first()
 
+    async def list_for_user(self, user_id: uuid.UUID) -> list[QuizAttempt]:
+        """사용자의 모든 퀴즈에 걸친 전체 제출 이력 - 데이터 export용."""
+        result = await self._session.execute(
+            select(QuizAttempt)
+            .where(QuizAttempt.user_id == user_id)
+            .order_by(QuizAttempt.submitted_at)
+        )
+        return list(result.scalars().all())
+
 
 class QuizAnswerRepository:
     def __init__(self, session: AsyncSession) -> None:

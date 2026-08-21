@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.routes import (
     auth,
     chat,
+    export,
     health,
     interview_practice,
     interview_review,
@@ -25,5 +26,6 @@ v1_router.include_router(study.router)
 v1_router.include_router(quiz.router)
 v1_router.include_router(interview_practice.router)
 v1_router.include_router(interview_review.router)
+v1_router.include_router(export.router)
 
 api_router.include_router(v1_router)
