@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -40,3 +40,10 @@ class RefreshTokenRepository:
     async def revoke(self, token: RefreshToken) -> None:
         token.revoked_at = utcnow_naive()
         await self._session.flush()
+
+    async def delete_expired(self) -> int:
+        """만료된 토큰을 정리한다. 폐기 여부와 무관하게 expires_at이 지난 건 전부 지운다 -
+        이미 재사용 불가능한 상태라 남겨둘 이유가 없다."""
+        result = await self._session.execute(delete(RefreshToken).where(RefreshToken.expires_at < utcnow_naive()))
+        await self._session.commit()
+        return result.rowcount

@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from app.repositories.refresh_token_repository import RefreshTokenRepository
+
 logger = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
@@ -57,6 +59,19 @@ async def keep_supabase_alive() -> None:
         logger.info("[Supabase Ping] DB가 성공적으로 살아있음을 확인했습니다.")
     except Exception:
         logger.exception("[Supabase Ping] DB 통신 실패")
+
+
+async def cleanup_expired_refresh_tokens() -> None:
+    """만료된 refresh token을 주기적으로 정리해 테이블이 무한정 커지는 것을 막는다."""
+    if _session_factory is None:
+        logger.warning("DB 엔진이 초기화되지 않아 refresh token 정리를 건너뜁니다.")
+        return
+    try:
+        async with _session_factory() as session:
+            deleted = await RefreshTokenRepository(session).delete_expired()
+        logger.info("[Refresh Token 정리] 만료된 토큰 %d개 삭제", deleted)
+    except Exception:
+        logger.exception("[Refresh Token 정리] 실패")
 
 
 async def check_db_health() -> bool:
