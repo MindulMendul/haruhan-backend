@@ -161,6 +161,37 @@ PATCH /api/v1/users/me
 그대로 배열이고, 전체 개수는 `X-Total-Count` 응답 헤더로 옴 — 다음 페이지가 있는지는
 `받은 개수 + offset < X-Total-Count`로 판단하면 됨.
 
+#### 3-1-1. 스트리밍 응답 (WebSocket)
+
+응답을 다 기다렸다가 한 번에 받는 대신, 토큰 단위로 실시간으로 받고 싶으면 이 엔드포인트를
+쓰면 됨. 기존 `POST /study/sessions/{id}/messages`는 그대로 남아있고(하위호환), 이건 완전히
+별도 경로.
+
+```
+WS /api/v1/study/sessions/{id}/stream?token=<access_token>
+```
+
+- 브라우저 WebSocket API는 커스텀 헤더를 못 보내서, `Authorization` 헤더 대신 **쿼리
+  파라미터로 access token을 넘김**. 토큰이 없거나 무효하면 연결 자체가 거부됨(코드 1008).
+- 연결되면 `{ "content": "..." }`를 JSON으로 보내면 됨 (REST 버전의 요청 바디와 동일).
+- 서버는 순서대로 아래 이벤트들을 보냄:
+  ```json
+  { "type": "user_message", "data": { "id", "role": "user", "content", "created_at" } }
+  { "type": "delta", "content": "토" }
+  { "type": "delta", "content": "큰" }
+  ...
+  { "type": "done", "data": { "id", "role": "assistant", "content": "전체 답변", "created_at" } }
+  ```
+  `delta`를 이어붙이면 `done.data.content`와 같아짐 — 화면에는 delta가 올 때마다 이어붙여
+  표시하고, `done`이 오면 그 메시지를 최종 확정된 것으로 취급하면 됨.
+- 실패하면 `{ "type": "error", "detail": "..." }`가 오고, **연결은 끊기지 않음** — 같은
+  세션에 대해 다시 `{ "content": "..." }`를 보내면 됨 (내 세션이 아니거나, content가
+  비어있거나 너무 길면 이 형태로 옴).
+- 같은 연결로 여러 메시지를 계속 보낼 수 있음 (한 번 연결하면 세션 하나에 대해 대화 계속
+  가능). 연결을 끊고 싶으면 그냥 소켓을 닫으면 됨.
+- ⚠️ 아직 레이트리밋이 안 걸려 있음 (slowapi가 HTTP 전용이라 WebSocket에는 별도 구현이
+  필요해서 이번엔 범위 밖으로 뺌) — 남용 방지가 필요하면 알려주세요.
+
 ### 3-2. 퀴즈 (`/api/v1/quizzes`)
 
 | Method | Path | 설명 |

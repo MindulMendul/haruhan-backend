@@ -1,7 +1,7 @@
 import uuid
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, WebSocket, WebSocketException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,29 @@ async def get_current_user(
     user = await UserRepository(session).get_by_id(user_id)
     if user is None:
         raise _CREDENTIALS_ERROR
+    return user
+
+
+async def get_current_user_ws(
+    websocket: WebSocket,
+    session: AsyncSession = Depends(get_db),
+) -> User:
+    """WebSocket용 인증. 브라우저 WebSocket API는 커스텀 헤더를 못 보내므로
+    Authorization 헤더 대신 쿼리 파라미터(?token=<access_token>)로 받는다."""
+    settings = get_settings()
+    token = websocket.query_params.get("token")
+    if token is None:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
+
+    try:
+        payload = decode_access_token(token, settings)
+        user_id = uuid.UUID(payload["sub"])
+    except (jwt.InvalidTokenError, ValueError, KeyError) as exc:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION) from exc
+
+    user = await UserRepository(session).get_by_id(user_id)
+    if user is None:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
     return user
 
 

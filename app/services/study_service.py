@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import AsyncIterator
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,3 +104,56 @@ class StudyService:
         )
 
         return user_message, assistant_message
+
+    async def stream_message(
+        self, session_id: uuid.UUID, user_id: uuid.UUID, content: str
+    ) -> AsyncIterator[tuple[str, StudyMessage | str]]:
+        """WebSocket 스트리밍용. send_message와 동일한 로직(그라운딩/색인 포함)을
+        토큰 단위로 내보낸다. ("user_message", StudyMessage) 한 번, 그다음
+        ("delta", str) 여러 번, 마지막에 ("assistant_message", StudyMessage) 한 번을
+        순서대로 yield한다.
+        """
+        study_session = await self._sessions.get_for_user(session_id, user_id)
+        if study_session is None:
+            raise _SESSION_NOT_FOUND
+
+        history = await self._messages.list_for_session(session_id)
+
+        user_message = await self._messages.create(session_id=session_id, role="user", content=content)
+        await self._session.commit()
+        yield "user_message", user_message
+
+        chat_messages = [{"role": m.role, "content": m.content} for m in history]
+
+        relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=content)
+        if relevant_chunks:
+            chat_messages.insert(0, _build_grounding_message(relevant_chunks))
+
+        chat_messages.append({"role": "user", "content": content})
+
+        reply_parts: list[str] = []
+        try:
+            async for delta in self._ollama.chat_stream(messages=chat_messages, model=study_session.model):
+                reply_parts.append(delta)
+                yield "delta", delta
+        except OllamaServiceError as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+        reply = "".join(reply_parts)
+        assistant_message = await self._messages.create(
+            session_id=session_id, role="assistant", content=reply
+        )
+        await self._sessions.touch(study_session)
+        await self._session.commit()
+
+        # 색인은 클라이언트에게 "done"을 알리기 전에 전부 끝내둔다 - WebSocket은
+        # 클라이언트가 마지막 이벤트를 받자마자 연결을 끊을 수 있는데, yield 이후에
+        # DB 작업이 남아있으면 그 작업이 연결 종료와 경합하다 취소될 수 있다.
+        await self._rag.index_content(
+            user_id=user_id, source_type="study_message", source_id=user_message.id, content=content
+        )
+        await self._rag.index_content(
+            user_id=user_id, source_type="study_message", source_id=assistant_message.id, content=reply
+        )
+
+        yield "assistant_message", assistant_message

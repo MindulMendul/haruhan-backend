@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.dependencies import get_ollama_service
 from app.services.ollama_service import OllamaServiceError
 
@@ -9,10 +11,18 @@ class FakeOllamaService:
     async def embed(self, text, model):
         return [1.0, 0.0, 0.0]
 
+    async def chat_stream(self, messages, model):
+        for chunk in ["안녕", "하세요"]:
+            yield chunk
+
 
 class FailingOllamaService:
     async def chat(self, messages, model):
         raise OllamaServiceError("boom")
+
+    async def chat_stream(self, messages, model):
+        raise OllamaServiceError("boom")
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
 
 
 def _signup_and_get_token(client, email="study@example.com"):
@@ -218,3 +228,114 @@ def test_user_message_preserved_when_ai_call_fails(client):
     assert len(messages) == 1
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "이 메시지는 저장돼야 한다"
+
+
+def test_stream_message_sends_deltas_then_done(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "스트리밍 세션"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕?"})
+
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+        assert user_event["data"]["content"] == "안녕?"
+
+        delta_1 = ws.receive_json()
+        delta_2 = ws.receive_json()
+        assert delta_1 == {"type": "delta", "content": "안녕"}
+        assert delta_2 == {"type": "delta", "content": "하세요"}
+
+        done_event = ws.receive_json()
+        assert done_event["type"] == "done"
+        assert done_event["data"]["role"] == "assistant"
+        assert done_event["data"]["content"] == "안녕하세요"
+
+        # 테스트 클라이언트가 with 블록을 빠져나가며 서버 태스크를 강제 취소하면
+        # (aiosqlite StaticPool을 쓰는 테스트 DB에서) 공유 커넥션이 깨질 수 있다 -
+        # 명시적으로 정상 종료 이벤트를 먼저 보내 서버가 WebSocketDisconnect를
+        # 정상적으로 받아 세션을 깔끔히 정리하게 한다.
+        ws.close()
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 2
+    assert messages[1]["content"] == "안녕하세요"
+
+
+def test_stream_message_rejects_missing_token(client):
+    from starlette.testclient import WebSocketDisconnect
+
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "인증 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/api/v1/study/sessions/{session_id}/stream") as ws:
+            ws.receive_json()
+
+
+def test_stream_message_rejects_empty_content(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "빈 내용 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "   "})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_message_other_users_session_returns_error_event(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token_a = _signup_and_get_token(client, email="stream-a@example.com")
+    token_b = _signup_and_get_token(client, email="stream-b@example.com")
+
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "A의 세션"}, headers=_auth_headers(token_a)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token_b}"
+    ) as ws:
+        ws.send_json({"content": "몰래 접근"})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_message_ai_failure_sends_error_event(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "실패 스트리밍"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "실패해라"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+    # AI 호출은 실패해도 사용자 메시지는 보존되어야 한다 (REST 버전과 동일한 보장).
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 1
+    assert messages[0]["content"] == "실패해라"

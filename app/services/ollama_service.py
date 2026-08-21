@@ -1,4 +1,6 @@
+import json
 import logging
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -41,6 +43,33 @@ class OllamaService:
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
         return response.json().get("message", {}).get("content", "")
+
+    async def chat_stream(self, messages: list[dict[str, str]], model: str) -> AsyncIterator[str]:
+        """chat()의 스트리밍 버전. 응답을 토큰(조각) 단위로 하나씩 yield한다.
+
+        Ollama는 stream=True일 때 개행으로 구분된 JSON(ndjson)을 한 줄씩 보낸다.
+        각 줄이 delta 하나를 담고 있고, done=true인 줄로 스트림이 끝난다.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self._base_url}/api/chat",
+                    json={"model": model, "messages": messages, "stream": True},
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        chunk = json.loads(line)
+                        content = chunk.get("message", {}).get("content", "")
+                        if content:
+                            yield content
+                        if chunk.get("done"):
+                            break
+        except httpx.HTTPError as exc:
+            logger.error("Ollama 스트리밍 API 호출 에러: %s", exc)
+            raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
 
     async def embed(self, text: str, model: str) -> list[float]:
         """텍스트를 임베딩 벡터로 변환한다 (RAG 검색용)."""
