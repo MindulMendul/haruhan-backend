@@ -73,7 +73,11 @@ def main() -> int:
     if not rel_path.startswith(WATCHED_PREFIXES):
         return 0
 
-    pytest_bin = shutil.which("pytest")
+    # PostToolUse 훅 프로세스는 세션 셸의 PATH($CLAUDE_ENV_FILE로 얹은 .venv/bin 포함)를
+    # 물려받지 않는다. shutil.which만 쓰면 PATH에 먼저 걸리는 다른(의존성 없는) pytest를
+    # 집어서 fastapi ModuleNotFoundError가 난다 - 프로젝트 venv를 명시적으로 먼저 본다.
+    venv_pytest = os.path.join(REPO_ROOT, ".venv", "bin", "pytest")
+    pytest_bin = venv_pytest if os.path.isfile(venv_pytest) else shutil.which("pytest")
     if pytest_bin is None:
         # venv가 아직 없거나(세션 시작 훅 미실행) pytest가 없는 환경에서는 조용히 넘어간다.
         return 0
