@@ -15,6 +15,9 @@ class FakeOllamaService:
     async def chat(self, messages, model):
         return "피드백 또는 총평 텍스트입니다."
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
 
 class FailingOllamaService:
     async def generate(self, prompt, model):
@@ -25,6 +28,31 @@ class FailingOllamaService:
 
     async def chat(self, messages, model):
         raise OllamaServiceError("boom")
+
+
+class GroundingFakeOllamaService:
+    """마지막으로 모델에 전달된 프롬프트를 기록해두고, 태그가 포함된 텍스트만 서로 가까운
+    벡터로 임베딩한다."""
+
+    def __init__(self):
+        self.last_prompt = None
+
+    async def generate(self, prompt, model):
+        self.last_prompt = prompt
+        return "질문"
+
+    async def generate_json(self, prompt, model, schema):
+        self.last_prompt = prompt
+        return json.dumps({"feedback": "피드백", "next_question": "다음 질문"})
+
+    async def chat(self, messages, model):
+        self.last_prompt = messages[0]["content"]
+        return "총평"
+
+    async def embed(self, text, model):
+        if "기억할 사실" in text:
+            return [1.0, 0.0]
+        return [0.0, 1.0]
 
 
 def _signup_and_get_token(client, email="interview@example.com"):
@@ -184,6 +212,49 @@ def test_complete_without_any_answer_returns_400(client):
         f"/api/v1/interview/practice-sessions/{session_id}/complete", headers=_auth_headers(token)
     )
     assert complete.status_code == 400
+
+
+def test_first_session_has_no_grounding_when_corpus_is_empty(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+
+    client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "일반 주제"},
+        headers=_auth_headers(token),
+    )
+
+    assert fake.last_prompt is not None
+    assert "[참고자료]" not in fake.last_prompt
+
+
+def test_later_session_is_grounded_with_relevant_legacy_content(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "일반 주제"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "기억할 사실 관련 질문"},
+        headers=_auth_headers(token),
+    )
+
+    assert "[참고자료]" in fake.last_prompt
+    assert "기억할 사실: 스레드는 프로세스 안에서 돈다" in fake.last_prompt
 
 
 def test_other_user_cannot_access_session(client):

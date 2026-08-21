@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.dependencies import get_current_user, get_ollama_service
+from app.core.dependencies import get_current_user, get_ollama_service, get_rag_service
 from app.core.rate_limit import limiter
 from app.db.models.user import User
 from app.db.session import get_db
@@ -18,6 +18,7 @@ from app.schemas.interview_practice import (
 )
 from app.services.interview_practice_service import InterviewPracticeService
 from app.services.ollama_service import OllamaService
+from app.services.rag_service import RagService
 
 router = APIRouter(prefix="/interview/practice-sessions", tags=["interview-practice"])
 
@@ -26,8 +27,11 @@ def get_interview_practice_service(
     session: AsyncSession = Depends(get_db),
     ollama_service: OllamaService = Depends(get_ollama_service),
     settings: Settings = Depends(get_settings),
+    rag_service: RagService = Depends(get_rag_service),
 ) -> InterviewPracticeService:
-    return InterviewPracticeService(session=session, ollama_service=ollama_service, settings=settings)
+    return InterviewPracticeService(
+        session=session, ollama_service=ollama_service, settings=settings, rag_service=rag_service
+    )
 
 
 @router.post("", response_model=InterviewPracticeSessionDetailResponse, status_code=status.HTTP_201_CREATED)
