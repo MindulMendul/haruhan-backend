@@ -29,8 +29,29 @@ POST /api/v1/auth/guest        (바디 없음)
 **주의할 점 (중요)**:
 - 게스트 계정은 email/password가 없습니다. `localStorage`를 지우거나 다른 브라우저/기기로 접속하면 **완전히 새로운 방문자로 취급되고, 이전 데이터에는 다시 접근할 방법이 없습니다** (이메일 같은 복구 수단이 없음).
 - 그러니 프론트에서 게스트 토큰을 받으면 `localStorage`에서 절대 지우면 안 되고(로그아웃 버튼이 없다면 더더욱), 앱 재실행 시 기존 토큰이 있으면 `/auth/guest`를 다시 호출하지 말고 그 토큰을 그대로 재사용해야 합니다.
-- 나중에 진짜 회원가입/로그인 UI를 붙이더라도, 기존 게스트 계정의 데이터를 이메일 계정으로 옮기는 기능은 아직 없습니다 (필요해지면 별도로 만들어야 함).
+- 나중에 진짜 회원가입/로그인 UI를 붙이고 싶으면, 기존 데이터를 그대로 유지한 채 실계정으로 전환하는 API가 있습니다 → 아래 1-0-1 참고.
 - `GET /users/me` 응답에 `is_guest: true/false`가 있어서, 지금 세션이 게스트인지 프론트에서 구분할 수 있습니다.
+
+### 1-0-1. 게스트 → 실계정 전환 (데이터 유지)
+
+지금 로그인한 게스트에게 email/password를 등록해서, **같은 계정(같은 데이터)을 그대로 유지한 채** 실계정으로 승격시킵니다. access token은 그대로 유효하니 새로 로그인할 필요 없습니다.
+
+```
+POST /api/v1/users/me/upgrade
+Authorization: Bearer <게스트 access_token>
+{
+  "email": "user@example.com",
+  "password": "supersecret"   // 8~72자
+}
+```
+→ `200`, `GET /users/me`와 같은 모양 (`is_guest`는 이제 `false`)
+```json
+{ "id": "...", "email": "user@example.com", "created_at": "...", "is_guest": false }
+```
+
+- 이미 실계정인 사용자가 호출하면 `409` (`current_password` 확인이 필요한 1-6의 `PATCH /users/me`를 대신 써야 함).
+- 요청한 email이 이미 다른 계정 소유면 `409`.
+- 승격 후에도 `POST /api/v1/auth/login`으로 방금 설정한 email/password로 로그인 가능.
 
 ### 1-1. (참고용) 회원가입 — 지금 프론트에서는 안 씀
 

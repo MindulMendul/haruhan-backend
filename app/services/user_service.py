@@ -39,3 +39,25 @@ class UserService:
 
         await self._session.commit()
         return user
+
+    async def upgrade_guest(self, user: User, email: str, password: str) -> User:
+        """게스트 계정을 email/password가 있는 실계정으로 승격시킨다.
+
+        이미 hashed_password가 있는(=실계정인) 사용자가 호출하면 거부한다 - 그 경우는
+        current_password 확인이 필요한 update_profile()을 대신 써야 한다.
+        """
+        if user.hashed_password is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 실계정입니다.")
+
+        existing = await self._users.get_by_email(email)
+        if existing is not None and existing.id != user.id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+
+        try:
+            user.hashed_password = hash_password(password)
+        except PasswordTooLongError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        user.email = email
+
+        await self._session.commit()
+        return user
