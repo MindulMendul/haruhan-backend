@@ -147,6 +147,64 @@ def test_delete_session(client):
     assert get_after_delete.status_code == 404
 
 
+def test_rename_session(client):
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "원래 제목"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    rename = client.patch(
+        f"/api/v1/study/sessions/{session_id}",
+        json={"title": "새 제목"},
+        headers=_auth_headers(token),
+    )
+    assert rename.status_code == 200
+    assert rename.json()["title"] == "새 제목"
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    assert detail.json()["title"] == "새 제목"
+
+
+def test_rename_session_rejects_empty_title(client):
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "원래 제목"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/study/sessions/{session_id}", json={"title": ""}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 422
+
+
+def test_rename_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.patch(
+        "/api/v1/study/sessions/00000000-0000-0000-0000-000000000000",
+        json={"title": "새 제목"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_session_404_for_other_users_session(client):
+    token_a = _signup_and_get_token(client, email="rename-a@example.com")
+    token_b = _signup_and_get_token(client, email="rename-b@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "A의 세션"}, headers=_auth_headers(token_a)
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/study/sessions/{session_id}",
+        json={"title": "가로채기 시도"},
+        headers=_auth_headers(token_b),
+    )
+    assert response.status_code == 404
+
+
 class GroundingFakeOllamaService:
     """chat()에 전달된 메시지를 기록해두고, 태그가 포함된 텍스트만 서로 가까운 벡터로 임베딩한다."""
 

@@ -56,6 +56,16 @@ class StudyService:
         messages = await self._messages.list_for_session(session_id)
         return study_session, messages
 
+    async def rename_session(
+        self, session_id: uuid.UUID, user_id: uuid.UUID, title: str
+    ) -> StudySession:
+        study_session = await self._sessions.get_for_user(session_id, user_id)
+        if study_session is None:
+            raise _SESSION_NOT_FOUND
+        await self._sessions.update_title(study_session, title)
+        await self._session.commit()
+        return study_session
+
     async def delete_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> None:
         study_session = await self._sessions.get_for_user(session_id, user_id)
         if study_session is None:

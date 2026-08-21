@@ -48,6 +48,10 @@ class StudySessionRepository:
         )
         return result.scalar_one_or_none()
 
+    async def update_title(self, study_session: StudySession, title: str) -> None:
+        study_session.title = title
+        await self._session.flush()
+
     async def delete(self, study_session: StudySession) -> None:
         await self._session.delete(study_session)
         await self._session.flush()

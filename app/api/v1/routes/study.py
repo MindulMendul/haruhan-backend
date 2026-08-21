@@ -30,6 +30,7 @@ from app.schemas.study import (
     StudySessionCreateRequest,
     StudySessionDetailResponse,
     StudySessionResponse,
+    StudySessionUpdateRequest,
 )
 from app.services.ollama_service import OllamaService
 from app.services.rag_service import RagService
@@ -90,6 +91,19 @@ async def get_session(
         updated_at=study_session.updated_at,
         messages=[StudyMessageResponse.model_validate(m) for m in messages],
     )
+
+
+@router.patch("/{session_id}", response_model=StudySessionResponse)
+async def rename_session(
+    session_id: uuid.UUID,
+    payload: StudySessionUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    study_service: StudyService = Depends(get_study_service),
+) -> StudySessionResponse:
+    study_session = await study_service.rename_session(
+        session_id=session_id, user_id=current_user.id, title=payload.title
+    )
+    return StudySessionResponse.model_validate(study_session)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

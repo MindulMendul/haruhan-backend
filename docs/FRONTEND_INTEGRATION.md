@@ -179,6 +179,7 @@ DELETE /api/v1/auth/sessions           → 204 (모든 기기에서 로그아웃
 | POST | `/study/sessions` | `{ "title": "...", "model"?: "qwen2.5:3b" }` → 세션 생성 |
 | GET | `/study/sessions` | 내 세션 목록 (페이지네이션, 아래 참고) |
 | GET | `/study/sessions/{id}` | 세션 상세 + 메시지 히스토리 |
+| PATCH | `/study/sessions/{id}` | `{ "title": "새 제목" }` → 제목만 변경 |
 | DELETE | `/study/sessions/{id}` | 세션 삭제 → `204` |
 | POST | `/study/sessions/{id}/messages` | `{ "content": "..." }` → `{ user_message, assistant_message }` |
 
