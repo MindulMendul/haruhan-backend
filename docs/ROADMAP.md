@@ -17,6 +17,9 @@
   따르고 커밋 메시지/보고에 그 판단 근거를 남긴다.
 - 되돌리기 힘든 파괴적 작업(강제 push, 실서비스 DB 대상 마이그레이션 downgrade, 브랜치
   삭제 등)은 하지 않는다.
+- 백로그가 전부 체크된 상태로 사이클이 시작되면, "할 일 없음"으로 끝내지 말고 코드베이스를
+  다시 훑어 새로 가치 있는 개선 항목을 몇 개 찾아 백로그에 추가한 뒤(새 라운드 섹션으로),
+  그중 하나를 그 사이클 안에서 바로 구현까지 마친다.
 
 ## 백로그
 
@@ -98,3 +101,23 @@
       제외인지(퀴즈는 이미 색인된 학습챗 내용에서 파생되니 중복이라서) 먼저
       확인하고, 필요하다고 판단되면 퀴즈 생성/제출 시점에 `index_content()`
       훅을 추가할 것.
+
+## 백로그 (4라운드)
+
+- [ ] 24. 계정 삭제(회원 탈퇴) API — JSON export(`/api/v1/export/me`)는
+      있는데 대칭되는 "내 계정 + 관련 데이터 전체 삭제"는 없음. `DELETE
+      /api/v1/users/me` 추가. CASCADE 제약이 이미 대부분의 테이블에 걸려
+      있으니(FK ondelete="CASCADE") User 로우만 지우면 나머지가 따라
+      지워지는지 먼저 확인하고, 그렇지 않은 관계가 있으면 명시적으로 정리할
+      것. 삭제 전 확인(비밀번호 재입력 등) 필요 여부는 기존 UserService
+      패턴(update_profile의 current_password 검증)에 맞춰 판단할 것.
+- [ ] 25. docker-compose 헬스체크 — haruhan-backend/redis/prometheus/grafana
+      전부 `healthcheck:` 블록이 없음. 각 서비스에 적절한 healthcheck(예:
+      haruhan-backend는 `GET /health`, redis는 `redis-cli ping`)를 추가하고,
+      `depends_on`을 `condition: service_healthy`로 바꿔서 실제로 뜬 뒤에만
+      의존 서비스가 시작하게 할 것.
+- [ ] 26. CI 커버리지 게이트 — `.github/workflows/ci.yml`의 `pytest --cov=app`가
+      커버리지를 리포트만 하고 강제하지 않음. `--cov-fail-under=N`을 추가해서
+      회귀가 커버리지를 깎으면 CI가 실패하게 할 것. N은 현재 실제 커버리지보다
+      살짝 낮게 잡아서(예: 현재 95%대라면 90) 사소한 변동에 CI가 계속
+      깨지지 않게 여유를 둘 것.
