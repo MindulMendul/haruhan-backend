@@ -112,6 +112,49 @@ def test_retrieve_relevant_returns_empty_when_no_candidates(db_session_factory):
     asyncio.run(_run())
 
 
+def test_index_content_logs_error_on_embedding_failure(db_session_factory, caplog):
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            rag = RagService(session=session, ollama_service=FailingEmbeddingOllamaService(), settings=settings)
+            with caplog.at_level("ERROR", logger="app.services.rag_service"):
+                await rag.index_content(
+                    user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="내용"
+                )
+            assert any("RAG 색인 실패" in record.message for record in caplog.records)
+
+    asyncio.run(_run())
+
+
+def test_retrieve_relevant_logs_warning_on_embedding_failure(db_session_factory, caplog):
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            fake_ollama = FakeEmbeddingOllamaService({"고양이": [1.0, 0.0, 0.0]})
+            rag = RagService(session=session, ollama_service=fake_ollama, settings=settings)
+            await rag.index_content(
+                user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="고양이 이야기"
+            )
+
+            failing_rag = RagService(
+                session=session, ollama_service=FailingEmbeddingOllamaService(), settings=settings
+            )
+            with caplog.at_level("WARNING", logger="app.services.rag_service"):
+                results = await failing_rag.retrieve_relevant(user_id=user.id, query="고양이")
+            assert results == []
+            assert any("RAG 검색 실패" in record.message for record in caplog.records)
+
+    asyncio.run(_run())
+
+
 def test_forget_content_removes_chunk(db_session_factory):
     settings = get_settings()
 

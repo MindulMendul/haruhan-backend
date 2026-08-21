@@ -1,3 +1,4 @@
+import logging
 import math
 import uuid
 
@@ -6,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
 from app.services.ollama_service import OllamaService, OllamaServiceError
+
+logger = logging.getLogger(__name__)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -45,6 +48,12 @@ class RagService:
         try:
             embedding = await self._ollama.embed(text=content, model=model)
         except OllamaServiceError:
+            logger.error(
+                "RAG 색인 실패 (임베딩 호출 에러): user_id=%s source_type=%s source_id=%s",
+                user_id,
+                source_type,
+                source_id,
+            )
             await self._session.commit()
             return
 
@@ -56,6 +65,13 @@ class RagService:
                 content=content,
                 embedding=embedding,
                 embedding_model=model,
+            )
+        else:
+            logger.warning(
+                "RAG 색인 건너뜀 (빈 임베딩 반환): user_id=%s source_type=%s source_id=%s",
+                user_id,
+                source_type,
+                source_id,
             )
         await self._session.commit()
 
@@ -73,8 +89,10 @@ class RagService:
         try:
             query_embedding = await self._ollama.embed(text=query, model=model)
         except OllamaServiceError:
+            logger.warning("RAG 검색 실패 (임베딩 호출 에러): user_id=%s", user_id)
             return []
         if not query_embedding:
+            logger.warning("RAG 검색 건너뜀 (빈 임베딩 반환): user_id=%s", user_id)
             return []
 
         scored = [(_cosine_similarity(query_embedding, chunk.embedding), chunk) for chunk in candidates]
