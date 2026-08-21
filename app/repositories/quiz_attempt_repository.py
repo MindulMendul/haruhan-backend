@@ -34,6 +34,15 @@ class QuizAttemptRepository:
         )
         return list(result.scalars().all())
 
+    async def list_for_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> list[QuizAttempt]:
+        """한 퀴즈에 대한 전체 재도전 이력 (최신순) - 점수 추이 확인용."""
+        result = await self._session.execute(
+            select(QuizAttempt)
+            .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_id)
+            .order_by(QuizAttempt.submitted_at.desc())
+        )
+        return list(result.scalars().all())
+
 
 class QuizAnswerRepository:
     def __init__(self, session: AsyncSession) -> None:

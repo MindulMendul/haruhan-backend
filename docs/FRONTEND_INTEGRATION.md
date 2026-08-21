@@ -230,6 +230,7 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 | GET | `/quizzes/{id}` | 상세 — **정답/해설 미노출** |
 | POST | `/quizzes/{id}/submit` | 답안 제출 → 채점 |
 | GET | `/quizzes/{id}/result` | 마지막 제출 결과 재조회 |
+| GET | `/quizzes/{id}/attempts` | 재도전 이력 전체 (아래 참고) |
 | GET | `/quizzes/wrong-answers` | 오답노트 (아래 참고) |
 
 생성 요청:
@@ -256,7 +257,21 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 
 네트워크 재시도 등으로 같은 제출 요청이 두 번 가는 경우를 대비해, **직전 제출과 답안이 완전히 같고 5초 안에 다시 들어오면** 새로 채점하지 않고 직전 결과를 그대로 돌려줍니다 (같은 `attempt_id`). 실제로 다시 풀어서 답이 달라지면(또는 5초가 지나면) 정상적으로 새 시도로 기록됩니다 - 프론트에서 별도로 중복 제출 방지 로직을 넣지 않아도 됩니다.
 
-#### 3-2-1. 오답노트
+#### 3-2-1. 재도전 이력
+
+```
+GET /api/v1/quizzes/{id}/attempts
+```
+→ `200`
+```json
+[
+  { "id": "uuid", "score": 4, "total": 5, "submitted_at": "2026-08-21T12:00:00Z" },
+  { "id": "uuid", "score": 3, "total": 5, "submitted_at": "2026-08-20T09:00:00Z" }
+]
+```
+같은 퀴즈를 여러 번 다시 풀었을 때 **전체 제출 이력을 최신순**으로 돌려줍니다 (점수 추이 그래프 등에 사용). `GET /quizzes/{id}/result`는 가장 최근 1건의 문항별 정답 여부까지 상세히 주는 반면, 이건 점수 요약만 가볍게 줍니다. 아직 한 번도 제출 안 했다면 빈 배열, 존재하지 않거나 남의 퀴즈면 `404`.
+
+#### 3-2-2. 오답노트
 
 ```
 GET /api/v1/quizzes/wrong-answers

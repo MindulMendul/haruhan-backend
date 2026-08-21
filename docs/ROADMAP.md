@@ -179,3 +179,14 @@
       없음 - 세션 개수 확인/특정·전체 로그아웃 용도로만 유효. 필요해지면
       RefreshToken에 device/user-agent 같은 식별 메타데이터를 추가하는
       후속 작업으로 개선 가능.
+
+## 백로그 (7라운드)
+
+- [x] 31. 퀴즈 재도전 이력 조회 API — 기존에 `GET /quizzes/{id}/result`는
+      가장 최근 제출 1건만 상세히(문항별 정답 여부까지) 보여줬는데, 같은
+      퀴즈를 여러 번 다시 풀었을 때 점수가 어떻게 변했는지(추이 그래프 등)
+      확인할 방법이 없었음. `GET /quizzes/{id}/attempts`를 추가해 전체
+      제출 이력(id/score/total/submitted_at)을 최신순으로 반환 -
+      `QuizAttemptRepository.list_for_quiz`(신규), `QuizService.list_attempts`
+      (소유권 검증 후 404 처리) 추가. 문항별 상세는 기존 `/result`가
+      이미 담당하므로 이 응답은 점수 요약만 가볍게 준다.

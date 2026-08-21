@@ -10,6 +10,7 @@ from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.quiz import (
     QuizAnswerResult,
+    QuizAttemptSummary,
     QuizCreateRequest,
     QuizDetailResponse,
     QuizQuestionPublic,
@@ -134,6 +135,17 @@ async def submit_quiz(
             for question, selected_index, is_correct in graded
         ],
     )
+
+
+@router.get("/{quiz_id}/attempts", response_model=list[QuizAttemptSummary])
+async def list_quiz_attempts(
+    quiz_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    quiz_service: QuizService = Depends(get_quiz_service),
+) -> list[QuizAttemptSummary]:
+    """이 퀴즈를 재도전한 전체 이력을 최신순으로 보여준다 (점수 추이 확인용)."""
+    attempts = await quiz_service.list_attempts(quiz_id=quiz_id, user_id=current_user.id)
+    return [QuizAttemptSummary.model_validate(a) for a in attempts]
 
 
 @router.get("/{quiz_id}/result", response_model=QuizResultResponse)

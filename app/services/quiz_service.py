@@ -265,6 +265,15 @@ class QuizService:
         ]
         return latest, graded
 
+    async def list_attempts(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> list[QuizAttempt]:
+        """한 퀴즈를 여러 번 다시 풀었을 때 점수 추이를 보여주기 위한 전체 제출 이력
+        (최신순). get_latest_result()는 가장 최근 1건만 상세(문항별 정답 여부)까지
+        주지만, 이건 재도전 목록/그래프용으로 점수 요약만 가볍게 준다."""
+        quiz = await self._quizzes.get_for_user(quiz_id, user_id)
+        if quiz is None:
+            raise _QUIZ_NOT_FOUND
+        return await self._attempts.list_for_quiz(quiz_id, user_id)
+
     async def get_latest_result(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID
     ) -> tuple[QuizAttempt, list[tuple]]:

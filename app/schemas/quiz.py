@@ -81,6 +81,15 @@ class QuizResultResponse(BaseModel):
     answers: list[QuizAnswerResult]
 
 
+class QuizAttemptSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    score: int
+    total: int
+    submitted_at: datetime
+
+
 class WrongAnswerEntry(BaseModel):
     quiz_id: uuid.UUID
     quiz_title: str
