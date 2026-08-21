@@ -76,7 +76,7 @@
       탈취 의심 신호로 보는 로직이 없음. 폐기된 토큰이 재사용되면 해당
       사용자의 모든 refresh token을 즉시 전부 폐기(전체 세션 강제 로그아웃)할
       것 - RefreshTokenRepository에 "유저의 모든 토큰 폐기" 메서드 추가 필요.
-- [ ] 20. Ollama 모델 목록 응답 캐싱 — `/api/v1/models`가 요청마다 Ollama
+- [x] 20. Ollama 모델 목록 응답 캐싱 — `/api/v1/models`가 요청마다 Ollama
       `/api/tags`를 직접 호출함. 짧은 TTL(예: 60초) 캐시를 둬서 반복 호출을
       줄일 것. Redis가 연결돼 있으면 Redis TTL 캐시, 없으면 인메모리 TTL
       캐시로 폴백하는 방식 고려할 것.

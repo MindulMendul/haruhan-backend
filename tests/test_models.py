@@ -54,3 +54,23 @@ def test_list_models_returns_502_on_ollama_failure(client):
 
     response = client.get("/api/v1/models")
     assert response.status_code == 502
+
+
+def test_list_models_caches_result_within_ttl(client):
+    class CountingOllamaService:
+        def __init__(self):
+            self.call_count = 0
+
+        async def list_models(self):
+            self.call_count += 1
+            return [{"name": f"model-{self.call_count}", "size": 1}]
+
+    fake = CountingOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+
+    first = client.get("/api/v1/models")
+    second = client.get("/api/v1/models")
+
+    assert fake.call_count == 1
+    assert first.json() == second.json()
+    assert first.json()["models"][0]["name"] == "model-1"
