@@ -20,9 +20,25 @@ services:
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
       - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-14}
+      # 비워두면(.env에서 REDIS_URL 미설정) 아래 내장 redis 서비스를 기본으로 쓴다.
+      # 외부 관리형 Redis를 쓰려면 .env에 REDIS_URL을 직접 채워 이 기본값을 덮어쓰면 된다.
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      - redis
     networks:
       - haruhan-net
       - mindul-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: haruhan-redis
+    restart: unless-stopped
+    # 레이트리밋 카운터는 휘발성 데이터라 영속 볼륨이 필요 없다. 메모리 상한 + LRU
+    # 축출 정책만 걸어서 무한정 커지는 것을 막는다. 외부 포트는 열지 않는다
+    # (haruhan-backend에서만 내부 네트워크로 접근).
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    networks:
+      - haruhan-net
 
   caddy:
     image: caddy:2-alpine
