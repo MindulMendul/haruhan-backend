@@ -108,6 +108,20 @@ def test_refresh_rejects_expired_token(client, db_session_factory):
     assert response.status_code == 401
 
 
+def test_signup_rejects_password_over_byte_limit_despite_passing_char_limit(client):
+    # 스키마의 max_length=72는 "문자 수" 기준이라, 멀티바이트 문자로 72자를 채우면
+    # 글자 수 검증(422)은 통과하지만 UTF-8로 인코딩하면 72바이트를 넘는다 -
+    # 그 경우 hash_password()의 바이트 길이 가드가 400으로 잡아내야 한다.
+    password = "가" * 72
+    assert len(password) == 72
+    assert len(password.encode("utf-8")) > 72
+
+    response = client.post(
+        "/api/v1/auth/signup", json={"email": "multibyte@example.com", "password": password}
+    )
+    assert response.status_code == 400
+
+
 def test_login_is_rate_limited(client, monkeypatch):
     monkeypatch.setenv("AUTH_RATE_LIMIT", "2/minute")
     get_settings.cache_clear()

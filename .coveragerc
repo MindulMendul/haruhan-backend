@@ -1,0 +1,5 @@
+[run]
+# SQLAlchemy의 async 엔진은 greenlet으로 동기 드라이버 호출을 브릿지한다. 이 설정이
+# 없으면 그 경계를 넘나드는 코드(리포지토리의 await 다음 return문 등)가 실제로는
+# 실행됐는데도 coverage가 못 잡아서 커버리지 수치가 실제보다 낮게, 부정확하게 나온다.
+concurrency = greenlet,thread
