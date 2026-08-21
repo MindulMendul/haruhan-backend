@@ -294,6 +294,35 @@ GET /api/v1/quizzes/wrong-answers
 | PATCH | `/interview/reviews/{id}` | 부분 수정. **`content`를 실제로 바꿀 때만 피드백 재생성** (company/position/date만 바꾸면 기존 피드백 유지) |
 | DELETE | `/interview/reviews/{id}` | 삭제 → `204` |
 
+#### 3-4-1. 생성 스트리밍 응답 (WebSocket)
+
+면접복기 AI 피드백은 복기 내용 전체를 분석해서 만들기 때문에 이 앱에서 가장 오래
+걸리는 생성입니다. 응답을 다 기다리지 않고 토큰 단위로 받고 싶으면 이 엔드포인트를
+쓰면 됩니다. 기존 `POST /interview/reviews`는 그대로 남아있음(하위호환) - PATCH(수정
+시 피드백 재생성)는 스트리밍 버전이 없고 여전히 REST만 있습니다.
+
+```
+WS /api/v1/interview/reviews/stream?token=<access_token>
+```
+
+- 인증 방식은 3-1-1과 동일(쿼리 파라미터로 access token).
+- 연결되면 `POST /interview/reviews`와 같은 바디(`{ company, position,
+  interview_date, content, model? }`)를 JSON으로 보내면 됩니다.
+- 서버는 순서대로:
+  ```json
+  { "type": "delta", "content": "잘" }
+  { "type": "delta", "content": "한" }
+  ...
+  { "type": "done", "data": { "id", "company", "position", "interview_date", "content", "ai_feedback", "created_at", "updated_at" } }
+  ```
+  `user_message` 같은 중간 echo 이벤트는 없습니다 - 피드백 생성이 끝나야 review
+  자체가 만들어지기 때문입니다. `done.data.ai_feedback`이 delta를 이어붙인 값과
+  같습니다.
+- 검증 실패(필드 누락 등)나 생성 실패는 `{ "type": "error", "detail": "..." }`가
+  오고 연결은 끊기지 않습니다. `CHAT_RATE_LIMIT` 초과 시에도 마찬가지로
+  `retry_after`가 포함된 에러 이벤트가 옵니다(3-1-1과 동일).
+- 같은 연결로 여러 건을 연달아 생성할 수 있습니다.
+
 ### 3-5. (참고) 범용 Ollama 프록시 `/api/v1/chat`
 
 이건 JWT가 아니라 `X-API-Key` 헤더로 별도 인증합니다 (`API_KEY` 환경변수 미설정 시 인증 없음). 위 4개 기능과 무관한 초기 프로토타입용 엔드포인트라, 신규 프론트 연동에서는 안 쓰는 걸 추천합니다.

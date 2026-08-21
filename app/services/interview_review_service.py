@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import AsyncIterator
 from datetime import date
 
 from fastapi import HTTPException, status
@@ -62,6 +63,54 @@ class InterviewReviewService:
             user_id=user_id, source_type="interview_review", source_id=review.id, content=content
         )
         return review
+
+    async def stream_create_review(
+        self,
+        user_id: uuid.UUID,
+        company: str,
+        position: str,
+        interview_date: date,
+        content: str,
+        model: str,
+    ) -> AsyncIterator[tuple[str, InterviewReview | str]]:
+        """create_review의 스트리밍 버전. AI 피드백(이 서비스에서 가장 긴 생성) 을
+        토큰 단위로 내보낸다. ("delta", str)를 여러 번, 마지막에
+        ("done", InterviewReview) 한 번을 순서대로 yield한다.
+
+        피드백을 다 받기 전까지는 저장할 내용이 없으므로(REST 버전과 마찬가지로
+        피드백까지 다 생성된 뒤에 review row를 한 번에 만든다), study_service의
+        "user_message" 같은 중간 echo 이벤트는 없다.
+        """
+        prompt = _build_review_feedback_prompt(company, position, content)
+        feedback_parts: list[str] = []
+        try:
+            async for delta in self._ollama.chat_stream(
+                messages=[{"role": "user", "content": prompt}], model=model
+            ):
+                feedback_parts.append(delta)
+                yield "delta", delta
+        except OllamaServiceError as exc:
+            raise _GENERATION_FAILED from exc
+
+        review = await self._reviews.create(
+            user_id=user_id,
+            company=company,
+            position=position,
+            interview_date=interview_date,
+            content=content,
+            model=model,
+        )
+        review.ai_feedback = "".join(feedback_parts)
+        await self._session.commit()
+
+        # 색인은 "done" 이벤트를 보내기 전에 끝내둔다 - study_service.stream_message와
+        # 같은 이유로, 클라이언트가 "done"을 받자마자 연결을 끊으면 그 이후 DB
+        # 작업이 연결 종료와 경합하다 취소될 수 있다.
+        await self._rag.index_content(
+            user_id=user_id, source_type="interview_review", source_id=review.id, content=content
+        )
+
+        yield "done", review
 
     async def list_reviews(
         self, user_id: uuid.UUID, limit: int, offset: int

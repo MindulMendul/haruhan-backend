@@ -14,10 +14,19 @@ class FakeOllamaService:
     async def embed(self, text, model):
         return [1.0, 0.0, 0.0]
 
+    async def chat_stream(self, messages, model):
+        self.call_count += 1
+        for chunk in ["잘한", "점입니다"]:
+            yield chunk
+
 
 class FailingOllamaService:
     async def chat(self, messages, model):
         raise OllamaServiceError("boom")
+
+    async def chat_stream(self, messages, model):
+        raise OllamaServiceError("boom")
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
 
 
 def _signup_and_get_token(client, email="review@example.com"):
@@ -221,3 +230,82 @@ def test_other_user_cannot_access_review(client):
 
     response = client.get(f"/api/v1/interview/reviews/{review_id}", headers=_auth_headers(token_b))
     assert response.status_code == 404
+
+
+def test_stream_create_review_sends_deltas_then_done(client):
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-review@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_json(_create_payload())
+
+        delta_1 = ws.receive_json()
+        delta_2 = ws.receive_json()
+        assert delta_1 == {"type": "delta", "content": "잘한"}
+        assert delta_2 == {"type": "delta", "content": "점입니다"}
+
+        done_event = ws.receive_json()
+        assert done_event["type"] == "done"
+        assert done_event["data"]["ai_feedback"] == "잘한점입니다"
+        assert done_event["data"]["company"] == "하루한"
+        review_id = done_event["data"]["id"]
+
+        ws.close()
+
+    detail = client.get(f"/api/v1/interview/reviews/{review_id}", headers=_auth_headers(token))
+    assert detail.status_code == 200
+    assert detail.json()["ai_feedback"] == "잘한점입니다"
+
+
+def test_stream_create_review_rejects_missing_token(client):
+    import pytest
+    from starlette.testclient import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/api/v1/interview/reviews/stream") as ws:
+            ws.receive_json()
+
+
+def test_stream_create_review_rejects_invalid_payload(client):
+    token = _signup_and_get_token(client, email="stream-review-invalid@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_json({"company": "하루한"})  # position/interview_date/content 누락
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_create_review_ai_failure_sends_error_event(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    token = _signup_and_get_token(client, email="stream-review-fail@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_json(_create_payload())
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_create_review_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):
+    monkeypatch.setenv("CHAT_RATE_LIMIT", "1/minute")
+    get_settings.cache_clear()
+
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-review-ratelimit@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_json(_create_payload())
+        ws.receive_json()  # delta
+        ws.receive_json()  # delta
+        ws.receive_json()  # done
+
+        ws.send_json(_create_payload(company="다른회사"))
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+        assert error_event["retry_after"] >= 0
+
+        ws.close()
+
+    listing = client.get("/api/v1/interview/reviews", headers=_auth_headers(token))
+    assert len(listing.json()) == 1

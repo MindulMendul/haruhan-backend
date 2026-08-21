@@ -1,11 +1,27 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user, get_ollama_service, get_rag_service
-from app.core.rate_limit import limiter
+from app.core.dependencies import (
+    get_current_user,
+    get_current_user_ws,
+    get_ollama_service,
+    get_rag_service,
+)
+from app.core.rate_limit import check_rate_limit, limiter
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.interview_review import (
@@ -99,3 +115,72 @@ async def delete_review(
     service: InterviewReviewService = Depends(get_interview_review_service),
 ) -> None:
     await service.delete_review(review_id=review_id, user_id=current_user.id)
+
+
+@router.websocket("/stream")
+async def stream_create_review(
+    websocket: WebSocket,
+    current_user: User = Depends(get_current_user_ws),
+    service: InterviewReviewService = Depends(get_interview_review_service),
+) -> None:
+    """create_review의 스트리밍 버전. 인증은 쿼리 파라미터(?token=...)로 받는다 -
+    브라우저 WebSocket API가 커스텀 헤더를 지원하지 않기 때문이다.
+
+    클라이언트가 POST /interview/reviews와 같은 필드({"company", "position",
+    "interview_date", "content", "model"?})를 보내면, 서버는
+    {"type": "delta", "content": "..."}*를 이어보내다가
+    {"type": "done", "data": {...InterviewReviewResponse}}를 보낸다. 검증/생성
+    실패는 {"type": "error", "detail": "..."} (연결은 끊기지 않음).
+
+    기존 REST 엔드포인트(POST /interview/reviews)는 그대로 남겨둔다. 면접복기
+    AI 피드백은 전체 복기 내용을 분석하는, 이 서비스에서 가장 긴 텍스트 생성이라
+    스트리밍 가치가 크다고 판단해 학습챗과 같은 패턴으로 추가했다 - 수정
+    시 피드백을 재생성하는 PATCH 흐름은 상대적으로 드문 케이스라 이번 범위에
+    넣지 않았다.
+    """
+    await websocket.accept()
+    client_ip = websocket.client.host if websocket.client else "127.0.0.1"
+    try:
+        while True:
+            raw_payload = await websocket.receive_json()
+            try:
+                payload = InterviewReviewCreateRequest.model_validate(raw_payload)
+            except ValidationError as exc:
+                await websocket.send_json({"type": "error", "detail": str(exc)})
+                continue
+
+            allowed, retry_after = check_rate_limit(
+                f"ws:interview-review:{client_ip}", get_settings().chat_rate_limit
+            )
+            if not allowed:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "detail": "요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
+                        "retry_after": retry_after,
+                    }
+                )
+                continue
+
+            try:
+                async for event_type, data in service.stream_create_review(
+                    user_id=current_user.id,
+                    company=payload.company,
+                    position=payload.position,
+                    interview_date=payload.interview_date,
+                    content=payload.content,
+                    model=payload.model,
+                ):
+                    if event_type == "delta":
+                        await websocket.send_json({"type": "delta", "content": data})
+                    elif event_type == "done":
+                        await websocket.send_json(
+                            {
+                                "type": "done",
+                                "data": InterviewReviewResponse.model_validate(data).model_dump(mode="json"),
+                            }
+                        )
+            except HTTPException as exc:
+                await websocket.send_json({"type": "error", "detail": exc.detail})
+    except WebSocketDisconnect:
+        pass
