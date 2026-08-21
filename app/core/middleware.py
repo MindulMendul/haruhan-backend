@@ -1,5 +1,13 @@
+import logging
+import time
+
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+from app.core.config import get_settings
+from app.core.tokens import decode_access_token
+
+access_logger = logging.getLogger("haruhan.access")
 
 
 class MaxBodySizeMiddleware:
@@ -59,3 +67,64 @@ class SecurityHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_security_headers)
+
+
+def _extract_user_id(scope: Scope) -> str | None:
+    """Authorization 헤더에서 best-effort로 user_id(JWT sub)를 뽑는다.
+
+    로깅용 부가 정보일 뿐이라, 토큰이 없거나 만료/위조됐어도 요청 자체를 막으면
+    안 된다 - 어떤 이유로 실패하든 조용히 None을 반환한다.
+    """
+    headers = dict(scope.get("headers") or [])
+    auth_header = headers.get(b"authorization")
+    if not auth_header:
+        return None
+    try:
+        scheme, _, token = auth_header.decode("latin-1").partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            return None
+        payload = decode_access_token(token, get_settings())
+        return payload.get("sub")
+    except Exception:
+        return None
+
+
+class AccessLogMiddleware:
+    """모든 HTTP 요청을 한 줄짜리 구조화된 로그(key=value)로 남긴다.
+
+    처리되지 않은 예외는 main.py의 전역 핸들러가 이미 스택트레이스까지 로깅하므로,
+    이 미들웨어는 성공 요청을 포함한 전체 트래픽의 최소 정보(누가/언제/얼마나
+    걸렸는지)를 남기는 역할이다. 응답 헤더나 본문 크기 검사까지 포함한 전체 왕복
+    시간을 재려고 가장 바깥쪽 미들웨어로 등록해서 쓴다.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start = time.monotonic()
+        status_code = 0
+
+        async def send_and_capture_status(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            await send(message)
+
+        await self.app(scope, receive, send_and_capture_status)
+
+        duration_ms = (time.monotonic() - start) * 1000
+        client = scope.get("client")
+        access_logger.info(
+            "method=%s path=%s status=%s duration_ms=%.1f client=%s user_id=%s",
+            scope.get("method", ""),
+            scope.get("path", ""),
+            status_code,
+            duration_ms,
+            client[0] if client else "-",
+            _extract_user_id(scope) or "-",
+        )
