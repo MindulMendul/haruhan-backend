@@ -116,7 +116,7 @@
       haruhan-backend는 `GET /health`, redis는 `redis-cli ping`)를 추가하고,
       `depends_on`을 `condition: service_healthy`로 바꿔서 실제로 뜬 뒤에만
       의존 서비스가 시작하게 할 것.
-- [ ] 26. CI 커버리지 게이트 — `.github/workflows/ci.yml`의 `pytest --cov=app`가
+- [x] 26. CI 커버리지 게이트 — `.github/workflows/ci.yml`의 `pytest --cov=app`가
       커버리지를 리포트만 하고 강제하지 않음. `--cov-fail-under=N`을 추가해서
       회귀가 커버리지를 깎으면 CI가 실패하게 할 것. N은 현재 실제 커버리지보다
       살짝 낮게 잡아서(예: 현재 95%대라면 90) 사소한 변동에 CI가 계속

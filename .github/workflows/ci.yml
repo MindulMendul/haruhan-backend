@@ -22,7 +22,9 @@ jobs:
         run: mypy app tests
 
       - name: Run tests
-        run: pytest -v --cov=app
+        # 커버리지가 90% 밑으로 떨어지면 빌드를 실패시킨다. 현재 실제 커버리지(~95%)보다
+        # 살짝 낮게 잡아서, 사소한 변동에 CI가 계속 깨지지 않도록 여유를 뒀다.
+        run: pytest -v --cov=app --cov-report=term-missing --cov-fail-under=90
 
       - name: Dependency vulnerability scan (pip-audit)
         run: pip-audit -r requirements.txt
