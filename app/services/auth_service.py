@@ -17,10 +17,12 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.auth import TokenResponse
 
 _INVALID_CREDENTIALS = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password"
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_credentials", "message": "Invalid email or password"},
 )
 _INVALID_REFRESH_TOKEN = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_refresh_token", "message": "Invalid refresh token"},
 )
 
 

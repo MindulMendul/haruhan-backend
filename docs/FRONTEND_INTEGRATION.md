@@ -129,13 +129,18 @@ PATCH /api/v1/users/me
 
 ## 2. 공통 에러 규칙
 
+> ⚠️ **에러 응답 포맷이 바뀌었습니다.** 예전에는 `{ "detail": "..." }`였는데, 지금은
+> 아래처럼 `{ "error": { "code": "...", "message": "..." } }`로 통일됩니다. 기존에
+> `detail` 필드를 파싱하던 프론트 코드는 `error.code`/`error.message`로 옮겨야
+> 합니다.
+
 | 상황 | 상태코드 | 바디 |
 |---|---|---|
-| 입력값 검증 실패 (Pydantic) | 422 | `{ "detail": [{"loc": [...], "msg": "...", "type": "..."}] }` (**배열**) |
-| 일반 에러 (로그인 실패, 404 등) | 401/404/409/400/500/502 | `{ "detail": "에러 메시지 문자열" }` (**문자열**) |
-| 레이트리밋 초과 | 429 | `{ "error": "Rate limit exceeded: ..." }` ⚠️ **키가 `detail`이 아니라 `error`** |
+| 일반 에러 (로그인 실패, 404 등) | 401/404/409/400/500/502 | `{ "error": { "code": "invalid_credentials", "message": "..." } }` |
+| 입력값 검증 실패 (Pydantic) | 422 | `{ "error": { "code": "validation_error", "message": "...", "details": [{"loc": [...], "msg": "...", "type": "..."}] } }` |
+| 레이트리밋 초과 | 429 | `{ "error": "Rate limit exceeded: ..." }` ⚠️ **이것만 예외적으로 `error`가 객체가 아니라 문자열** (slowapi 라이브러리 기본 포맷, 아직 통일 안 됨) |
 
-422와 나머지는 `detail`의 타입(배열 vs 문자열)이 다르니, 프론트 에러 파싱 시 구분해서 처리해야 합니다. 429만 키 자체가 다릅니다.
+`error.code`는 프론트가 문자열 매칭 없이 에러 종류를 분기할 때 씁니다. 로그인 실패(`invalid_credentials`), 만료/위조된 access token(`invalid_token`), 재사용된 refresh token(`invalid_refresh_token`)처럼 자주 분기해야 하는 케이스부터 구체적인 code를 붙여뒀고, 아직 안 붙은 나머지는 상태코드 기반 기본값(`not_found`, `conflict`, `bad_request`, `internal_error` 등)이 들어갑니다 - 점진적으로 늘려나가는 중이라 오늘 `not_found`였던 에러가 나중에 더 구체적인 code로 바뀔 수 있습니다. 코드로 분기하되, `message`는 사용자에게 보여줄 최종 문구로 쓰지 말고 참고용으로만 쓰세요 (한글/영어가 섞여 있고 국제화 대상이 아닙니다).
 
 레이트리밋이 걸린 엔드포인트(로그인/회원가입/프로필수정/학습챗·퀴즈·면접 생성 등)는 **성공 응답에도** `X-RateLimit-Limit`/`X-RateLimit-Remaining`/`X-RateLimit-Reset` 헤더가 실립니다. 429 응답에는 추가로 `Retry-After`(재시도까지 남은 초)가 실리니, 카운트다운 UI를 만들 때 응답 바디를 파싱할 필요 없이 이 헤더만 읽으면 됩니다.
 
