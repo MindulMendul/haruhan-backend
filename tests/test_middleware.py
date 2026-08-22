@@ -78,3 +78,20 @@ def test_access_log_middleware_logs_authenticated_user_id(caplog):
     records = [r for r in caplog.records if r.name == "haruhan.access"]
     assert len(records) == 1
     assert f"user_id={user_id}" in records[0].getMessage()
+
+
+def test_access_log_middleware_logs_anonymous_for_non_bearer_scheme(caplog):
+    """user_id 추출은 로깅용 부가 정보일 뿐이다 - Bearer가 아닌 인증 스킴(예: Basic)이
+    와도 요청을 막지 않고 조용히 user_id 없음으로 처리해야 한다."""
+    app = create_app()
+    access_logger = _attach_caplog_to_access_logger(caplog)
+    try:
+        with TestClient(app) as client:
+            response = client.get("/health", headers={"Authorization": "Basic dXNlcjpwYXNz"})
+    finally:
+        access_logger.removeHandler(caplog.handler)
+    assert response.status_code == 200
+
+    records = [r for r in caplog.records if r.name == "haruhan.access"]
+    assert len(records) == 1
+    assert "user_id=-" in records[0].getMessage()
