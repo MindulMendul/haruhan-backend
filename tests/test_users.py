@@ -74,6 +74,75 @@ def test_update_password_success_and_old_password_stops_working(client):
     assert new_login.status_code == 200
 
 
+def test_update_password_rejects_password_over_byte_limit(client):
+    # 스키마의 max_length=72는 "문자 수" 기준이라, 멀티바이트 문자로 72자를 채우면
+    # 글자 수 검증(422)은 통과하지만 UTF-8로 인코딩하면 72바이트를 넘는다 -
+    # 그 경우 hash_password()의 바이트 길이 가드가 400으로 잡아내야 한다.
+    tokens = _signup_and_get_tokens(client, email="longpw@example.com")
+    password = "가" * 72
+    response = client.patch(
+        "/api/v1/users/me",
+        json={"password": password, "current_password": "supersecret"},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 400
+
+
+def test_upgrade_guest_success(client):
+    guest = client.post("/api/v1/auth/guest")
+    assert guest.status_code == 201
+    token = guest.json()["access_token"]
+
+    upgrade = client.post(
+        "/api/v1/users/me/upgrade",
+        json={"email": "upgraded@example.com", "password": "supersecret"},
+        headers=_auth_headers(token),
+    )
+    assert upgrade.status_code == 200
+    assert upgrade.json()["email"] == "upgraded@example.com"
+
+    login = client.post(
+        "/api/v1/auth/login", json={"email": "upgraded@example.com", "password": "supersecret"}
+    )
+    assert login.status_code == 200
+
+
+def test_upgrade_guest_rejects_already_real_account(client):
+    tokens = _signup_and_get_tokens(client, email="already-real@example.com")
+    response = client.post(
+        "/api/v1/users/me/upgrade",
+        json={"email": "another@example.com", "password": "supersecret"},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 409
+
+
+def test_upgrade_guest_conflict_with_existing_email(client):
+    _signup_and_get_tokens(client, email="taken-upgrade@example.com")
+    guest = client.post("/api/v1/auth/guest")
+    token = guest.json()["access_token"]
+
+    response = client.post(
+        "/api/v1/users/me/upgrade",
+        json={"email": "taken-upgrade@example.com", "password": "supersecret"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 409
+
+
+def test_upgrade_guest_rejects_password_over_byte_limit(client):
+    guest = client.post("/api/v1/auth/guest")
+    token = guest.json()["access_token"]
+    password = "가" * 72
+
+    response = client.post(
+        "/api/v1/users/me/upgrade",
+        json={"email": "upgrade-longpw@example.com", "password": password},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 400
+
+
 def test_update_without_any_field_requires_no_current_password(client):
     tokens = _signup_and_get_tokens(client)
     response = client.patch(
