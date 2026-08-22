@@ -313,3 +313,17 @@
       있던 테스트인데 이 두 경로엔 없었음)도 추가해
       `user_service.py`를 100%로 끌어올렸다(프로덕션 코드 변경 없음,
       테스트 전용 변경).
+
+## 백로그 (18라운드)
+
+- [x] 42. 학습챗 세션 삭제/메시지전송 404 + WS 스트리밍 그라운딩 테스트
+      보강 - 39~41번과 같은 방식으로 계속 훑던 중 `study_service.py`
+      (97%)에서 세 가지 공백을 발견: (1) `delete_session`의 존재하지
+      않는 세션 404, (2) REST `send_message`의 존재하지 않는 세션 404
+      (WS `stream_message` 쪽은 이미 `test_stream_message_other_users_session_returns_error_event`로
+      커버돼 있었음), (3) WS 스트리밍 경로(`stream_message`)의 RAG
+      그라운딩 분기 - REST `send_message`는 그라운딩 테스트가 있었는데
+      WS 버전엔 대응하는 테스트가 없었다(`GroundingFakeOllamaService`에
+      `chat_stream`이 아예 없었음). 테스트 3개를 추가해
+      `study_service.py`를 100%로 끌어올렸다(프로덕션 코드 변경 없음,
+      테스트 전용 변경).

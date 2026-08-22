@@ -147,6 +147,26 @@ def test_delete_session(client):
     assert get_after_delete.status_code == 404
 
 
+def test_delete_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.delete(
+        "/api/v1/study/sessions/00000000-0000-0000-0000-000000000000",
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_send_message_404_for_nonexistent_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/study/sessions/00000000-0000-0000-0000-000000000000/messages",
+        json={"content": "안녕"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
 def test_rename_session(client):
     token = _signup_and_get_token(client)
     create = client.post(
@@ -215,6 +235,10 @@ class GroundingFakeOllamaService:
         self.last_messages = messages
         return "assistant reply"
 
+    async def chat_stream(self, messages, model):
+        self.last_messages = messages
+        yield "assistant reply"
+
     async def embed(self, text, model):
         if "기억할 사실" in text:
             return [1.0, 0.0]
@@ -260,6 +284,35 @@ def test_later_message_is_grounded_with_relevant_legacy_content(client):
         json={"content": "기억할 사실 관련해서 다시 설명해줘"},
         headers=_auth_headers(token),
     )
+
+    system_messages = [m for m in fake.last_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert "기억할 사실: 스레드는 프로세스 안에서 돈다" in system_messages[0]["content"]
+
+
+def test_stream_message_is_grounded_with_relevant_legacy_content(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "스트리밍 그라운딩 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "기억할 사실 관련해서 다시 설명해줘"})
+        ws.receive_json()  # user_message
+        ws.receive_json()  # delta
+        ws.receive_json()  # done
+        ws.close()
 
     system_messages = [m for m in fake.last_messages if m["role"] == "system"]
     assert len(system_messages) == 1
