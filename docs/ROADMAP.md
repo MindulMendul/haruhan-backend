@@ -525,3 +525,21 @@
       `ollama_service.py`(네트워크 I/O 래퍼)와 CASCADE로 사실상 도달
       불가능한 `auth_service.py`의 방어적 분기 한 줄을 제외한 앱
       전체가 100% 커버리지에 도달했다.
+
+## 백로그 (31라운드)
+
+- [x] 55. JWT_SECRET_KEY 최소 길이 검증 추가 (보안 강화) - 코드
+      커버리지가 사실상 한계에 도달해 이번엔 보안 관점으로 다시
+      훑음. `app/core/config.py`의 `jwt_secret_key`는 필수값으로만
+      선언돼 있고 길이 제약이 전혀 없어서, 운영자가 실수로
+      `"secret"`이나 `"changeme"`처럼 극히 짧고 추측하기 쉬운 값을
+      넣어도 앱이 조용히 정상 기동해버리는 문제가 있었다(`.env.example`
+      주석에 `openssl rand -hex 32` 권장은 이미 있었지만 강제하지는
+      않았음 - PyJWT의 `InsecureKeyLengthWarning`도 경고만 띄우고
+      막지는 않는다). `Settings`에 `field_validator`를 추가해 32자
+      미만이면 앱 기동 자체(Settings 생성 시점의 pydantic
+      ValidationError)를 막도록 했다 - 운영 환경에서 취약한 시크릿이
+      배포되는 걸 코드 리뷰가 아니라 시스템 차원에서 원천 차단한다.
+      `.env.example` 주석도 "경고만 뜸"에서 "기동 자체가 거부됨"으로
+      갱신. `tests/test_config.py`를 신설해 정상 길이 통과/짧은 값
+      거부/빈 문자열 거부를 검증했다.

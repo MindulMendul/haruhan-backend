@@ -1,6 +1,9 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_MIN_JWT_SECRET_KEY_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -60,6 +63,19 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-embed-text"
     # 학습챗 답변 생성 시 참고자료로 첨부할 최대 청크 개수.
     rag_top_k: int = 3
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _validate_jwt_secret_key_length(cls, value: str) -> str:
+        """너무 짧은(추측/무차별대입에 취약한) 시크릿으로 앱이 조용히 뜨는 걸 막는다 -
+        HS256 권장 최소 길이(32바이트)에 맞춘 방어선. `openssl rand -hex 32`로
+        생성하면 64자가 나와 여유 있게 통과한다."""
+        if len(value) < _MIN_JWT_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"JWT_SECRET_KEY는 최소 {_MIN_JWT_SECRET_KEY_LENGTH}자 이상이어야 합니다 "
+                f"(예: `openssl rand -hex 32`로 생성). 현재 {len(value)}자."
+            )
+        return value
 
     @property
     def cors_origin_list(self) -> list[str]:
