@@ -395,6 +395,49 @@ def test_stream_message_rejects_missing_token(client):
             ws.receive_json()
 
 
+def test_stream_message_rejects_malformed_token(client):
+    from starlette.testclient import WebSocketDisconnect
+
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "잘못된 토큰 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token=not-a-real-jwt"
+        ) as ws:
+            ws.receive_json()
+
+
+def test_stream_message_rejects_token_for_deleted_user(client):
+    from starlette.testclient import WebSocketDisconnect
+
+    signup = client.post(
+        "/api/v1/auth/signup", json={"email": "ws-deleted@example.com", "password": "supersecret"}
+    )
+    token = signup.json()["access_token"]
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "탈퇴 계정 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    delete = client.request(
+        "DELETE", "/api/v1/users/me", json={"current_password": "supersecret"}, headers=_auth_headers(token)
+    )
+    assert delete.status_code == 204
+
+    # 계정이 삭제되면 세션도 함께 CASCADE로 지워지지만, access token 자체는 만료
+    # 전까지 형식상 유효하다 - get_current_user_ws가 user_id로 사용자를 다시
+    # 조회해 존재하지 않음을 확인하고 거부해야 한다.
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.receive_json()
+
+
 def test_stream_message_rejects_empty_content(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)
