@@ -356,3 +356,23 @@
       이미 있어 그 안에 신규 `EmptyEmbeddingOllamaService` 더블과 함께
       테스트 3개를 추가해 100%로 끌어올렸다(프로덕션 코드 변경 없음,
       테스트 전용 변경).
+
+## 백로그 (21라운드)
+
+- [x] 45. RAG 백필 스케줄러 잡(`run_scheduled_rag_backfill`) 정상 동작/
+      예외 경로 테스트 보강 - 39~44번 시리즈의 마지막으로
+      `rag_backfill_service.py`(88%)를 정리. 기존엔 "DB 엔진 미초기화"
+      경고 분기만 테스트돼 있었고, 정작 정상적으로 색인하고 건수를
+      로그로 남기는 happy path와 예상 못한 예외(`except Exception`)를
+      잡아 `logger.exception`으로 남기는 분기는 테스트가 없었다 - 이
+      함수는 앱 전역 DB 엔진(`app.db.session._session_factory`)과
+      직접 생성하는 `OllamaService`에 의존해 기존 테스트 더블 주입
+      방식으로는 검증할 수 없었으므로, 테스트 안에서 임시로 별도
+      SQLite 엔진을 그 전역 상태에 채웠다가 `try/finally`로 반드시
+      되돌리는 헬퍼(`_with_initialized_engine`)를 새로 만들고
+      `OllamaService.embed`는 monkeypatch로 스텁 처리했다. 테스트 2개를
+      추가해 `rag_backfill_service.py`를 100%로 끌어올렸다(프로덕션
+      코드 변경 없음, 테스트 전용 변경) - 이로써 실제 네트워크 I/O를
+      감싸기만 하는 `ollama_service.py`(75%, 각 메서드가 거의 그대로
+      httpx 호출이라 별도 커버리지 목표로 삼지 않기로 함)를 제외한
+      전체 서비스 계층이 100% 커버리지에 도달했다.

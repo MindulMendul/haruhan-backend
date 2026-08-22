@@ -3,14 +3,19 @@ import uuid
 from datetime import date
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from app.core.config import get_settings
+from app.db import session as db_session_module
+from app.db.base import Base
+from app.db.session import enable_sqlite_foreign_keys
 from app.repositories.interview_review_repository import InterviewReviewRepository
 from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
 from app.repositories.study_message_repository import StudyMessageRepository
 from app.repositories.study_session_repository import StudySessionRepository
 from app.repositories.user_repository import UserRepository
-from app.services.ollama_service import OllamaServiceError
+from app.services.ollama_service import OllamaService, OllamaServiceError
 from app.services.rag_backfill_service import backfill_unindexed_content, run_scheduled_rag_backfill
 from app.services.rag_service import RagService
 
@@ -140,3 +145,64 @@ def test_run_scheduled_rag_backfill_warns_when_db_uninitialized(caplog):
     with caplog.at_level("WARNING", logger="app.services.rag_backfill_service"):
         asyncio.run(run_scheduled_rag_backfill())
     assert "DB 엔진이 초기화되지 않아" in caplog.text
+
+
+async def _with_initialized_engine(coro_factory):
+    """run_scheduled_rag_backfill()은 자체 get_db()를 통해 모듈 전역
+    _session_factory를 쓰므로, 이 함수 안에서만 임시로 채워뒀다가 반드시
+    되돌린다 - 다른 테스트(엔진 미초기화 케이스 포함)가 이 전역 상태에
+    영향받으면 안 된다."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    enable_sqlite_foreign_keys(engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    db_session_module._engine = engine
+    db_session_module._session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await coro_factory(db_session_module._session_factory)
+    finally:
+        db_session_module._engine = None
+        db_session_module._session_factory = None
+        await engine.dispose()
+
+
+def test_run_scheduled_rag_backfill_indexes_and_logs_counts(monkeypatch, caplog):
+    async def fake_embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    monkeypatch.setattr(OllamaService, "embed", fake_embed)
+
+    async def _run(session_factory):
+        async with session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen"
+            )
+            await StudyMessageRepository(session).create(
+                session_id=study_session.id, role="user", content="내용"
+            )
+            await session.commit()
+
+        with caplog.at_level("INFO", logger="app.services.rag_backfill_service"):
+            await run_scheduled_rag_backfill()
+        assert "study_message 1건" in caplog.text
+        assert "interview_review 0건" in caplog.text
+
+    asyncio.run(_with_initialized_engine(_run))
+
+
+def test_run_scheduled_rag_backfill_logs_exception_on_unexpected_error(monkeypatch, caplog):
+    async def _boom(session, rag_service):
+        raise ValueError("boom")
+
+    monkeypatch.setattr("app.services.rag_backfill_service.backfill_unindexed_content", _boom)
+
+    async def _run(session_factory):
+        with caplog.at_level("ERROR", logger="app.services.rag_backfill_service"):
+            await run_scheduled_rag_backfill()
+        assert "[RAG 백필] 실패" in caplog.text
+
+    asyncio.run(_with_initialized_engine(_run))
