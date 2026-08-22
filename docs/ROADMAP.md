@@ -560,3 +560,17 @@
       두 라우트에 그대로 적용하고, 실제로 429가 걸리는지 테스트 2개를
       추가했다. `docs/FRONTEND_INTEGRATION.md`의 refresh 섹션과 공통
       레이트리밋 요약에도 반영.
+
+## 백로그 (33라운드)
+
+- [x] 57. HSTS(Strict-Transport-Security) 헤더 추가 - 55/56번에 이어
+      보안 관점으로 계속 훑다가 `SecurityHeadersMiddleware`가
+      `X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy`는
+      붙이면서 `Strict-Transport-Security`는 빠뜨린 걸 발견. 이 앱은
+      Caddy 리버스 프록시 뒤에서 HTTPS로만 서빙되는 걸 전제로 하는데
+      (`FRONTEND_INTEGRATION.md` 0장 참고) HSTS가 없으면 프로토콜
+      다운그레이드(HTTPS→HTTP 유도) 공격에 대한 표준 방어선이 빠진
+      상태였다. 이 헤더는 스펙상 브라우저가 평문 HTTP 응답에서는
+      무시하므로 로컬 http 개발 환경에는 영향 없이 항상 붙여도
+      안전하다 - 환경별 분기 없이 `max-age=63072000; includeSubDomains`
+      (2년, 서브도메인 포함)로 추가하고 테스트를 갱신했다.

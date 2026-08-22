@@ -51,6 +51,11 @@ class SecurityHeadersMiddleware:
         (b"x-content-type-options", b"nosniff"),
         (b"x-frame-options", b"DENY"),
         (b"referrer-policy", b"strict-origin-when-cross-origin"),
+        # 브라우저는 이 헤더를 HTTPS 응답에서만 실제로 적용한다(스펙상 평문 HTTP
+        # 응답에 실려 와도 무시함) - 로컬 http 개발 환경에 영향 없이 항상 붙여도
+        # 안전하다. 운영은 Caddy 뒤에서 HTTPS로만 서빙되므로(0. 준비 사항 참고)
+        # 프로토콜 다운그레이드/쿠키 가로채기류 공격에 대한 표준 방어선이 된다.
+        (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
     )
 
     def __init__(self, app: ASGIApp) -> None:
