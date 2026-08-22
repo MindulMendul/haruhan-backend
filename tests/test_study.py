@@ -1,5 +1,6 @@
 import pytest
 
+from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
 from app.services.ollama_service import OllamaServiceError
 
@@ -408,6 +409,25 @@ def test_stream_message_rejects_empty_content(client):
         ws.send_json({"content": "   "})
         error_event = ws.receive_json()
         assert error_event["type"] == "error"
+
+
+def test_stream_message_rejects_content_over_max_length(client, monkeypatch):
+    monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "길이 초과 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "이 메시지는 5자보다 훨씬 깁니다"})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+        assert "최대 5자" in error_event["detail"]
 
 
 def test_stream_message_other_users_session_returns_error_event(client):
