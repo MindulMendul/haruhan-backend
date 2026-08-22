@@ -89,6 +89,15 @@ def test_refresh_token_reuse_revokes_all_sessions(client):
     assert still_using_latest.status_code == 401
 
 
+def test_login_rejects_nonexistent_email(client):
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "never-signed-up@example.com", "password": "whatever123"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_credentials"
+
+
 def test_signup_duplicate_email_conflict(client):
     payload = {"email": "dup@example.com", "password": "supersecret"}
     first = client.post("/api/v1/auth/signup", json=payload)

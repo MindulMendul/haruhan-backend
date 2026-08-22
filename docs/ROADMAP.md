@@ -574,3 +574,22 @@
       무시하므로 로컬 http 개발 환경에는 영향 없이 항상 붙여도
       안전하다 - 환경별 분기 없이 `max-age=63072000; includeSubDomains`
       (2년, 서브도메인 포함)로 추가하고 테스트를 갱신했다.
+
+## 백로그 (34라운드)
+
+- [x] 58. 로그인 타이밍 공격(계정 존재 여부 유출) 방지 - 55~57번에 이어
+      보안 관점으로 계속 훑다가 `AuthService.login()`에서 실제
+      취약점을 발견: `if user is None or ... or not verify_password(...)`가
+      `or`로 단축 평가되기 때문에, 존재하지 않는 이메일로 로그인
+      시도하면 `verify_password`(bcrypt 비교, 수십~수백ms)를 아예
+      건너뛰고 즉시 401을 반환하지만 존재하는 이메일에 틀린 비밀번호를
+      넣으면 bcrypt 비교까지 다 수행한 뒤 401을 반환한다 - 이 응답
+      시간 차이를 측정하면 이메일 목록을 무차별로 넣어보며 어떤
+      이메일이 가입돼 있는지 추측할 수 있는 고전적인 타이밍 기반
+      계정 존재 여부 유출이었다. `core/password.py`의
+      `verify_password`가 `hashed_password=None`일 때 아무의
+      비밀번호도 아닌 캐싱된 더미 해시와 비교하도록 바꾸고,
+      `AuthService.login()`은 사용자 존재 여부와 무관하게
+      `verify_password`를 매번 호출하도록 재구성해 응답 시간을
+      균일하게 만들었다. `tests/test_password.py`를 신설하고
+      `test_auth.py`에 존재하지 않는 이메일 로그인 테스트를 추가했다.

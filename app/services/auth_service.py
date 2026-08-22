@@ -59,8 +59,13 @@ class AuthService:
     async def login(self, email: str, password: str) -> TokenResponse:
         user = await self._users.get_by_email(email)
         # 게스트는 email이 없어 여기 도달할 일이 없지만(hashed_password도 항상 None),
-        # 방어적으로 명시 검사한다.
-        if user is None or user.hashed_password is None or not verify_password(password, user.hashed_password):
+        # 방어적으로 명시 검사한다. verify_password는 이메일이 없어도(hashed_password
+        # 인자가 None이어도) 항상 호출해야 한다 - `or`로 단축 평가해 존재하지 않는
+        # 이메일에서 곧바로 반환해버리면, bcrypt 비교를 건너뛴 만큼 응답이 빨라져서
+        # 응답 시간만으로 이메일 가입 여부를 추측할 수 있게 된다(타이밍 공격).
+        hashed_password = user.hashed_password if user is not None else None
+        password_matches = verify_password(password, hashed_password)
+        if user is None or hashed_password is None or not password_matches:
             raise _INVALID_CREDENTIALS
 
         tokens = await self._issue_tokens(user)
