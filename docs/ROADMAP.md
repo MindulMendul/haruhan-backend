@@ -593,3 +593,29 @@
       `verify_password`를 매번 호출하도록 재구성해 응답 시간을
       균일하게 만들었다. `tests/test_password.py`를 신설하고
       `test_auth.py`에 존재하지 않는 이메일 로그인 테스트를 추가했다.
+
+## 백로그 (35라운드)
+
+- [x] 59. uvicorn이 Caddy의 X-Forwarded-For를 신뢰하지 않던 문제
+      (IP 기준 레이트리밋 사실상 무력화) - 55~58번에 이어 보안/인프라
+      관점으로 계속 훑다가 심각한 인프라 버그를 발견. `docker-compose.yml`
+      구성상 `haruhan-backend` 컨테이너는 호스트에 포트를 노출하지
+      않고 Caddy 리버스 프록시를 거쳐서만 트래픽을 받는데, `Dockerfile`의
+      uvicorn 실행 커맨드에 `--proxy-headers`가 없어서 Caddy가 보내는
+      `X-Forwarded-For`를 아예 무시하고 있었다. 그 결과 slowapi의
+      `get_remote_address()`(레이트리밋 키), WS 라우트의
+      `websocket.client.host`(WS 레이트리밋 키), `AccessLogMiddleware`의
+      `scope["client"]`(접근 로그) 전부가 실제 사용자 IP가 아니라
+      **항상 Caddy 컨테이너의 내부 IP**를 봤다는 뜻 - 즉 `auth_rate_limit`/
+      `chat_rate_limit`이 사용자별이 아니라 전체 트래픽이 하나의 버킷을
+      공유하는 것과 같아져서, 한 사용자(또는 악의적 요청)가 다른 모든
+      사용자를 429로 몰아넣을 수 있는 사실상 레이트리밋 무력화 +
+      DoS 벡터였다. `Dockerfile`의 uvicorn CMD에 `--proxy-headers
+      --forwarded-allow-ips=*`를 추가했다 - 백엔드 포트 자체가
+      호스트/외부에 노출되지 않아 Caddy를 거치지 않고 직접 접속해
+      헤더를 위조할 방법이 없으므로 `*`를 써도 안전하다. 이 fix는
+      ASGI 트랜스포트 계층(uvicorn)에서 한 번에 적용돼 레이트리밋/
+      WS/로깅 세 곳 모두를 동시에 고친다. `tests/test_dockerfile.py`를
+      신설해 이 플래그가 CMD에서 조용히 빠지는 회귀를 막는 테스트를
+      추가했다(애플리케이션 코드 밖의 인프라 설정이라 pytest로 직접
+      기동 검증은 못 하지만, 텍스트 존재 여부는 검증).
