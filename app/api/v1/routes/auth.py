@@ -61,14 +61,24 @@ async def create_guest(
 
 
 @router.post("/refresh", response_model=TokenResponse)
+@limiter.limit(lambda: get_settings().auth_rate_limit)
 async def refresh(
-    payload: RefreshRequest, auth_service: AuthService = Depends(get_auth_service)
+    request: Request,
+    response: Response,
+    payload: RefreshRequest,
+    auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
     return await auth_service.refresh(refresh_token=payload.refresh_token)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(payload: RefreshRequest, auth_service: AuthService = Depends(get_auth_service)) -> None:
+@limiter.limit(lambda: get_settings().auth_rate_limit)
+async def logout(
+    request: Request,
+    response: Response,
+    payload: RefreshRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> None:
     await auth_service.logout(refresh_token=payload.refresh_token)
 
 

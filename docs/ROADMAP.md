@@ -543,3 +543,20 @@
       `.env.example` 주석도 "경고만 뜸"에서 "기동 자체가 거부됨"으로
       갱신. `tests/test_config.py`를 신설해 정상 길이 통과/짧은 값
       거부/빈 문자열 거부를 검증했다.
+
+## 백로그 (32라운드)
+
+- [x] 56. `/auth/refresh`, `/auth/logout`에 레이트리밋 누락 - 55번에
+      이어 보안 관점으로 계속 훑다가, `auth.py`의 signup/login/guest/
+      revoke_session/revoke_all_sessions는 전부 `auth_rate_limit`
+      데코레이터가 붙어있는데 `refresh`/`logout`만 빠져있는 걸 발견.
+      refresh_token 자체는 256비트 엔트로피라 무차별대입은 비현실적이지만,
+      제한이 없으면 (1) FRONTEND_INTEGRATION.md가 권장하는 "401→refresh→
+      재시도" 패턴이 클라이언트 버그로 무한루프에 빠졌을 때 브레이크가
+      없고, (2) refresh는 재사용 탐지 시 `revoke_all_for_user`
+      (DB write)까지 도는 로직이라 특정 계정을 겨냥한 반복 호출로
+      의도치 않은 부하를 줄 수 있었다. 이 파일의 다른 라우트들과
+      같은 패턴(`@limiter.limit(lambda: get_settings().auth_rate_limit)`)을
+      두 라우트에 그대로 적용하고, 실제로 429가 걸리는지 테스트 2개를
+      추가했다. `docs/FRONTEND_INTEGRATION.md`의 refresh 섹션과 공통
+      레이트리밋 요약에도 반영.

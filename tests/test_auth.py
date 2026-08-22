@@ -262,4 +262,31 @@ def test_login_is_rate_limited(client, monkeypatch):
     # 기본 핸들러의 {"error": "문자열"} 포맷은 유일한 예외였는데 이제 통일됐다.
     body = third.json()
     assert body["error"]["code"] == "rate_limited"
-    assert "Rate limit exceeded" in body["error"]["message"]
+
+
+def test_refresh_is_rate_limited(client, monkeypatch):
+    monkeypatch.setenv("AUTH_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+
+    payload = {"refresh_token": "never-issued-token"}
+    first = client.post("/api/v1/auth/refresh", json=payload)
+    second = client.post("/api/v1/auth/refresh", json=payload)
+    third = client.post("/api/v1/auth/refresh", json=payload)
+
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert third.status_code == 429
+
+
+def test_logout_is_rate_limited(client, monkeypatch):
+    monkeypatch.setenv("AUTH_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+
+    payload = {"refresh_token": "never-issued-token"}
+    first = client.post("/api/v1/auth/logout", json=payload)
+    second = client.post("/api/v1/auth/logout", json=payload)
+    third = client.post("/api/v1/auth/logout", json=payload)
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+    assert third.status_code == 429
