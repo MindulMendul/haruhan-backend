@@ -27,6 +27,13 @@ class FailingEmbeddingOllamaService:
         raise OllamaServiceError("boom")
 
 
+class EmptyEmbeddingOllamaService:
+    """호출은 성공하지만 빈 벡터를 돌려주는(장애가 아니라 모델 쪽 이상 응답) 경우를 흉내낸다."""
+
+    async def embed(self, text: str, model: str) -> list[float]:
+        return []
+
+
 def test_cosine_similarity_identical_vectors_is_one():
     assert _cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
 
@@ -151,6 +158,74 @@ def test_retrieve_relevant_logs_warning_on_embedding_failure(db_session_factory,
                 results = await failing_rag.retrieve_relevant(user_id=user.id, query="고양이")
             assert results == []
             assert any("RAG 검색 실패" in record.message for record in caplog.records)
+
+    asyncio.run(_run())
+
+
+def test_index_content_skips_blank_content(db_session_factory):
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            # 빈 문자열/공백뿐인 content는 임베딩 호출 자체를 건너뛴다 - 실패하면
+            # 안 되는 게 아니라 애초에 호출을 안 해야 하므로, 호출되면 즉시 실패하는
+            # 더블로 "호출되지 않았음"을 검증한다.
+            rag = RagService(session=session, ollama_service=FailingEmbeddingOllamaService(), settings=settings)
+            await rag.index_content(
+                user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="   "
+            )
+
+            results = await rag.retrieve_relevant(user_id=user.id, query="아무 질문")
+            assert results == []
+
+    asyncio.run(_run())
+
+
+def test_index_content_skips_when_embedding_is_empty(db_session_factory, caplog):
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            rag = RagService(session=session, ollama_service=EmptyEmbeddingOllamaService(), settings=settings)
+            with caplog.at_level("WARNING", logger="app.services.rag_service"):
+                await rag.index_content(
+                    user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="내용"
+                )
+            assert any("RAG 색인 건너뜀" in record.message for record in caplog.records)
+
+            results = await rag.retrieve_relevant(user_id=user.id, query="아무 질문")
+            assert results == []
+
+    asyncio.run(_run())
+
+
+def test_retrieve_relevant_skips_when_query_embedding_is_empty(db_session_factory, caplog):
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            fake_ollama = FakeEmbeddingOllamaService({"고양이": [1.0, 0.0, 0.0]})
+            rag = RagService(session=session, ollama_service=fake_ollama, settings=settings)
+            await rag.index_content(
+                user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="고양이 이야기"
+            )
+
+            empty_embedding_rag = RagService(
+                session=session, ollama_service=EmptyEmbeddingOllamaService(), settings=settings
+            )
+            with caplog.at_level("WARNING", logger="app.services.rag_service"):
+                results = await empty_embedding_rag.retrieve_relevant(user_id=user.id, query="고양이")
+            assert results == []
+            assert any("RAG 검색 건너뜀" in record.message for record in caplog.records)
 
     asyncio.run(_run())
 
