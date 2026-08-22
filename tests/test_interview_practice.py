@@ -29,6 +29,12 @@ class FailingOllamaService:
     async def chat(self, messages, model):
         raise OllamaServiceError("boom")
 
+    async def embed(self, text, model):
+        # RAG의 retrieve_relevant()가 chat()/generate_json() 실패보다 먼저 embed()를
+        # 호출한다 - 여기서도 실패하면 원하는 502(생성 실패) 대신 embed 관련 예외가
+        # 먼저 터진다. RAG 조회 자체는 정상 동작한다고 가정하고 성공시킨다.
+        return [1.0, 0.0, 0.0]
+
 
 class GroundingFakeOllamaService:
     """마지막으로 모델에 전달된 프롬프트를 기록해두고, 태그가 포함된 텍스트만 서로 가까운
@@ -196,6 +202,89 @@ def test_reaching_max_questions_stops_next_question(client, monkeypatch):
         headers=_auth_headers(token),
     )
     assert no_pending.status_code == 409
+
+
+def test_submit_answer_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_submit_answer_ai_failure_returns_502(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    # 다음 질문을 생성해야 하는(마지막 턴이 아닌) 경로에서 AI 호출이 실패하는 경우.
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+
+
+def test_submit_answer_at_final_turn_ai_failure_returns_502(client, monkeypatch):
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    # 마지막 턴(다음 질문 없이 종합 피드백만 생성)에서 AI 호출이 실패하는 경우.
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "마지막 답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+
+
+def test_complete_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000/complete",
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_complete_session_ai_failure_returns_502(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/complete", headers=_auth_headers(token)
+    )
+    assert response.status_code == 502
 
 
 def test_complete_session_generates_overall_feedback(client):

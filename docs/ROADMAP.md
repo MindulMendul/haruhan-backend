@@ -275,3 +275,16 @@
       `Limiter._inject_headers()`를 그대로 재사용해 기존 동작을 보존하면서
       바디만 다른 에러들과 같은 구조로 바꿨다. 상태코드 429의 기본 code인
       `rate_limited`는 이미 `_DEFAULT_CODES_BY_STATUS`에 있어 그대로 재사용.
+
+## 백로그 (15라운드)
+
+- [x] 39. 면접 연습 submit_answer/complete_session 에러 경로 테스트 보강 -
+      coverage 리포트를 훑다가 `interview_practice_service.py`가 94%로
+      다른 서비스보다 낮은 걸 발견. 미달 라인이 전부 `submit_answer`/
+      `complete_session`의 (1) 존재하지 않는 세션 404, (2) AI 생성 실패
+      502(submit_answer는 다음 질문 생성 경로/마지막 턴 종합 피드백 경로
+      둘 다) 처리였음 - 코드 자체는 이미 올바르게 구현돼 있었지만
+      `create_session`/퀴즈/면접복기의 동급 생성 실패 케이스는 전부
+      테스트가 있는데 이 두 메서드만 빠져 있던 테스트 커버리지 공백이었다.
+      테스트 5개를 추가해 `interview_practice_service.py`를 100%로
+      끌어올렸다(프로덕션 코드 변경 없음, 테스트 전용 변경).
