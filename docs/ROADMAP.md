@@ -488,3 +488,22 @@
       실제 동작이 일치함을 보장했다(WebSocket 이벤트의
       `{"type": "error", "detail": "..."}`는 REST 에러 포맷과 무관한
       별개 규약이라 그대로 둠).
+
+## 백로그 (29라운드)
+
+- [x] 53. 전역 예외 처리기(catch-all)를 실제로 검증하지 못하던 테스트
+      수정 - 문서/코드 정합성을 계속 점검하다가 `app/main.py`의
+      `@app.exception_handler(Exception)`(라우트가 못 잡은 완전히 예상
+      못한 예외를 위한 최후의 안전망)가 89-90번 줄이 미커버 상태인 걸
+      발견했는데, 정작 `test_unhandled_exception_returns_internal_error_code`
+      라는 이름의 테스트가 이미 있었다. 확인해보니 이 테스트는
+      `/api/v1/chat` 라우트가 **명시적으로 잡아** `HTTPException(500,
+      문자열 detail)`로 바꾸는 `OllamaServiceError`만 일으키고
+      있어서, 실제로는 전역 catch-all이 아니라 그냥 상태코드 기반
+      기본 code 경로(우연히 같은 `internal_error` 값이 나옴)를 검증하고
+      있었다 - 이름과 실제로 하는 일이 다른, 진짜 버그가 있어도 못
+      잡아내는 테스트였다. 기존 테스트는 이름을 정확하게 바꾸고,
+      라우트가 절대 못 잡는 `RuntimeError`를 직접 일으키는 새 테스트를
+      추가해 진짜 전역 핸들러 경로를 검증하도록 했다 - `app/main.py`를
+      100%로 끌어올렸다(프로덕션 코드 변경 없음, 테스트 정확성 수정
+      + 신규 테스트 1개).

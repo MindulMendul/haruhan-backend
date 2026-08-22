@@ -44,23 +44,46 @@ def test_validation_error_includes_details(client):
     assert len(body["error"]["details"]) > 0
 
 
-def test_unhandled_exception_returns_internal_error_code():
-    from fastapi.testclient import TestClient
-
-    from app.main import create_app
+def test_ollama_service_error_returns_internal_error_code(client):
+    """/api/v1/chat 라우트가 OllamaServiceError를 명시적으로 잡아 HTTPException(500,
+    detail=str(exc))로 바꾸는 경로 - 문자열 detail이라 상태코드 기반 기본
+    code(internal_error)로 떨어진다. app.main의 전역 catch-all
+    (@app.exception_handler(Exception))과는 다른 경로다 - 그건 아래
+    test_truly_unhandled_exception_hits_global_catch_all이 검증한다."""
 
     class FailingOllamaService:
         async def generate(self, prompt, model):
             raise OllamaServiceError("boom")
 
-    app = create_app()
-    app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
-    with TestClient(app) as client:
-        response = client.post("/api/v1/chat", json={"prompt": "hello"})
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    response = client.post("/api/v1/chat", json={"prompt": "hello"})
 
     assert response.status_code == 500
     body = response.json()
     assert body["error"]["code"] == "internal_error"
+
+
+def test_truly_unhandled_exception_hits_global_catch_all():
+    """라우트가 잡지 않는 예상 못한 예외(OllamaServiceError가 아닌 임의의
+    예외)는 어떤 핸들러도 못 잡고 app.main의 전역 catch-all까지 올라가야
+    한다 - 스택 트레이스가 그대로 노출되지 않고 항상 통일된 500 바디로
+    응답하는지 확인한다."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    class CrashingOllamaService:
+        async def generate(self, prompt, model):
+            raise RuntimeError("완전히 예상 못한 버그")
+
+    app = create_app()
+    app.dependency_overrides[get_ollama_service] = lambda: CrashingOllamaService()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/v1/chat", json={"prompt": "hello"})
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"] == {"code": "internal_error", "message": "Internal server error"}
 
 
 def _signup_token(client, email="errfmt@example.com"):
