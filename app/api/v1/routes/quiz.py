@@ -17,6 +17,7 @@ from app.schemas.quiz import (
     QuizResponse,
     QuizResultResponse,
     QuizSubmitRequest,
+    QuizUpdateRequest,
     WrongAnswerEntry,
     WrongAnswerNotebookResponse,
 )
@@ -110,6 +111,17 @@ async def get_quiz(
         created_at=quiz.created_at,
         questions=[QuizQuestionPublic.model_validate(q) for q in questions],
     )
+
+
+@router.patch("/{quiz_id}", response_model=QuizResponse)
+async def rename_quiz(
+    quiz_id: uuid.UUID,
+    payload: QuizUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    quiz_service: QuizService = Depends(get_quiz_service),
+) -> QuizResponse:
+    quiz = await quiz_service.rename_quiz(quiz_id=quiz_id, user_id=current_user.id, title=payload.title)
+    return QuizResponse.model_validate(quiz)
 
 
 @router.post("/{quiz_id}/submit", response_model=QuizResultResponse)

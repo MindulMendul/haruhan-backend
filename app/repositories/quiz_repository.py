@@ -47,6 +47,10 @@ class QuizRepository:
         )
         return result.scalar_one_or_none()
 
+    async def update_title(self, quiz: Quiz, title: str) -> None:
+        quiz.title = title
+        await self._session.flush()
+
     async def delete(self, quiz: Quiz) -> None:
         await self._session.delete(quiz)
         await self._session.flush()

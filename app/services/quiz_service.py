@@ -276,6 +276,14 @@ class QuizService:
             raise _QUIZ_NOT_FOUND
         return await self._attempts.list_for_quiz(quiz_id, user_id)
 
+    async def rename_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID, title: str) -> Quiz:
+        quiz = await self._quizzes.get_for_user(quiz_id, user_id)
+        if quiz is None:
+            raise _QUIZ_NOT_FOUND
+        await self._quizzes.update_title(quiz, title)
+        await self._session.commit()
+        return quiz
+
     async def delete_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> None:
         quiz = await self._quizzes.get_for_user(quiz_id, user_id)
         if quiz is None:

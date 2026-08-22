@@ -404,6 +404,71 @@ def test_other_user_cannot_access_quiz(client):
     assert response.status_code == 404
 
 
+def test_rename_quiz(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "원래 제목", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+
+    rename = client.patch(
+        f"/api/v1/quizzes/{quiz_id}", json={"title": "새 제목"}, headers=_auth_headers(token)
+    )
+    assert rename.status_code == 200
+    assert rename.json()["title"] == "새 제목"
+
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    assert detail.json()["title"] == "새 제목"
+
+
+def test_rename_quiz_rejects_empty_title(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "원래 제목", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/quizzes/{quiz_id}", json={"title": ""}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 422
+
+
+def test_rename_quiz_404_for_nonexistent_quiz(client):
+    token = _signup_and_get_token(client)
+    response = client.patch(
+        "/api/v1/quizzes/00000000-0000-0000-0000-000000000000",
+        json={"title": "새 제목"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_quiz_404_for_other_users_quiz(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token_a = _signup_and_get_token(client, email="rename-qa@example.com")
+    token_b = _signup_and_get_token(client, email="rename-qb@example.com")
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "A의 퀴즈", "source_text": "내용"},
+        headers=_auth_headers(token_a),
+    )
+    quiz_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/quizzes/{quiz_id}",
+        json={"title": "가로채기 시도"},
+        headers=_auth_headers(token_b),
+    )
+    assert response.status_code == 404
+
+
 def test_delete_quiz(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

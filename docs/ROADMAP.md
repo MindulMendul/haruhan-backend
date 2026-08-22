@@ -252,3 +252,13 @@
       turn id 목록을 먼저 가져와서 세션 삭제 후 각 turn id로
       `forget_content`를 반복 호출해야 했다 - 세션을 먼저 지우면 CASCADE로
       turn 로우 자체가 사라져 id를 못 가져온다.
+
+## 백로그 (13라운드)
+
+- [x] 37. 퀴즈 제목 수정(rename) API — 학습챗 세션(34번)은 이미 제목
+      수정을 지원하는데 퀴즈는 여전히 제목을 바꿀 방법이 없었음.
+      `PATCH /quizzes/{id}`(`{ "title": "..." }`, 소유권 검증, 존재하지
+      않거나 남의 퀴즈면 404)를 추가 - `StudySessionRepository.update_title`/
+      `StudyService.rename_session`과 완전히 같은 패턴을 `QuizRepository`/
+      `QuizService`에 그대로 적용했다. 퀴즈의 문항/정답은 제목과 무관하므로
+      재생성 로직 없이 제목 컬럼만 갱신.

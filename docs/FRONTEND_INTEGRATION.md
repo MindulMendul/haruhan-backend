@@ -229,6 +229,7 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 | POST | `/quizzes` | 생성 (아래 참고) |
 | GET | `/quizzes` | 내 퀴즈 목록 (페이지네이션, 3-1과 동일한 방식) |
 | GET | `/quizzes/{id}` | 상세 — **정답/해설 미노출** |
+| PATCH | `/quizzes/{id}` | `{ "title": "새 제목" }` → 제목만 변경 |
 | POST | `/quizzes/{id}/submit` | 답안 제출 → 채점 |
 | GET | `/quizzes/{id}/result` | 마지막 제출 결과 재조회 |
 | GET | `/quizzes/{id}/attempts` | 재도전 이력 전체 (아래 참고) |

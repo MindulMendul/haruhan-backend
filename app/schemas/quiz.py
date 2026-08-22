@@ -32,6 +32,10 @@ class QuizCreateRequest(BaseModel):
         return self
 
 
+class QuizUpdateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+
+
 class QuizResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
