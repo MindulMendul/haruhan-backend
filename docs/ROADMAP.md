@@ -450,3 +450,25 @@
       성공하는 가짜 클라이언트를 주입하는 방식으로 테스트 1개를
       추가해 `core/health.py`를 100%로 끌어올렸다(프로덕션 코드 변경
       없음, 테스트 전용 변경).
+
+## 백로그 (27라운드)
+
+- [x] 51. `app/db/session.py` 정상 초기화 경로 테스트 보강 - 50번에
+      이어 계속 훑다가 이 모듈이 66%로 가장 낮았던 걸 발견. `init_engine`/
+      `close_engine`/`get_db`/`keep_supabase_alive`/
+      `cleanup_expired_refresh_tokens`/`check_db_health` 전부 "엔진이
+      아직 초기화 안 됐을 때"의 방어 분기만 테스트돼 있었고, 실제로
+      엔진을 초기화한 뒤 정상 동작하는 happy path와 쿼리 실패 시의
+      예외 처리 분기는 전부 미검증이었다(45번에서 다룬
+      `run_scheduled_rag_backfill`과 같은 성격의 공백). 45번의
+      전역 엔진 임시 교체 패턴을 재사용하되, `init_engine`이
+      `pool_size`/`max_overflow`를 그대로 `create_async_engine`에
+      넘기는 탓에 SQLite `:memory:` URL(기본 poolclass가 이 kwarg를
+      안 받는 StaticPool)은 못 쓴다는 걸 확인하고, 대신 임시 파일
+      기반 SQLite URL(운영의 Postgres처럼 AsyncAdaptedQueuePool을 씀)로
+      우회했다. 테스트 8개를 추가해(정상 초기화/해제 왕복,
+      `enable_sqlite_foreign_keys`의 non-sqlite no-op 분기 포함)
+      `db/session.py`를 100%로 끌어올렸다(프로덕션 코드 변경 없음,
+      테스트 전용 변경) - 이로써 `ollama_service.py`(실제 네트워크
+      I/O 래퍼, 별도 목표로 삼지 않기로 함)를 제외한 앱 전체가 사실상
+      100% 커버리지에 도달했다.
