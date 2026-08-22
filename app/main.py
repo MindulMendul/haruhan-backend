@@ -5,12 +5,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
-from app.core.errors import http_exception_handler, validation_exception_handler
+from app.core.errors import (
+    http_exception_handler,
+    rate_limit_exceeded_handler,
+    validation_exception_handler,
+)
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.core.middleware import AccessLogMiddleware, MaxBodySizeMiddleware, SecurityHeadersMiddleware
@@ -59,7 +62,7 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     # slowapi 핸들러 시그니처가 starlette의 범용 예외 핸들러 타입보다 좁게 잡혀 있어
     # 생기는 오탐이다 (slowapi/starlette 생태계에서 흔히 쓰이는 정상 패턴).
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)  # type: ignore[arg-type]
     # 모든 HTTPException/검증 오류를 {"error": {"code", "message"}} 형태로 통일한다 -
     # 프론트가 에러 종류를 한글 메시지 문자열 매칭이 아니라 code로 분기할 수 있게.
     app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]

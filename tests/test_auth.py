@@ -256,3 +256,8 @@ def test_login_is_rate_limited(client, monkeypatch):
     assert third.status_code == 429
     assert "Retry-After" in third.headers
     assert int(third.headers["Retry-After"]) >= 0
+    # 다른 에러들과 같은 {"error": {"code", "message"}} 형태여야 한다 - slowapi
+    # 기본 핸들러의 {"error": "문자열"} 포맷은 유일한 예외였는데 이제 통일됐다.
+    body = third.json()
+    assert body["error"]["code"] == "rate_limited"
+    assert "Rate limit exceeded" in body["error"]["message"]

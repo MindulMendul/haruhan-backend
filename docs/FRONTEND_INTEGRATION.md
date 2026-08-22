@@ -160,7 +160,7 @@ DELETE /api/v1/auth/sessions           → 204 (모든 기기에서 로그아웃
 |---|---|---|
 | 일반 에러 (로그인 실패, 404 등) | 401/404/409/400/500/502 | `{ "error": { "code": "invalid_credentials", "message": "..." } }` |
 | 입력값 검증 실패 (Pydantic) | 422 | `{ "error": { "code": "validation_error", "message": "...", "details": [{"loc": [...], "msg": "...", "type": "..."}] } }` |
-| 레이트리밋 초과 | 429 | `{ "error": "Rate limit exceeded: ..." }` ⚠️ **이것만 예외적으로 `error`가 객체가 아니라 문자열** (slowapi 라이브러리 기본 포맷, 아직 통일 안 됨) |
+| 레이트리밋 초과 | 429 | `{ "error": { "code": "rate_limited", "message": "Rate limit exceeded: ..." } }` |
 
 `error.code`는 프론트가 문자열 매칭 없이 에러 종류를 분기할 때 씁니다. 로그인 실패(`invalid_credentials`), 만료/위조된 access token(`invalid_token`), 재사용된 refresh token(`invalid_refresh_token`)처럼 자주 분기해야 하는 케이스부터 구체적인 code를 붙여뒀고, 아직 안 붙은 나머지는 상태코드 기반 기본값(`not_found`, `conflict`, `bad_request`, `internal_error` 등)이 들어갑니다 - 점진적으로 늘려나가는 중이라 오늘 `not_found`였던 에러가 나중에 더 구체적인 code로 바뀔 수 있습니다. 코드로 분기하되, `message`는 사용자에게 보여줄 최종 문구로 쓰지 말고 참고용으로만 쓰세요 (한글/영어가 섞여 있고 국제화 대상이 아닙니다).
 

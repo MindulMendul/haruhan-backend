@@ -262,3 +262,16 @@
       `StudyService.rename_session`과 완전히 같은 패턴을 `QuizRepository`/
       `QuizService`에 그대로 적용했다. 퀴즈의 문항/정답은 제목과 무관하므로
       재생성 로직 없이 제목 컬럼만 갱신.
+
+## 백로그 (14라운드)
+
+- [x] 38. 레이트리밋(429) 에러 응답도 통일된 `{"error": {"code",
+      "message"}}` 포맷으로 - 21번 항목(에러 포맷 통일) 당시
+      FRONTEND_INTEGRATION.md에 "slowapi 기본 핸들러만 예외적으로
+      `{"error": "문자열"}` 포맷, 아직 통일 안 됨"이라고 명시적으로
+      남겨뒀던 후속 과제. `app/core/errors.py`에 `rate_limit_exceeded_handler`
+      를 새로 만들어 slowapi의 `_rate_limit_exceeded_handler` 대신 등록 -
+      `Retry-After`/`X-RateLimit-*` 헤더는 slowapi의
+      `Limiter._inject_headers()`를 그대로 재사용해 기존 동작을 보존하면서
+      바디만 다른 에러들과 같은 구조로 바꿨다. 상태코드 429의 기본 code인
+      `rate_limited`는 이미 `_DEFAULT_CODES_BY_STATUS`에 있어 그대로 재사용.

@@ -2,6 +2,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
 
 # status code별 기본 code. 라우트/서비스가 아직 구체적인 code를 안 붙인
 # HTTPException(detail이 그냥 문자열인 경우)에 대한 폴백이다.
@@ -41,6 +42,21 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         content=build_error_body(exc.status_code, exc.detail),
         headers=exc.headers,
     )
+
+
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """slowapi 기본 핸들러(`{"error": "Rate limit exceeded: ..."}`, 문자열)를
+    나머지 에러 응답과 같은 `{"error": {"code", "message"}}` 형태로 통일한다.
+
+    Retry-After/X-RateLimit-* 헤더는 slowapi의 Limiter._inject_headers가
+    request.state.view_rate_limit(라우트를 처리하며 slowapi가 채워둔 것)을 보고
+    붙여준다 - 기본 핸들러와 동일하게 그대로 재사용한다.
+    """
+    response = JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"error": {"code": "rate_limited", "message": f"Rate limit exceeded: {exc.detail}"}},
+    )
+    return request.app.state.limiter._inject_headers(response, request.state.view_rate_limit)
 
 
 async def validation_exception_handler(
