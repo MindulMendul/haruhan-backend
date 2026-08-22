@@ -200,6 +200,68 @@ def test_update_with_new_content_regenerates_feedback(client):
     assert fake.call_count == 2
 
 
+def test_update_position_only(client):
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+
+    update = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"position": "프론트엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    assert update.status_code == 200
+    body = update.json()
+    assert body["position"] == "프론트엔드 개발자"
+    assert body["ai_feedback"] == "feedback-1"  # 재생성되지 않아야 함
+    assert fake.call_count == 1
+
+
+def test_update_interview_date_only(client):
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+
+    update = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"interview_date": "2026-08-01"},
+        headers=_auth_headers(token),
+    )
+    assert update.status_code == 200
+    body = update.json()
+    assert body["interview_date"] == "2026-08-01"
+    assert fake.call_count == 1
+
+
+def test_update_review_404_for_nonexistent_review(client):
+    token = _signup_and_get_token(client)
+    response = client.patch(
+        "/api/v1/interview/reviews/00000000-0000-0000-0000-000000000000",
+        json={"company": "새 회사"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_delete_review_404_for_nonexistent_review(client):
+    token = _signup_and_get_token(client)
+    response = client.delete(
+        "/api/v1/interview/reviews/00000000-0000-0000-0000-000000000000",
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
 def test_delete_review(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)
