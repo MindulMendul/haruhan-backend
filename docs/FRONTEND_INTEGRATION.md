@@ -84,7 +84,7 @@ POST /api/v1/auth/login
 
 - `access_token`: JWT. 기본 30분 후 만료. 인증이 필요한 모든 요청에 `Authorization: Bearer <access_token>` 헤더로 실어야 함.
 - `refresh_token`: 랜덤 문자열. 기본 14일 유효. **한 번 쓰면 폐기되고 새 쌍이 발급됨(재사용 불가)** — 그래서 매번 refresh 응답으로 온 새 `refresh_token`으로 저장값을 덮어써야 합니다.
-- 실패 시 `401 { "detail": "Invalid email or password" }`.
+- 실패 시 `401 { "error": { "code": "invalid_credentials", "message": "Invalid email or password" } }`.
 - 로그인/회원가입은 브루트포스 방지로 **분당 5회**로 제한되어 있음(`429` 참고).
 
 ### 1-3. 인증이 필요한 요청
@@ -93,7 +93,7 @@ POST /api/v1/auth/login
 GET /api/v1/users/me
 Authorization: Bearer eyJhbGciOi...
 ```
-- 토큰 없음/무효/만료: `401 { "detail": "Could not validate credentials" }`
+- 토큰 없음/무효/만료: `401 { "error": { "code": "invalid_token", "message": "Could not validate credentials" } }`
 
 ### 1-4. Access token 만료 시 — refresh
 

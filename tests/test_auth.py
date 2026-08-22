@@ -37,6 +37,7 @@ def test_signup_login_refresh_logout_flow(client):
         "/api/v1/auth/login", json={"email": "flow@example.com", "password": "wrongpass"}
     )
     assert wrong_password.status_code == 401
+    assert wrong_password.json()["error"]["code"] == "invalid_credentials"
 
     refresh = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
     assert refresh.status_code == 200
@@ -108,6 +109,7 @@ def test_me_rejects_invalid_token(client):
         "/api/v1/users/me", headers={"Authorization": "Bearer not-a-real-token"}
     )
     assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_token"
 
 
 def test_refresh_rejects_expired_token(client, db_session_factory):
