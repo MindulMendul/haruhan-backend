@@ -92,6 +92,15 @@ async def get_session(
     )
 
 
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    service: InterviewPracticeService = Depends(get_interview_practice_service),
+) -> None:
+    await service.delete_session(session_id=session_id, user_id=current_user.id)
+
+
 @router.post("/{session_id}/answers", response_model=InterviewPracticeAnswerResponse)
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def submit_answer(

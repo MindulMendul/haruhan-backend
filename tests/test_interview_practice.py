@@ -313,3 +313,82 @@ def test_other_user_cannot_access_session(client):
         f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token_b)
     )
     assert response.status_code == 404
+
+
+def test_delete_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="delete-practice@example.com")
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "삭제할 면접"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    delete = client.delete(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert delete.status_code == 204
+
+    get_after_delete = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert get_after_delete.status_code == 404
+
+    listing = client.get("/api/v1/interview/practice-sessions", headers=_auth_headers(token))
+    assert listing.json() == []
+
+
+def test_delete_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client, email="delete-practice-404@example.com")
+    response = client.delete(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000",
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_delete_session_404_for_other_users_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token_a = _signup_and_get_token(client, email="delete-practice-a@example.com")
+    token_b = _signup_and_get_token(client, email="delete-practice-b@example.com")
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "A의 면접"},
+        headers=_auth_headers(token_a),
+    )
+    session_id = create.json()["id"]
+
+    response = client.delete(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token_b)
+    )
+    assert response.status_code == 404
+
+    still_there = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token_a)
+    )
+    assert still_there.status_code == 200
+
+
+def test_delete_session_with_answered_turns(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="delete-practice-answered@example.com")
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "답변 있는 면접"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "제 답변입니다."},
+        headers=_auth_headers(token),
+    )
+
+    delete = client.delete(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert delete.status_code == 204

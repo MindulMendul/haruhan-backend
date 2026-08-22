@@ -160,6 +160,19 @@ class InterviewPracticeService:
         turns = await self._turns.list_for_session(session_id)
         return practice_session, turns
 
+    async def delete_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        practice_session = await self._sessions.get_for_user(session_id, user_id)
+        if practice_session is None:
+            raise _NOT_FOUND
+        # submit_answer()가 문답마다 "interview_practice_turn" source_type/turn.id로
+        # 개별 색인해두므로(세션 단위가 아님), 세션을 지우기 전에 turn id를 먼저
+        # 모아둬야 한다 - 세션을 지우면 CASCADE로 turn 로우 자체가 사라진다.
+        turns = await self._turns.list_for_session(session_id)
+        await self._sessions.delete(practice_session)
+        await self._session.commit()
+        for turn in turns:
+            await self._rag.forget_content(source_type="interview_practice_turn", source_id=turn.id)
+
     async def submit_answer(
         self, session_id: uuid.UUID, user_id: uuid.UUID, answer: str
     ) -> tuple[InterviewPracticeTurn, InterviewPracticeTurn | None]:

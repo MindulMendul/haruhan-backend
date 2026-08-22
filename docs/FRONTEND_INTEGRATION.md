@@ -301,6 +301,7 @@ GET /api/v1/quizzes/wrong-answers
 | POST | `/interview/practice-sessions` | `{ "topic": "백엔드 개발자", "model"?: ... }` → 생성, 첫 질문 자동 포함 |
 | GET | `/interview/practice-sessions` | 내 세션 목록 (페이지네이션, 아래 참고) |
 | GET | `/interview/practice-sessions/{id}` | 상세 (질문/답변/피드백 turns 배열) |
+| DELETE | `/interview/practice-sessions/{id}` | 세션 삭제 → `204` (문답 turns도 함께 삭제) |
 | POST | `/interview/practice-sessions/{id}/answers` | `{ "answer": "..." }` → 피드백 + 다음 질문 |
 | POST | `/interview/practice-sessions/{id}/complete` | 종료 → 종합 피드백 생성 |
 

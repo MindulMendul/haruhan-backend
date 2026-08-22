@@ -240,3 +240,15 @@
       붙여넣어 만든 퀴즈는 RAG에 색인돼 있을 수 있어 `forget_content`도
       같이 호출(study_session에서 만든 퀴즈는 애초에 색인된 게 없어
       안전하게 no-op).
+
+## 백로그 (12라운드)
+
+- [x] 36. 면접 연습 세션 삭제 API — 학습챗/면접복기/퀴즈는 전부 삭제를
+      지원하는데 면접 연습 세션만 유일하게 삭제 방법이 없었음(CRUD
+      대칭성의 마지막 빈틈). `DELETE /interview/practice-sessions/{id}`
+      추가. turns는 `ondelete=CASCADE`로 DB가 알아서 지우지만, RAG 색인은
+      `submit_answer()`가 세션 단위가 아니라 **문답(turn)마다 개별
+      source_id로** 색인해두므로(35번 퀴즈와 다른 점), 세션을 지우기 전에
+      turn id 목록을 먼저 가져와서 세션 삭제 후 각 turn id로
+      `forget_content`를 반복 호출해야 했다 - 세션을 먼저 지우면 CASCADE로
+      turn 로우 자체가 사라져 id를 못 가져온다.

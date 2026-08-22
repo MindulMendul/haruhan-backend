@@ -61,6 +61,10 @@ class InterviewPracticeSessionRepository:
         practice_session.updated_at = utcnow_naive()
         await self._session.flush()
 
+    async def delete(self, practice_session: InterviewPracticeSession) -> None:
+        await self._session.delete(practice_session)
+        await self._session.flush()
+
 
 class InterviewPracticeTurnRepository:
     def __init__(self, session: AsyncSession) -> None:
