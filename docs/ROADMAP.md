@@ -419,3 +419,19 @@
       시크릿 거부, refresh token 생성/해시/만료시각 계산까지 직접
       단위테스트로 커버해 `core/tokens.py`를 100%로 끌어올렸다
       (프로덕션 코드 변경 없음, 테스트 전용 변경).
+
+## 백로그 (25라운드)
+
+- [x] 49. 요청 스키마 길이/개수 제한 검증 테스트 보강 - 48번에 이어
+      스키마 계층을 훑다가, `create_review`(면접복기)는 content 길이
+      제한 테스트가 있는데 그 외 비슷한 검증들은 대부분 테스트가
+      없었던 걸 발견: 퀴즈 생성의 `source_text` 길이 초과/
+      `question_count` 상한 초과(`schemas/quiz.py`), 면접 연습
+      답변(`answer`)의 `max_prompt_length` 초과(`schemas/interview_practice.py`),
+      면접복기 **수정**(PATCH) 요청의 content 길이 초과(생성 쪽과 별개의
+      field_validator라 생성 테스트로는 안 잡힘, `schemas/interview_review.py`),
+      학습챗 REST 메시지 전송의 `max_prompt_length` 초과(WS 쪽은
+      46번에서 이미 보강함, `schemas/study.py`) - 전부 422를 돌려줘야
+      하는데 실제로 그런지 검증된 적이 없었다. 테스트 5개를 추가해
+      네 스키마 파일 모두(사실상) 100%에 근접하게 끌어올렸다(프로덕션
+      코드 변경 없음, 테스트 전용 변경).

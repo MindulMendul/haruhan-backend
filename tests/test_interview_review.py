@@ -243,6 +243,28 @@ def test_update_interview_date_only(client):
     assert fake.call_count == 1
 
 
+def test_update_review_rejects_content_over_max_length(client, monkeypatch):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+
+    # 생성은 기본 길이 제한으로 통과시켜두고, 수정 요청에서만 제한을 낮춰서
+    # update_content_length 검증(생성 쪽과는 별개의 field_validator)이 걸리게 한다.
+    monkeypatch.setenv("MAX_REVIEW_CONTENT_LENGTH", "5")
+    get_settings.cache_clear()
+
+    update = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"content": "이 내용은 5자보다 훨씬 깁니다"},
+        headers=_auth_headers(token),
+    )
+    assert update.status_code == 422
+
+
 def test_update_review_404_for_nonexistent_review(client):
     token = _signup_and_get_token(client)
     response = client.patch(

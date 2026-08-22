@@ -1,5 +1,6 @@
 import json
 
+from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
 from app.services.ollama_service import OllamaServiceError
 
@@ -148,6 +149,32 @@ def test_create_quiz_requires_source(client):
     token = _signup_and_get_token(client)
     response = client.post(
         "/api/v1/quizzes", json={"title": "소스 없음"}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 422
+
+
+def test_create_quiz_rejects_source_text_over_max_length(client, monkeypatch):
+    monkeypatch.setenv("MAX_QUIZ_SOURCE_LENGTH", "5")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client)
+
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "너무 긴 소스", "source_text": "이 내용은 5자보다 훨씬 깁니다"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_create_quiz_rejects_question_count_over_max(client, monkeypatch):
+    monkeypatch.setenv("MAX_QUIZ_QUESTION_COUNT", "3")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client)
+
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "너무 많은 문항", "source_text": "내용", "question_count": 4},
+        headers=_auth_headers(token),
     )
     assert response.status_code == 422
 

@@ -143,6 +143,26 @@ def test_create_session_ai_failure_returns_502(client):
     assert response.status_code == 502
 
 
+def test_submit_answer_rejects_answer_over_max_length(client, monkeypatch):
+    monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "이 답변은 5자보다 훨씬 깁니다"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
 def test_submit_answer_returns_feedback_and_next_question(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

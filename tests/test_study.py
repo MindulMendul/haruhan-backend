@@ -119,6 +119,24 @@ def test_send_message_persists_history_and_calls_ai(client):
     assert messages[1]["role"] == "assistant"
 
 
+def test_send_message_rejects_content_over_max_length(client, monkeypatch):
+    monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "길이 초과 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "이 메시지는 5자보다 훨씬 깁니다"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
 def test_other_user_cannot_access_session(client):
     token_a = _signup_and_get_token(client, email="a@example.com")
     token_b = _signup_and_get_token(client, email="b@example.com")
