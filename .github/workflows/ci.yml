@@ -37,6 +37,14 @@ jobs:
       - name: Dependency vulnerability scan (pip-audit)
         run: pip-audit -r requirements.txt
 
+      - name: Dependency vulnerability scan for dev tools (pip-audit)
+        # requirements.txt는 이미 위에서 감사했으니, 여기서는 requirements-dev.txt가
+        # 추가로 얹는 개발/CI 전용 패키지(pytest, mypy, pip-audit 자신, aiosqlite 등)만
+        # 따로 확인한다. 운영에는 배포되지 않는 도구들이지만, CI 실행 환경 자체를
+        # 공급망 공격으로부터 지키는 것도 의미가 있다 - 지금까지는 이 파일 전체가
+        # pip-audit 대상에서 아예 빠져 있었다.
+        run: pip-audit -r requirements-dev.txt
+
   migrations:
     # 테스트는 db_session_factory 픽스처가 Base.metadata.create_all()로 SQLite에
     # 스키마를 직접 만들어서 쓰기 때문에(마이그레이션 체인을 완전히 건너뜀), test

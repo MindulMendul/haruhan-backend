@@ -1144,3 +1144,22 @@
       100% 커버리지로 확인됐다. 모델/스키마 변경이 아니라
       마이그레이션은 필요 없었다(`alembic check`로 드리프트 없음
       재확인).
+
+## 백로그 (55라운드)
+
+- [x] 79. CI의 pip-audit이 requirements-dev.txt는 감사하지 않던 구멍
+      수정 - 78번까지 애플리케이션/동시성 버그를 계속 찾다가, 이번엔
+      CI 설정 자체를 다시 훑어보다가 발견. `.github/workflows/ci.yml`
+      의 `pip-audit -r requirements.txt`는 운영에 실제로 배포되는
+      의존성만 감사하고, `requirements-dev.txt`가 추가로 얹는 CI/
+      개발 전용 패키지(pytest, mypy, pip-audit 자기 자신, aiosqlite
+      등)는 감사 대상에서 아예 빠져 있었다 - 이 패키지들은 운영에
+      배포되진 않지만, CI 실행 환경 자체가 알려진 취약점이 있는
+      도구로 빌드/테스트를 도는 것도 공급망 관점에서 확인할 가치가
+      있다. `test` job에 `pip-audit -r requirements-dev.txt` 단계를
+      추가했다. 로컬에서 `pip-audit -r requirements.txt`/
+      `pip-audit -r requirements-dev.txt` 둘 다 직접 재실행해 현재는
+      알려진 취약점이 없음을 확인했고, YAML을 파싱해 새 step이
+      올바른 위치에 정확히 들어갔는지도 확인했다. 코드 변경이
+      아니라 워크플로 설정만 바꾼 라운드라 앱 테스트/마이그레이션에는
+      영향이 없고, mypy도 여전히 클린함을 재확인했다.
