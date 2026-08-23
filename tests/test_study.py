@@ -399,6 +399,46 @@ def test_stream_message_sends_deltas_then_done(client):
     assert messages[1]["content"] == "안녕하세요"
 
 
+def test_stream_websocket_closes_ollama_service_dependency_on_disconnect(client):
+    """get_ollama_service는 요청/연결이 끝나면 finally에서 aclose()를 호출하는
+    async generator 의존성이다 (httpx.AsyncClient 커넥션 정리 목적). 다른 WS
+    테스트들은 dependency_overrides에 일반 함수(FakeOllamaService를 바로
+    반환)를 꽂아 이 정리 로직 자체를 우회하므로, 실제 async generator
+    형태로 오버라이드해 WebSocket 연결이 끊길 때도 FastAPI가 finally 블록을
+    정상적으로 실행해주는지 별도로 검증한다."""
+    closed = {"value": False}
+
+    class TrackingOllamaService(FakeOllamaService):
+        async def aclose(self):
+            closed["value"] = True
+
+    async def tracked_get_ollama_service():
+        service = TrackingOllamaService()
+        try:
+            yield service
+        finally:
+            await service.aclose()
+
+    client.app.dependency_overrides[get_ollama_service] = tracked_get_ollama_service
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "정리 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕?"})
+        ws.receive_json()  # user_message
+        ws.receive_json()  # delta
+        ws.receive_json()  # delta
+        ws.receive_json()  # done
+        ws.close()
+
+    assert closed["value"] is True
+
+
 def test_stream_message_rejects_missing_token(client):
     from starlette.testclient import WebSocketDisconnect
 

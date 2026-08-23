@@ -1222,3 +1222,32 @@
       동작(응답 내용)은 그대로라 사용자 대상 API 변경이나 문서
       갱신은 필요 없었고, 모델/스키마 변경도 아니라 마이그레이션은
       필요 없었다(`alembic check`로 드리프트 없음 재확인).
+
+## 백로그 (58라운드)
+
+- [x] 82. `get_ollama_service`의 WebSocket 연결 정리(cleanup) 경로에
+      실제 검증이 없던 구멍 수정 - 81번에서 `get_ollama_service`를
+      `yield` 기반 제너레이터 의존성으로 바꿔 요청/WebSocket 연결이
+      끝나면 `finally`에서 `aclose()`가 자동 호출되도록 했는데,
+      정작 `tests/test_study.py`의 기존 WebSocket 테스트들은 전부
+      `dependency_overrides[get_ollama_service] = lambda: Fake...()`
+      처럼 일반 함수로 오버라이드하고 있었다 - 이러면 FastAPI가
+      실제 의존성을 아예 안 거치고 오버라이드한 값을 바로 쓰므로,
+      이 제너레이터의 `finally` 블록(=WS 연결 종료 시 자동 정리)
+      자체가 어느 테스트로도 실행되지 않는 채로 81번이 머지될
+      뻔했다. 먼저 임시 검증 스크립트로 실제 `TestClient.
+      websocket_connect(...)`를 열었다 닫아서 FastAPI의 제너레이터
+      의존성 정리가 WebSocket 연결 종료 시에도 정상 동작함을
+      확인한 뒤(HTTP 요청뿐 아니라 WS 연결 해제(disconnect) 시에도
+      `finally`가 실행됨), 이 확인을 `tests/test_study.py`에 영구
+      회귀 테스트로 남겼다 - `get_ollama_service`와 동일하게
+      `yield`/`finally` 구조를 갖는 `tracked_get_ollama_service`로
+      오버라이드해, 스트리밍 WebSocket이 정상 종료된 뒤 `aclose()`
+      가 실제로 호출됐는지 플래그로 확인한다(이 테스트를 일부러
+      되돌려서 `finally`를 지워보면 실패하는 것도 확인). 새 버그를
+      고친 게 아니라 81번의 수정이 WS 경로에서도 실제로 유효함을
+      증명하는 회귀 방지 테스트라 사용자 대상 동작 변경이나 문서
+      갱신은 필요 없었고, 모델/스키마 변경도 아니라 마이그레이션은
+      필요 없었다(테스트만 추가된 라운드라 `alembic check`는 재확인
+      대상이 아니지만, mypy와 전체 테스트는 그대로 재실행해 클린함을
+      확인했다).
