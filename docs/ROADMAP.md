@@ -755,3 +755,32 @@
       이 `True`인지 확인하는 테스트를 추가했다 - 실제 커넥션 드롭
       재현은 mock 없이는 어려워 설정값 자체를 검증하는 선에서
       그쳤다.
+
+## 백로그 (42라운드)
+
+- [x] 66. RAG 백필 cron이 매일 전체 이력을 훑던 비효율 수정 - 65번에
+      이어 계속 훑다가 발견. `study_service`/`interview_review_service`는
+      학습챗 메시지/면접 복기를 만드는 시점에 이미 동기로
+      `rag_service.index_content()`를 호출해 색인한다 - 즉
+      `rag_backfill_service.backfill_unindexed_content()`(매일
+      새벽 5시 APScheduler cron)가 정상 상태에서 실제로 찾아내는
+      건 임베딩 API 일시 실패 같은 극소수 예외 케이스뿐이다. 그런데
+      기존 구현은 "안 된 것만 찾는다"면서 정작 `study_messages`/
+      `interview_reviews` 테이블 **전체**를 파이썬으로 읽어오고,
+      `knowledge_chunks`의 색인된 source_id 전체 집합도 따로
+      읽어와서 파이썬에서 대조하고 있었다 - 서비스가 오래될수록
+      거의 모든 행이 이미 색인된 상태가 되므로, 이 cron이 매일
+      서비스 전체 이력 규모로 계속 커지는 조회/메모리 사용을
+      영원히 반복하는 셈이었다. `study_message`/`interview_review`
+      각각에 `knowledge_chunks`를 `(source_type, source_id)` 조건으로
+      LEFT JOIN해서 `WHERE 색인.id IS NULL`로 아직 색인 안 된 행만
+      SQL 단에서 걸러내도록 바꿨다 - `index_content()`가 색인 전에
+      항상 기존 걸 먼저 지우므로(source당 최대 1개) 조인으로 행이
+      중복될 걱정은 없다. 기존 `KnowledgeChunkRepository.
+      get_indexed_source_ids()`는 다른 테스트에서 여전히 널리 쓰여서
+      그대로 남겨뒀다. 새 인덱스/마이그레이션 없이도(`source_id`에
+      이미 index=True가 있음) 충분해 스키마 변경은 하지 않았다
+      (`alembic check`로 드리프트 없음 재확인). 기존 백필 테스트가
+      그대로 통과하는 것으로 동작 동등성을 확인했고, 미리 색인해둔
+      메시지가 여러 개 섞여 있어도 아직 색인 안 된 것만 정확히
+      골라내는지 검증하는 테스트를 추가했다.

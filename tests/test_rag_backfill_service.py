@@ -141,6 +141,53 @@ def test_backfill_unindexed_content_retries_previously_failed_embedding(db_sessi
     asyncio.run(_run())
 
 
+def test_backfill_unindexed_content_scales_with_unindexed_count_not_total_count(db_session_factory):
+    """이 job은 매일 도는 cron인데, 이전 구현은 study_message/interview_review
+    테이블 전체를 파이썬으로 읽어와서 이미 색인된 것과 대조했다 - 서비스가
+    오래될수록 거의 다 색인된 상태가 되므로, 매번 전체 이력 규모의 조회가
+    반복되는 셈이었다. 미리 색인해둔 메시지가 여러 개 섞여 있어도, 아직
+    색인 안 된 것만 정확히 골라 처리하는지(=SQL 단에서 걸러지는지, 결과
+    건수가 여전히 정확한지) 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen"
+            )
+            rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
+
+            already_indexed_ids = set()
+            for i in range(5):
+                message = await StudyMessageRepository(session).create(
+                    session_id=study_session.id, role="user", content=f"이미 색인됨 {i}"
+                )
+                await session.commit()
+                await rag.index_content(
+                    user_id=user.id,
+                    source_type="study_message",
+                    source_id=message.id,
+                    content=message.content,
+                )
+                already_indexed_ids.add(message.id)
+
+            unindexed = await StudyMessageRepository(session).create(
+                session_id=study_session.id, role="user", content="아직 색인 안됨"
+            )
+            await session.commit()
+
+            message_count, review_count = await backfill_unindexed_content(session, rag)
+            assert message_count == 1
+            assert review_count == 0
+
+            chunks = KnowledgeChunkRepository(session)
+            indexed_messages = await chunks.get_indexed_source_ids("study_message")
+            assert indexed_messages == already_indexed_ids | {unindexed.id}
+
+    asyncio.run(_run())
+
+
 def test_run_scheduled_rag_backfill_warns_when_db_uninitialized(caplog):
     with caplog.at_level("WARNING", logger="app.services.rag_backfill_service"):
         asyncio.run(run_scheduled_rag_backfill())
