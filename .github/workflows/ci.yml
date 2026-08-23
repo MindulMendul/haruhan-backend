@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# 같은 브랜치/PR에 짧은 간격으로 커밋이 여러 번 push되면(이 저장소는 로드맵 자동
+# 개발 루프가 시간마다 push하는 브랜치가 있음), 취소 없이는 과거 커밋에 대한 실행이
+# 전부 끝까지 돌아 CI 분(minute)을 낭비한다 - 최신 커밋 결과만 의미 있으므로, 같은
+# ref에 새 실행이 시작되면 그 ref의 진행 중이던 이전 실행을 취소한다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest

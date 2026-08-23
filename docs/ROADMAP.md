@@ -835,3 +835,25 @@
       막는지 재검증한 뒤 되돌렸다. 모델/스키마 변경이 아니라
       마이그레이션은 필요 없었다(`alembic check`로 드리프트 없음
       재확인).
+
+## 백로그 (45라운드)
+
+- [x] 69. CI 워크플로에 concurrency 취소 설정 누락 - 68번에 이어 계속
+      훑다가 발견. 이 저장소는 로드맵 자동 개발 루프가 `claude/
+      fastapi-architecture-improvements-pax3xs` 브랜치에 시간마다
+      (때로는 한 시간 안에 여러 번) push하고, 그 브랜치는 이미 열려
+      있는 PR #5에 반영되므로 매 push가 `pull_request`(synchronize)
+      트리거로 `.github/workflows/ci.yml`의 세 job(test/migrations/
+      secret-scan)을 전부 새로 돈다. `concurrency` 설정이 없어서
+      과거 커밋에 대한 실행들이 취소되지 않고 끝까지(약 몇 분씩)
+      돌아갔다 - 어차피 결과가 의미 있는 건 최신 커밋뿐인데 GitHub
+      Actions 실행 분(minute)만 계속 낭비하는 구조였다. 워크플로
+      최상단에 `concurrency: {group: "${{ github.workflow }}-${{
+      github.ref }}", cancel-in-progress: true}`를 추가해서, 같은
+      브랜치/PR에 새 push가 들어오면 그 ref에 진행 중이던 이전 실행을
+      자동으로 취소하도록 했다. 코드 변경이 아니라 워크플로 설정
+      파일만 바꾼 라운드라 앱 테스트/마이그레이션에는 영향이 없다 -
+      YAML을 직접 파싱해 `concurrency` 블록과 기존 세 job이 모두
+      그대로 남아있는지, mypy도 여전히 클린한지만 확인했다(GitHub
+      Actions 실행 자체는 이 샌드박스에서 재현할 수 없어 설정값
+      검증으로 범위를 좁혔다).
