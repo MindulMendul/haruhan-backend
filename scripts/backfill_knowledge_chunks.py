@@ -67,6 +67,7 @@ async def backfill() -> None:
         logger.info("백필 완료: study_message %d건, interview_review %d건", len(messages), len(reviews))
     finally:
         await engine.dispose()
+        await ollama_service.aclose()
 
 
 if __name__ == "__main__":

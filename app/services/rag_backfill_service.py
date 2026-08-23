@@ -80,15 +80,22 @@ async def run_scheduled_rag_backfill() -> None:
     settings = get_settings()
     ollama_service = OllamaService(base_url=settings.ollama_base_url)
     try:
-        async for session in get_db():
-            rag_service = RagService(session=session, ollama_service=ollama_service, settings=settings)
-            message_count, review_count = await backfill_unindexed_content(session, rag_service)
-        logger.info(
-            "[RAG 백필] 새로 색인: study_message %d건, interview_review %d건",
-            message_count,
-            review_count,
-        )
-    except RuntimeError:
-        logger.warning("[RAG 백필] DB 엔진이 초기화되지 않아 건너뜁니다.")
-    except Exception:
-        logger.exception("[RAG 백필] 실패")
+        try:
+            async for session in get_db():
+                rag_service = RagService(session=session, ollama_service=ollama_service, settings=settings)
+                message_count, review_count = await backfill_unindexed_content(session, rag_service)
+            logger.info(
+                "[RAG 백필] 새로 색인: study_message %d건, interview_review %d건",
+                message_count,
+                review_count,
+            )
+        except RuntimeError:
+            logger.warning("[RAG 백필] DB 엔진이 초기화되지 않아 건너뜁니다.")
+        except Exception:
+            logger.exception("[RAG 백필] 실패")
+    finally:
+        # OllamaService는 요청/연결 범위 DI(get_ollama_service)를 안 거치는 이
+        # 스케줄러 경로에서 직접 만들었으므로, 내부 httpx.AsyncClient도 직접
+        # 닫아줘야 한다 - 안 그러면 하루에 한 번 도는 이 job이 매번 커넥션을
+        # 새로 열고 정리 안 된 채로 버린다.
+        await ollama_service.aclose()

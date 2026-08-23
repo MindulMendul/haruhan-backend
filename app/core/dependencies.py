@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import AsyncIterator
 
 import jwt
 from fastapi import Depends, HTTPException, WebSocket, WebSocketException, status
@@ -65,8 +66,16 @@ async def get_current_user_ws(
     return user
 
 
-def get_ollama_service(settings: Settings = Depends(get_settings)) -> OllamaService:
-    return OllamaService(base_url=settings.ollama_base_url)
+async def get_ollama_service(settings: Settings = Depends(get_settings)) -> AsyncIterator[OllamaService]:
+    """요청(HTTP 하나 또는 WebSocket 연결 하나) 동안 재사용할 OllamaService를
+    만든다. OllamaService는 내부적으로 httpx.AsyncClient 하나를 계속 재사용해
+    커넥션을 유지하므로, 요청/연결이 끝나면 반드시 닫아줘야 한다 - yield 이후의
+    코드가 FastAPI에 의해 정리(cleanup) 시점에 실행된다."""
+    service = OllamaService(base_url=settings.ollama_base_url)
+    try:
+        yield service
+    finally:
+        await service.aclose()
 
 
 def get_rag_service(

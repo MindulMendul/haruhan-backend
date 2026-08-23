@@ -1191,3 +1191,34 @@
       바꾼 라운드라 앱 테스트에는 영향이 없고, 모델/스키마 변경도
       아니라 마이그레이션은 필요 없었다(`alembic check`로 드리프트
       없음 재확인).
+
+## 백로그 (57라운드)
+
+- [x] 81. `OllamaService`가 메서드 호출마다 새 `httpx.AsyncClient`를
+      만들어 커넥션을 매번 새로 맺던 비효율 수정 - `generate`/
+      `chat`/`chat_stream`/`embed`/`list_models`/`generate_json`
+      여섯 메서드 전부가 각자 `async with httpx.AsyncClient(...)`로
+      자기 것만 만들어 쓰고 버리고 있었다 - Ollama 호출 하나당 TCP
+      연결을 새로 맺고 끊는 셈이라, 학습챗 스트리밍처럼 한 요청 안에
+      RAG 임베딩(`embed`) + 답변 생성(`chat_stream`)을 연달아 호출하는
+      경로에서는 같은 대상(같은 Ollama 엔진)에 커넥션을 계속 새로
+      여는 낭비가 있었다. `OllamaService.__init__`에서 `httpx.
+      AsyncClient` 하나를 만들어 인스턴스 수명 동안 재사용하도록
+      바꾸고(`aclose()` 추가), `core/dependencies.py`의
+      `get_ollama_service`를 일반 함수에서 `yield` 기반 제너레이터
+      의존성으로 바꿔서 요청/WebSocket 연결이 끝나면 자동으로
+      `aclose()`가 호출되도록 했다 - FastAPI의 의존성 캐싱 덕분에
+      한 요청 안에서 여러 서비스가 `Depends(get_ollama_service)`를
+      거쳐도 같은 인스턴스(=같은 커넥션)를 공유한다. 직접 DI를
+      안 거치고 `OllamaService`를 만드는 두 곳(`rag_backfill_
+      service.py`의 스케줄러 job, `scripts/backfill_knowledge_
+      chunks.py`의 수동 백필 스크립트)도 각각 `finally`에서
+      `aclose()`를 호출하도록 맞췄다. 같은 인스턴스가 여러 호출에서
+      정말 같은 클라이언트 객체를 재사용하는지, `aclose()` 후
+      `client.is_closed`가 실제로 `True`가 되는지 직접 스크립트로
+      확인했다. 기존 `tests/test_ollama_service.py`의 `httpx.
+      AsyncClient.__init__`을 몽키패치하는 방식이 생성자 호출
+      시점과 무관하게 그대로 통했다(15개 테스트 전부 통과). 코드
+      동작(응답 내용)은 그대로라 사용자 대상 API 변경이나 문서
+      갱신은 필요 없었고, 모델/스키마 변경도 아니라 마이그레이션은
+      필요 없었다(`alembic check`로 드리프트 없음 재확인).
