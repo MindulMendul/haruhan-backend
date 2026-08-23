@@ -3,6 +3,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, model_validator
 
+from app.schemas.validators import NormalizedEmail
+
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -24,7 +26,7 @@ class GuestUpgradeRequest(BaseModel):
     요구하지 않는다. 이미 실계정인 사용자가 호출하면 서비스 계층에서 409로 거부한다.
     """
 
-    email: EmailStr
+    email: NormalizedEmail
     password: str = Field(min_length=8, max_length=72)
 
 
@@ -37,7 +39,7 @@ class AccountDeletionRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
-    email: EmailStr | None = None
+    email: NormalizedEmail | None = None
     password: str | None = Field(default=None, min_length=8, max_length=72)
     # email/password 변경은 탈취된 access token만으로 계정을 완전히 뺏기지 못하도록
     # 반드시 현재 비밀번호 확인을 요구한다.

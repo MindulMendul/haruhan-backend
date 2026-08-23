@@ -1,16 +1,18 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.validators import NormalizedEmail
 
 
 class SignupRequest(BaseModel):
-    email: EmailStr
+    email: NormalizedEmail
     password: str = Field(..., min_length=8, max_length=72)
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: NormalizedEmail
     password: str = Field(..., min_length=1, max_length=72)
 
 

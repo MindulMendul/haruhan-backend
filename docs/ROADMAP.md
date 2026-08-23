@@ -683,3 +683,30 @@
       안 띄워도 `Settings()`는 생성함) 검증을 통과하도록 CI 전용
       더미 `JWT_SECRET_KEY`를 env로 넣었다. 로컬 Postgres 클러스터에
       대고 CI와 동일한 두 명령을 직접 재현해 통과를 확인했다.
+
+## 백로그 (39라운드)
+
+- [x] 63. 이메일 대소문자 미정규화로 중복 계정이 생기던 버그 수정 - 62번에
+      이어 계속 훑다가 발견. `User.email`은 `unique=True` 제약이
+      걸려 있지만 Postgres/SQLite 둘 다 기본은 대소문자를 구분하는
+      비교라서, `SignupRequest`/`LoginRequest`/`GuestUpgradeRequest`/
+      `UserUpdateRequest`가 입력값을 그대로(`EmailStr` 형식 검증만
+      거쳐) DB에 넣거나 비교하고 있었다 - `User@Example.com`으로
+      가입한 뒤 `user@example.com`으로 로그인하면 "계정이 없다"고
+      나오거나, 최악의 경우 대소문자만 다른 이메일로 같은 메일함
+      소유자가 별개 계정을 하나 더 만들 수 있었다(unique 제약이
+      막지 못함). `app/schemas/validators.py`를 신설해
+      `NormalizedEmail`(strip 후 소문자 변환하는 `AfterValidator`를
+      붙인 `EmailStr` 타입 별칭)을 만들고, 이메일을 입력받는 네
+      스키마 전부에 적용했다. 이렇게 하면 앞으로 저장되는 이메일은
+      전부 소문자라서 기존 `unique=True` 컬럼 제약만으로도 대소문자
+      무관 유일성이 그대로 보장되므로, 마이그레이션이나 DB 스키마
+      변경은 필요 없었다(`alembic check`로 드리프트 없음 재확인).
+      이미 대소문자가 섞인 채로 저장된 과거 데이터를 소급 정리하는
+      건 실제 운영 데이터에서 충돌 사례를 수동으로 판단해야 할 수
+      있어 이번 라운드 범위 밖으로 남겨뒀다. `tests/
+      test_schemas_validators.py`를 신설해 네 스키마의 정규화
+      동작을 검증하고, `test_auth.py`에 대소문자만 다른 재가입이
+      `409`가 되는지·대소문자 다른 이메일로 로그인이 되는지 End-to-End
+      테스트를 추가했다. `FRONTEND_INTEGRATION.md`의 회원가입 절에
+      이 동작을 안내하는 문장을 추가했다.

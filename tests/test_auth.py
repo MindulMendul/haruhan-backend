@@ -106,6 +106,33 @@ def test_signup_duplicate_email_conflict(client):
     assert second.status_code == 409
 
 
+def test_signup_duplicate_email_different_case_is_conflict(client):
+    """정규화 전에는 "Case@Example.com"과 "case@example.com"이 서로 다른 문자열이라
+    User.email의 unique 제약을 피해가며 같은 메일함 소유자가 중복 계정을 만들 수
+    있었다. 회원가입 시점에 소문자로 정규화되므로 대소문자만 다른 재가입도 409여야 한다."""
+    first = client.post(
+        "/api/v1/auth/signup", json={"email": "Case@Example.com", "password": "supersecret"}
+    )
+    assert first.status_code == 201
+
+    second = client.post(
+        "/api/v1/auth/signup", json={"email": "case@EXAMPLE.com", "password": "supersecret"}
+    )
+    assert second.status_code == 409
+
+
+def test_login_with_different_case_email_succeeds(client):
+    signup = client.post(
+        "/api/v1/auth/signup", json={"email": "MixedCase@Example.com", "password": "supersecret"}
+    )
+    assert signup.status_code == 201
+
+    login = client.post(
+        "/api/v1/auth/login", json={"email": "mixedcase@example.com", "password": "supersecret"}
+    )
+    assert login.status_code == 200
+
+
 def test_signup_rejects_short_password(client):
     response = client.post(
         "/api/v1/auth/signup", json={"email": "short@example.com", "password": "123"}
