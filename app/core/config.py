@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MIN_JWT_SECRET_KEY_LENGTH = 32
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_VALID_ENVIRONMENTS = {"development", "production"}
 
 
 class Settings(BaseSettings):
@@ -91,6 +92,27 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"LOG_LEVEL은 {sorted(_VALID_LOG_LEVELS)} 중 하나여야 합니다. "
                 f"현재 값: {value!r}"
+            )
+        return normalized
+
+    @field_validator("environment")
+    @classmethod
+    def _validate_environment(cls, value: str) -> str:
+        """`main.py`는 `settings.environment == "production"`일 때만 /docs,
+        /redoc, /openapi.json을 끈다 - 이 비교가 정확히 "production"과만
+        일치해야 하므로, `ENVIRONMENT=Production`처럼 대소문자를 틀리거나
+        `prod`처럼 줄여 쓰면 조용히 False로 평가되어 실제 프로덕션 배포에서도
+        Swagger/ReDoc이 계속 공개로 열려 있게 된다 - 실패가 안전한(fail-closed)
+        게 아니라 안전하지 않은(fail-open) 방향으로 조용히 새는 설정이라, 다른
+        검증들과 달리 이건 named-값 오타를 반드시 시작 시점에 잡아야 한다.
+        대소문자는 정규화하되(관용적인 `Production` 정도는 받아줌), 그 외
+        값은 무엇을 의도했는지 알 수 없으므로 거부한다."""
+        normalized = value.strip().lower()
+        if normalized not in _VALID_ENVIRONMENTS:
+            raise ValueError(
+                f"ENVIRONMENT은 {sorted(_VALID_ENVIRONMENTS)} 중 하나여야 합니다. "
+                f"현재 값: {value!r} (오타가 있으면 프로덕션에서도 Swagger/ReDoc이 "
+                f"계속 노출될 수 있어 엄격하게 검증합니다)."
             )
         return normalized
 

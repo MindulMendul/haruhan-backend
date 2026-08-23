@@ -972,3 +972,33 @@
       (`alembic check`로 드리프트 없음 재확인). `tests/test_config.py`
       에 소문자 정규화와 잘못된 값 거부를 검증하는 테스트를
       추가했다.
+
+## 백로그 (50라운드)
+
+- [x] 74. `ENVIRONMENT` 오타 시 프로덕션에서도 Swagger/ReDoc이 계속
+      열려 있게 되던 fail-open 문제 수정 - 73번(LOG_LEVEL 검증)을
+      끝내고 바로 옆에 있는 `environment` 필드도 같은 각도로 보다가
+      발견. `app/main.py`가 `settings.environment == "production"`
+      일 때만 `/docs`/`/redoc`/`/openapi.json`을 끄는데, 이 비교는
+      정확히 소문자 `"production"`과 문자열이 완전히 같아야 참이
+      된다 - `ENVIRONMENT=Production`(대문자 시작)이나 `prod`처럼
+      흔히 실수할 수 있는 값을 넣으면 조용히 `False`가 되어, 실제
+      운영 배포에서도 이 API의 유일한 실제 HTML 서빙 지점인 Swagger/
+      ReDoc이 그대로 공개돼 있게 된다. 73번(LOG_LEVEL)이나 55번
+      (JWT_SECRET_KEY)은 잘못 넣으면 앱이 못 뜨는(fail-closed) 쪽인
+      반면, 이건 잘못 넣어도 앱이 멀쩡히 뜨면서 보안 기능만 조용히
+      안 걸리는(fail-open) 훨씬 나쁜 실패 방향이라 더 시급하게
+      막아야 할 케이스였다. `Settings`에 `_validate_environment`
+      `field_validator`를 추가해 `development`/`production` 두
+      값만(대소문자 무관, 정규화됨) 허용하고 그 외는 시작 시점에
+      명확한 한국어 메시지로 거부하도록 했다. `tests/
+      test_security_headers.py`가 이미 `ENVIRONMENT=production`
+      (소문자)로 정확히 테스트하고 있어서 기존 동작에는 영향이
+      없음을 재실행으로 확인했다. `.env.example`에도 유효한 값과
+      오타 시 거부된다는 점을 안내하는 주석을 추가했다. 사용자
+      대상 API 동작 변화가 없는 설정 검증 전용 변경이라
+      `FRONTEND_INTEGRATION.md`는 갱신하지 않았고, 모델/스키마
+      변경도 아니라 마이그레이션은 필요 없었다(`alembic check`로
+      드리프트 없음 재확인). `tests/test_config.py`에 대소문자
+      정규화와 잘못된 값(`prod`) 거부를 검증하는 테스트를
+      추가했다.
