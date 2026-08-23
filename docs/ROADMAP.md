@@ -1163,3 +1163,31 @@
       올바른 위치에 정확히 들어갔는지도 확인했다. 코드 변경이
       아니라 워크플로 설정만 바꾼 라운드라 앱 테스트/마이그레이션에는
       영향이 없고, mypy도 여전히 클린함을 재확인했다.
+
+## 백로그 (56라운드)
+
+- [x] 80. WebSocket 메시지 크기가 HTTP 요청 본문 제한보다 16배 더
+      관대하던 문제 수정 - HTTP는 `MaxBodySizeMiddleware`(기본
+      `MAX_BODY_SIZE_BYTES=1MiB`)로 요청 본문 크기를 명시적으로
+      막아두고 있는데, 같은 스트리밍 기능을 제공하는 WebSocket
+      경로(학습챗/면접복기 `/stream`)는 이 미들웨어를 아예 거치지
+      않고 uvicorn의 기본값(`ws_max_size=16MiB`)을 그대로 쓰고
+      있었다 - 아무도 의도적으로 정한 적 없는 값인데, 실제 메시지
+      크기 기대치(`max_prompt_length` 4000자, `max_review_content_
+      length` 10000자)보다 수백 배 관대해서 WS 쪽만 유독 대용량
+      메시지를 통한 메모리 소모형 DoS에 취약했다. 직접 uvicorn
+      서버를 띄우고 `websockets` 클라이언트로 2MiB 메시지를 보내
+      재현했다 - 기본값으로는 그대로 통과해 처리되고, `--ws-max-
+      size=1048576`을 켜면 프로토콜 레벨에서 `1009 message too
+      big`으로 거부되는 것까지 양쪽 다 직접 확인했다. `Dockerfile`
+      의 uvicorn CMD에 이 플래그를 추가해 HTTP 쪽 기본값과 같은
+      1MiB로 두 경로의 보호 수준을 통일했다. `MAX_BODY_SIZE_BYTES`
+      처럼 런타임에 읽는 앱 설정이 아니라 uvicorn 시작 시점의 고정
+      플래그라 실제 env var 값과 자동으로 동기화되진 않는다는 점은
+      59번(`--proxy-headers`)과 같은 성격의 한계로 남겨뒀다.
+      `tests/test_dockerfile.py`에 이 플래그가 CMD에서 조용히
+      빠지는 회귀를 막는 테스트를 추가했다(59번 때 확립한 패턴과
+      동일). 코드 변경이 아니라 Dockerfile/uvicorn 실행 옵션만
+      바꾼 라운드라 앱 테스트에는 영향이 없고, 모델/스키마 변경도
+      아니라 마이그레이션은 필요 없었다(`alembic check`로 드리프트
+      없음 재확인).

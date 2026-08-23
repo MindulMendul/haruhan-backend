@@ -27,4 +27,15 @@ EXPOSE 8000
 # 있음) - 접근 로그의 client IP도 마찬가지로 의미가 없어진다. "*"를 쓰는 게
 # 안전한 이유는 백엔드 포트 자체가 외부에 노출되지 않아 Caddy를 거치지 않고
 # 직접 접속해 헤더를 위조할 방법이 없기 때문이다.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+#
+# --ws-max-size=1048576: HTTP 요청은 MaxBodySizeMiddleware(기본 1MiB,
+# MAX_BODY_SIZE_BYTES)로 크기를 막아두지만, WebSocket 경로(study/interview-review
+# 스트리밍)는 이 미들웨어를 안 거치고 uvicorn의 기본값(16MiB)을 그대로 쓰고
+# 있었다 - 아무도 의도적으로 정한 적 없는 값인데, 정작 실제 메시지 크기
+# 기대치(max_prompt_length=4000자, max_review_content_length=10000자)보다
+# 수백 배 더 관대해서 WS 쪽만 유독 대용량 메시지를 통한 메모리 소모형 DoS에
+# 취약했다. 직접 uvicorn 서버를 띄워 2MiB 메시지가 기본값으로는 그대로
+# 통과하고 이 플래그를 켜면 프로토콜 레벨에서 거부되는(1009 message too big)
+# 것까지 재현 확인했다. HTTP 쪽 기본값과 같은 1MiB로 맞춰서 두 경로의
+# 보호 수준을 통일한다.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*", "--ws-max-size=1048576"]
