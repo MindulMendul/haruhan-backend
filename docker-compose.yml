@@ -116,6 +116,20 @@ services:
     depends_on:
       haruhan-backend:
         condition: service_healthy
+    healthcheck:
+      # 다른 서비스(redis/prometheus/grafana/haruhan-backend)는 전부 healthcheck가
+      # 있는데 caddy만 빠져 있었다 - 이 컨테이너가 유일하게 80/443을 호스트에 노출하는
+      # 실제 진입점인데도, 프로세스가 멈추거나(인증서 갱신 루프 등) Caddyfile 설정
+      # 오류로 제대로 못 뜬 상태를 감지할 방법이 없었다. 외부 도메인/TLS 인증서
+      # 상태와 무관하게 항상 떠 있는 Caddy 관리 API(기본적으로 localhost:2019)를
+      # 확인한다 - DNS/인증서 문제로 실제 사이트가 응답 못 해도 프로세스 자체는
+      # 살아있을 수 있어, "프로세스가 응답하는가"만 보는 게 이 healthcheck의 목적과
+      # 더 맞다.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - haruhan-net
 

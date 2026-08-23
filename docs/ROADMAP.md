@@ -857,3 +857,25 @@
       그대로 남아있는지, mypy도 여전히 클린한지만 확인했다(GitHub
       Actions 실행 자체는 이 샌드박스에서 재현할 수 없어 설정값
       검증으로 범위를 좁혔다).
+
+## 백로그 (46라운드)
+
+- [x] 70. `docker-compose.yml`의 caddy 서비스에 healthcheck 누락 - 69번에
+      이어 계속 훑다가 발견. `haruhan-backend`/`redis`/`prometheus`/
+      `grafana`는 전부 `healthcheck`가 정의돼 있는데, 정작 80/443을
+      호스트에 노출하는 유일한 실제 진입점인 `caddy`만 빠져 있었다 -
+      Caddy 프로세스가 멈추거나(인증서 갱신 루프 등) `Caddyfile` 설정
+      오류로 제대로 못 뜬 상태를 Docker/Compose가 감지할 방법이
+      없었다(`restart: unless-stopped`는 컨테이너가 죽어야 재시작하지,
+      떠 있는데 응답을 못 하는 상태는 못 잡는다). 외부 도메인/TLS
+      인증서 발급 상태와 무관하게 항상 떠 있는 Caddy 관리 API
+      (`localhost:2019`)를 `wget --spider`로 확인하도록 했다 - 실제
+      사이트(`{$DOMAIN}`)를 체크 대상으로 삼으면 DNS/인증서 문제
+      때문에 healthcheck가 실패해버려서 "Caddy 프로세스 자체는
+      정상인데 사이트만 아직 준비 안 됨" 케이스와 "Caddy가 진짜 죽음"
+      케이스를 구분할 수 없다. 다른 서비스와 같은 간격/타임아웃/
+      재시도 값을 맞췄다. 코드 변경이 아니라 docker-compose 설정만
+      바꾼 라운드라 앱 테스트는 영향이 없고, `docker compose config`
+      로 파일이 유효하게 파싱되는지와 healthcheck 필드가 정확히
+      들어갔는지 직접 확인했다(실제 컨테이너를 띄워보는 건 도메인/
+      인증서가 필요해 이 샌드박스에서는 재현할 수 없었다).
