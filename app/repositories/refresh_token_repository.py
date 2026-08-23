@@ -51,6 +51,20 @@ class RefreshTokenRepository:
         token.revoked_at = utcnow_naive()
         await self._session.flush()
 
+    async def revoke_if_active(self, token_id: uuid.UUID) -> bool:
+        """아직 폐기되지 않은 경우에만 폐기한다(compare-and-swap). 호출자가
+        "아직 안 폐기됨"을 확인한 뒤 이 메서드를 부르기까지도 시간차가 있어서,
+        같은 토큰으로 거의 동시에 온 두 요청이 둘 다 그 확인을 통과해버릴 수
+        있다 - `WHERE revoked_at IS NULL`을 건 원자적 UPDATE라 그 중 하나만
+        실제로 폐기에 성공(rowcount=1)하고, 나머지는 0건으로 실패를 돌려받는다."""
+        result = await self._session.execute(
+            update(RefreshToken)
+            .where(RefreshToken.id == token_id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=utcnow_naive())
+        )
+        await self._session.flush()
+        return result.rowcount == 1  # type: ignore[attr-defined]
+
     async def revoke_all_for_user(self, user_id: uuid.UUID) -> None:
         """이미 폐기된 토큰이 재사용되면(탈취 의심) 해당 유저의 살아있는 토큰을
         전부 끊어서 공격자와 정상 사용자 모두 강제 로그아웃시킨다."""

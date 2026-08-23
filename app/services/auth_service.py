@@ -108,7 +108,18 @@ class AuthService:
             raise _INVALID_REFRESH_TOKEN
 
         # 토큰 로테이션: 사용된 refresh token은 즉시 폐기하고 새 쌍을 발급한다.
-        await self._refresh_tokens.revoke(stored)
+        # 위에서 "아직 안 폐기됨"을 확인한 것과 실제로 폐기하는 것 사이에도 시간차가
+        # 있는 check-then-act다 - 같은 토큰으로 거의 동시에 온 다른 요청도 같은 확인을
+        # 통과해 있을 수 있어서, 일반 UPDATE로 그냥 폐기하면 둘 다 성공해 하나의 토큰
+        # 소비로 두 개의 유효한 세션이 나온다(로테이션/재사용 탐지가 막으려던 상황
+        # 그대로 허용). revoke_if_active는 `WHERE revoked_at IS NULL`을 건 원자적
+        # UPDATE라 그 중 하나만 실제로 성공한다 - 실패한 쪽은 이미 재사용된(=탈취
+        # 의심) 토큰을 만난 것과 동일하게 취급해 전체 세션을 강제로 끊는다.
+        if not await self._refresh_tokens.revoke_if_active(stored.id):
+            await self._refresh_tokens.revoke_all_for_user(stored.user_id)
+            await self._session.commit()
+            raise _INVALID_REFRESH_TOKEN
+
         tokens = await self._issue_tokens(user)
         await self._session.commit()
         return tokens

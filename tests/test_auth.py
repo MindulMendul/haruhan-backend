@@ -9,10 +9,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.clock import utcnow_naive
 from app.core.config import get_settings
-from app.core.tokens import hash_refresh_token
+from app.core.tokens import hash_refresh_token, refresh_token_expiry
 from app.db.base import Base
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
+from app.repositories.refresh_token_repository import RefreshTokenRepository
+from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
 
 
@@ -93,6 +95,105 @@ def test_refresh_token_reuse_revokes_all_sessions(client):
         "/api/v1/auth/refresh", json={"refresh_token": new_tokens["refresh_token"]}
     )
     assert still_using_latest.status_code == 401
+
+
+def test_revoke_if_active_rejects_second_writer(db_session_factory):
+    """refresh()는 "제시된 토큰이 아직 안 폐기됐는가"를 확인한 뒤에야 실제로
+    폐기하는 check-then-act 구조였다 - 같은 토큰으로 거의 동시에 온 두 요청이
+    둘 다 그 확인을 통과해버리면, 일반 UPDATE로는 둘 다 폐기에 성공해 하나의
+    토큰 소비로 두 개의 유효한 세션이 나올 수 있었다(로테이션/재사용 탐지가
+    막으려던 상황을 그대로 허용하는 셈). 이를 막는 compare-and-swap인
+    revoke_if_active()를 같은 토큰에 순서대로 두 번 호출해서, 첫 번째만
+    성공(True)하고 두 번째는 실패(False)하는지 직접 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            repo = RefreshTokenRepository(session)
+            token = await repo.create(
+                user_id=user.id,
+                token_hash=hash_refresh_token("raw-token-for-cas-test"),
+                expires_at=refresh_token_expiry(get_settings()),
+            )
+            await session.commit()
+
+            first = await repo.revoke_if_active(token.id)
+            second = await repo.revoke_if_active(token.id)
+            await session.commit()
+            return first, second
+
+    first, second = asyncio.run(_run())
+
+    assert first is True
+    assert second is False
+
+
+def test_concurrent_refresh_of_same_token_is_detected_and_revokes_all_sessions(
+    db_session_factory, monkeypatch
+):
+    """위 CAS 자체가 아니라, refresh() 서비스 로직이 CAS 실패를 실제로 "재사용
+    의심"과 동일하게 처리하는지 검증한다. 진짜 asyncio.gather 동시 재현은 이
+    흐름이 폐기(UPDATE) + 발급(INSERT) + 커밋까지 여러 단계를 거치는 다중 쓰기
+    트랜잭션이라 SQLite 파일 락 모델에서 결정적이지 않다(54번 라운드
+    interview_practice 레이스 테스트에서 이미 확인한 것과 같은 한계) - 그래서
+    "같은 토큰으로 동시에 온 다른 요청이 이미 폐기+로테이션까지 끝냈다"는 상황을
+    revoke_if_active 호출 지점에 결정적으로 주입한다. 패자가 되는 이 요청은
+    이미 재사용된 토큰을 만난 것과 똑같이 401을 받고, 승자가 방금 발급받은
+    최신 토큰을 포함해 그 유저의 모든 활성 세션이 강제로 끊겨야 한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            settings = get_settings()
+            raw_token = "raw-token-for-refresh-race-test"
+            await RefreshTokenRepository(session).create(
+                user_id=user.id,
+                token_hash=hash_refresh_token(raw_token),
+                expires_at=refresh_token_expiry(settings),
+            )
+            await session.commit()
+
+            class RaceInjectingRefreshTokenRepository(RefreshTokenRepository):
+                async def revoke_if_active(self, token_id):
+                    # "동시에" 도착한 다른 요청(승자)이 이 CAS 호출 직전에 이미
+                    # 같은 토큰을 폐기하고 자기 몫의 새 토큰 쌍까지 발급받았다고
+                    # 가정한다.
+                    await super().revoke_if_active(token_id)
+                    await self.create(
+                        user_id=user.id,
+                        token_hash=hash_refresh_token("winner-issued-token"),
+                        expires_at=refresh_token_expiry(settings),
+                    )
+                    # 승자가 이미 폐기했으니, 지금 이 (패자) 호출은 실패해야 한다.
+                    return await super().revoke_if_active(token_id)
+
+            import app.services.auth_service as auth_service_module
+
+            monkeypatch.setattr(
+                auth_service_module,
+                "RefreshTokenRepository",
+                RaceInjectingRefreshTokenRepository,
+            )
+            service = AuthService(session=session, settings=settings)
+
+            try:
+                await service.refresh(raw_token)
+                caught = None
+            except HTTPException as exc:
+                caught = exc
+
+            remaining = await RefreshTokenRepository(session).list_active_for_user(user.id)
+            return caught, remaining
+
+    caught, remaining = asyncio.run(_run())
+
+    assert caught is not None
+    assert caught.status_code == 401
+    assert remaining == []
 
 
 def test_login_rejects_nonexistent_email(client):
