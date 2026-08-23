@@ -29,6 +29,51 @@ jobs:
       - name: Dependency vulnerability scan (pip-audit)
         run: pip-audit -r requirements.txt
 
+  migrations:
+    # 테스트는 db_session_factory 픽스처가 Base.metadata.create_all()로 SQLite에
+    # 스키마를 직접 만들어서 쓰기 때문에(마이그레이션 체인을 완전히 건너뜀), test
+    # job이 전부 통과해도 alembic 마이그레이션이 실제 모델과 어긋나 있을 수 있다 -
+    # 운영은 create_all이 아니라 이 마이그레이션들로 스키마를 만들므로, 여기서
+    # 놓치면 배포 시점에야 스키마 불일치가 드러난다. alembic check는 실제 DB
+    # 연결이 있어야 하고(alembic/env.py가 DATABASE_URL로 엔진을 만듦) SQLite가
+    # 아닌 운영과 같은 Postgres 방언이어야 신뢰할 수 있어 서비스 컨테이너로 띄운다.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: haruhan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/haruhan
+      # Settings.jwt_secret_key는 32자 이상을 요구한다 - 이 job은 서버를 띄우지
+      # 않고 alembic만 돌리지만 get_settings()가 Settings()를 생성하는 순간
+      # 검증이 걸리므로 형식만 맞는 더미 값을 준다.
+      JWT_SECRET_KEY: ci-only-dummy-secret-key-not-for-production-use
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements-dev.txt
+
+      - name: Apply migrations
+        run: alembic upgrade head
+
+      - name: Check for model/migration drift
+        run: alembic check
+
   secret-scan:
     runs-on: ubuntu-latest
     steps:

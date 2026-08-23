@@ -660,3 +660,26 @@
       헤더를 명시했다. `tests/test_cors.py`를 신설해 노출 목록,
       허용된/안 허용된 origin 분기까지 검증했다(이전엔 CORS 전용
       테스트가 아예 없었다).
+
+## 백로그 (38라운드)
+
+- [x] 62. CI에 `alembic check` 단계 추가 - 마이그레이션/모델 드리프트가
+      머지될 때까지 아무도 못 잡던 구멍을 발견. `tests/conftest.py`의
+      `db_session_factory` 픽스처는 `Base.metadata.create_all()`로
+      SQLite에 스키마를 직접 만들어서 쓰기 때문에, alembic 마이그레이션
+      체인을 완전히 건너뛴다 - 즉 모델을 고치고 그에 맞는 마이그레이션
+      파일을 깜빡해도 `pytest`는 100% 초록불이고, `mypy`/`pip-audit`/
+      `gitleaks`로 구성된 기존 CI(`.github/workflows/ci.yml`)도 이걸
+      전혀 검사하지 않았다. 실제로 스키마가 어긋나는지는 `alembic
+      check`만 확인할 수 있는데, 이건 진짜 DB 연결이 필요하고
+      (`migrations/env.py`가 `DATABASE_URL`로 엔진을 만듦) SQLite가
+      아니라 운영과 같은 Postgres 방언이어야 신뢰할 수 있다. CI에
+      `postgres:16` 서비스 컨테이너를 띄우는 `migrations` job을 새로
+      추가해 `alembic upgrade head` 후 `alembic check`를 돌리도록
+      했다 - `requirements-dev.txt`가 `requirements.txt`를 통해
+      `alembic`/`asyncpg`를 이미 포함하고 있어 별도 설치는 필요
+      없었다. `Settings.jwt_secret_key`가 55번부터 32자 이상을
+      요구하므로, `get_settings()`가 호출되는 순간(alembic이 서버는
+      안 띄워도 `Settings()`는 생성함) 검증을 통과하도록 CI 전용
+      더미 `JWT_SECRET_KEY`를 env로 넣었다. 로컬 Postgres 클러스터에
+      대고 CI와 동일한 두 명령을 직접 재현해 통과를 확인했다.
