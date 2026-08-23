@@ -44,6 +44,24 @@ def test_validation_error_includes_details(client):
     assert len(body["error"]["details"]) > 0
 
 
+def test_validation_error_details_do_not_leak_raw_input(client):
+    """RequestValidationError.errors()는 검증 실패 필드의 원본 값을 "input"으로
+    그대로 담고 있다 - password처럼 짧아서 검증에 실패한 민감한 값이 422 응답
+    바디에 평문으로 실려 나가면 안 된다. loc/type/msg 같은 프론트가 실제로 쓰는
+    필드는 여전히 남아 있어야 한다."""
+    response = client.post(
+        "/api/v1/auth/signup", json={"email": "leak@example.com", "password": "short"}
+    )
+    assert response.status_code == 422
+    body = response.json()
+    details = body["error"]["details"]
+    assert len(details) > 0
+    for error in details:
+        assert "input" not in error
+    assert any(error["loc"] == ["body", "password"] for error in details)
+    assert '"input"' not in response.text
+
+
 def test_ollama_service_error_returns_internal_error_code(client):
     """/api/v1/chat 라우트가 OllamaServiceError를 명시적으로 잡아 HTTPException(500,
     detail=str(exc))로 바꾸는 경로 - 문자열 detail이라 상태코드 기반 기본

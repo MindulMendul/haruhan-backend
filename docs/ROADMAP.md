@@ -710,3 +710,25 @@
       `409`가 되는지·대소문자 다른 이메일로 로그인이 되는지 End-to-End
       테스트를 추가했다. `FRONTEND_INTEGRATION.md`의 회원가입 절에
       이 동작을 안내하는 문장을 추가했다.
+
+## 백로그 (40라운드)
+
+- [x] 64. 422 검증 오류 응답이 비밀번호 등 민감한 값을 평문으로 노출하던
+      버그 수정 - 63번에 이어 계속 훑다가 발견. Pydantic의
+      `RequestValidationError.errors()`는 각 오류 항목에 검증에
+      실패한 필드의 원본 입력값을 `"input"` 키로 그대로 담는다.
+      `app/core/errors.py`의 `validation_exception_handler`가 이
+      `errors()`를 가공 없이 그대로 `details`에 실어 보내고 있었기
+      때문에, 예를 들어 회원가입 시 8자 미만 비밀번호를 보내면 422
+      응답 바디에 그 평문 비밀번호가 `input` 필드로 그대로 실려
+      나갔다 - 프론트 개발 도구(devtools) 네트워크 탭 히스토리나
+      API 요청/응답을 수집하는 모니터링·로깅 도구(Sentry 등)에
+      비밀번호가 평문으로 남을 수 있는 실질적인 노출 경로였다.
+      직접 재현해 확인(`SignupRequest(password="short")`의
+      `.errors()`에 `"input": "short"`가 그대로 담김) 후, 핸들러에서
+      각 오류 dict의 `input` 키를 제거하고 나머지(`loc`/`type`/`msg`/
+      `ctx`)는 그대로 남기도록 고쳤다 - `FRONTEND_INTEGRATION.md`가
+      이미 `details`의 필드로 `loc`/`msg`/`type`만 안내하고 있어서
+      문서 변경은 필요 없었다. `tests/test_error_format.py`에
+      응답 어디에도 `"input"` 키가 없고 `loc`은 여전히 정확한지
+      검증하는 테스트를 추가했다.
