@@ -1,8 +1,17 @@
+import asyncio
 import json
 
-from app.core.config import get_settings
+from sqlalchemy import select
+
+from app.core.config import Settings, get_settings
 from app.core.dependencies import get_ollama_service
+from app.db.models.interview_practice_turn import InterviewPracticeTurn
+from app.repositories.interview_practice_repository import InterviewPracticeTurnRepository
+from app.repositories.user_repository import UserRepository
+from app.services.interview_practice_service import InterviewPracticeService
 from app.services.ollama_service import OllamaServiceError
+from app.services.rag_service import RagService
+from app.services.rag_service import RagService
 
 
 class FakeOllamaService:
@@ -190,6 +199,186 @@ def test_submit_answer_returns_feedback_and_next_question(client):
         f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
     )
     assert len(detail.json()["turns"]) == 2
+
+
+def test_mark_answered_if_pending_rejects_second_writer(db_session_factory):
+    """submit_answer()는 "현재 턴이 미답변 상태인가"를 읽은 뒤 AI 응답을 계산해서
+    쓰는 check-then-act 구조다 - 같은 질문에 거의 동시에 두 번 답변이 제출되면
+    (이중 클릭, 네트워크 재시도 등) 둘 다 "미답변"을 보고 통과해서 각자 결과를
+    쓰려고 할 수 있다. 일반 UPDATE로 그냥 덮어쓰면 나중 요청이 먼저 요청의
+    답변/피드백을 조용히 지운다(lost update). 이걸 막는 compare-and-swap인
+    mark_answered_if_pending()을 같은 turn에 순서대로 두 번 호출해서, 첫 번째만
+    성공(True)하고 두 번째는 실패(False)하며 - 무엇보다 - 두 번째 호출이 첫
+    번째가 이미 기록한 값을 덮어쓰지 않는지 직접 확인한다. (실제 동시 요청
+    타이밍 재현은 SQLite의 파일 락 모델이 너무 불안정해 이 저장소 메서드
+    자체의 CAS 동작을 결정적으로 검증하는 쪽을 택했다.)"""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            settings = Settings(jwt_secret_key="a" * 32)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, _first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            turns = await InterviewPracticeTurnRepository(session).list_for_session(practice_session.id)
+            current_turn = turns[-1]
+
+            repo = InterviewPracticeTurnRepository(session)
+            first = await repo.mark_answered_if_pending(current_turn.id, "답변A", "피드백A")
+            second = await repo.mark_answered_if_pending(current_turn.id, "답변B", "피드백B")
+            await session.commit()
+
+            refreshed = (
+                await session.execute(
+                    select(InterviewPracticeTurn).where(InterviewPracticeTurn.id == current_turn.id)
+                )
+            ).scalar_one()
+            return first, second, refreshed.answer, refreshed.feedback
+
+    first, second, final_answer, final_feedback = asyncio.run(_run())
+
+    assert first is True
+    assert second is False
+    assert final_answer == "답변A"
+    assert final_feedback == "피드백A"
+
+
+def test_submit_answer_returns_409_when_turn_answered_while_ai_call_in_flight(db_session_factory):
+    """submit_answer()는 AI 응답을 계산하는 동안(generate_json/chat 호출 중) 다른
+    요청이 같은 턴에 먼저 답변을 기록해버릴 수 있다 - 이 요청이 계산을 끝내고
+    돌아왔을 때는 이미 늦은 상태다. 가짜 Ollama 서비스가 응답을 반환하기
+    "직전"에 같은 turn을 다른 곳에서 먼저 답변 완료 처리하도록 만들어서, 이
+    타이밍을 결정적으로 재현하고 submit_answer()가 다음 턴을 만들지 않고
+    깔끔한 409로 끝나는지 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            repo = InterviewPracticeTurnRepository(session)
+
+            class RaceInjectingOllamaService:
+                def __init__(self, turn_id_holder):
+                    self._turn_id_holder = turn_id_holder
+
+                async def generate(self, prompt, model):
+                    return "첫 질문"
+
+                async def generate_json(self, prompt, model, schema):
+                    await repo.mark_answered_if_pending(
+                        self._turn_id_holder[0], "먼저 도착한 답변", "먼저 온 피드백"
+                    )
+                    return json.dumps({"feedback": "늦은 피드백", "next_question": "늦은 다음 질문"})
+
+                async def chat(self, messages, model):
+                    return "총평"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0]
+
+            turn_id_holder = [None]
+            ollama = RaceInjectingOllamaService(turn_id_holder)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            turn_id_holder[0] = first_turn.id
+
+            try:
+                await service.submit_answer(
+                    session_id=practice_session.id, user_id=user.id, answer="늦은 답변"
+                )
+                return None
+            except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
+
+
+def test_submit_answer_at_final_turn_returns_409_when_answered_while_ai_call_in_flight(
+    db_session_factory, monkeypatch
+):
+    """위 테스트와 같은 경쟁 상태를, 이미 마지막 질문이라 다음 턴을 안 만드는
+    분기(else)에서도 재현한다 - MAX_INTERVIEW_QUESTIONS=1로 첫 답변이 곧바로
+    마지막 답변이 되게 만들고, chat() 호출 중에 같은 턴이 먼저 답변 완료
+    처리되도록 한다."""
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32, max_interview_questions=1)
+            repo = InterviewPracticeTurnRepository(session)
+
+            class RaceInjectingOllamaService:
+                def __init__(self, turn_id_holder):
+                    self._turn_id_holder = turn_id_holder
+
+                async def generate(self, prompt, model):
+                    return "첫 질문"
+
+                async def generate_json(self, prompt, model, schema):
+                    return json.dumps({"feedback": "피드백", "next_question": "다음 질문"})
+
+                async def chat(self, messages, model):
+                    await repo.mark_answered_if_pending(
+                        self._turn_id_holder[0], "먼저 도착한 답변", "먼저 온 피드백"
+                    )
+                    return "늦은 총평"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0]
+
+            turn_id_holder = [None]
+            ollama = RaceInjectingOllamaService(turn_id_holder)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            turn_id_holder[0] = first_turn.id
+
+            try:
+                await service.submit_answer(
+                    session_id=practice_session.id, user_id=user.id, answer="늦은 답변"
+                )
+                return None
+            except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
 
 
 def test_reaching_max_questions_stops_next_question(client, monkeypatch):

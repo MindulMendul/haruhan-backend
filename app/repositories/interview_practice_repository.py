@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -85,3 +85,22 @@ class InterviewPracticeTurnRepository:
             .order_by(InterviewPracticeTurn.order_index)
         )
         return list(result.scalars().all())
+
+    async def mark_answered_if_pending(self, turn_id: uuid.UUID, answer: str, feedback: str) -> bool:
+        """turn이 아직 답변되지 않은 상태(answer IS NULL)일 때만 answer/feedback을
+        기록하는 compare-and-swap이다. 같은 질문에 거의 동시에 두 번 답변이
+        제출되면(요청 재시도, 이중 클릭 등) 둘 다 "현재 턴은 미답변"이라고 읽은
+        뒤 각자 AI 응답을 계산해서 쓰려고 할 수 있다 - 일반 UPDATE로 그냥
+        덮어쓰면 나중에 도착한 쪽이 먼저 도착한 쪽의 답변/피드백을 조용히
+        지워버린다(lost update). WHERE 절에 `answer IS NULL`을 넣어서, 이미
+        누군가 먼저 기록한 뒤라면 이 UPDATE가 아무 행도 바꾸지 못하게 한다.
+        영향받은 행이 있으면(=이 호출이 먼저 도착함) True, 없으면(=이미 늦음)
+        False를 반환한다."""
+        result = await self._session.execute(
+            update(InterviewPracticeTurn)
+            .where(InterviewPracticeTurn.id == turn_id, InterviewPracticeTurn.answer.is_(None))
+            .values(answer=answer, feedback=feedback)
+        )
+        # UPDATE 실행 결과는 실제로 CursorResult라 rowcount가 있다 - mypy 스텁이 이 경우
+        # 반환 타입을 CursorResult로 좁히지 못해 생기는 오탐이다.
+        return result.rowcount == 1  # type: ignore[attr-defined]

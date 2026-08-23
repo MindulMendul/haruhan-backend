@@ -210,8 +210,12 @@ class InterviewPracticeService:
             except (OllamaServiceError, ValidationError, json.JSONDecodeError) as exc:
                 raise _GENERATION_FAILED from exc
 
-            current_turn.answer = answer
-            current_turn.feedback = parsed.feedback
+            # AI 응답을 계산하는 동안 같은 질문에 다른 요청이 먼저 답변을 기록했을 수
+            # 있다 - compare-and-swap으로 확인하고, 이미 늦었다면(False) 이 요청의
+            # 결과는 버리고 "답변할 질문 없음"으로 정리한다(다음 턴을 새로 만들지
+            # 않는다 - 안 그러면 먼저 도착한 요청의 다음 턴과 중복된 턴이 생긴다).
+            if not await self._turns.mark_answered_if_pending(current_turn.id, answer, parsed.feedback):
+                raise _NO_PENDING_QUESTION
             next_turn = await self._turns.create(
                 session_id=session_id, order_index=len(turns), question=parsed.next_question
             )
@@ -224,8 +228,8 @@ class InterviewPracticeService:
             except OllamaServiceError as exc:
                 raise _GENERATION_FAILED from exc
 
-            current_turn.answer = answer
-            current_turn.feedback = feedback
+            if not await self._turns.mark_answered_if_pending(current_turn.id, answer, feedback):
+                raise _NO_PENDING_QUESTION
             next_turn = None
 
         await self._sessions.touch(practice_session)
