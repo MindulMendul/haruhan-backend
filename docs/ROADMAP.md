@@ -879,3 +879,31 @@
       로 파일이 유효하게 파싱되는지와 healthcheck 필드가 정확히
       들어갔는지 직접 확인했다(실제 컨테이너를 띄워보는 건 도메인/
       인증서가 필요해 이 샌드박스에서는 재현할 수 없었다).
+
+## 백로그 (47라운드)
+
+- [x] 71. PR #5의 `secret-scan`(gitleaks) CI 체크가 계속 실패하던 문제
+      수정 - 이번엔 로드맵을 새로 훑기 전에 먼저 PR #5의 실제 CI/체크
+      상태를 확인했다가 발견. `test`/`migrations`는 통과하는데
+      `secret-scan`이 계속 실패 중이었다 - 로그를 보니 gitleaks가
+      `docs/FRONTEND_INTEGRATION.md`의 로그인 응답 예시에 있는
+      `refresh_token` 예시값(`"s24movQYshi-...`, 실제 발급된 토큰이
+      아니라 프론트에게 응답 형태를 보여주려고 넣은 무작위 문자열)을
+      엔트로피만 보고 `generic-api-key`로 오탐하고 있었다. 로컬에
+      gitleaks 8.24.2를 직접 받아 재현(`detect --source=. --redact -v`
+      → `leaks found: 1`, exit 1)한 뒤 원인을 확정했다. 이
+      `secret-scan` job은 `fetch-depth: 0`으로 git 히스토리 전체를
+      스캔하므로, 지금 파일 내용을 바꿔도 그 예시 문자열이 처음
+      등장한 과거 커밋(`85c191d`)은 계속 스캔 대상이라 현재 파일을
+      고치는 걸로는 해결이 안 된다 - `.gitleaksignore`에 gitleaks가
+      출력한 정확한 fingerprint(`<commit>:<file>:<rule>:<line>`)를
+      추가해 그 오탐 하나만 콕 집어 무시하도록 했다(다른 진짜 탐지는
+      계속 잡혀야 하므로 규칙/파일 전체를 꺼버리는 대신 fingerprint
+      단위로 좁혔다). 같은 gitleaks 바이너리로 재실행해
+      `no leaks found`/exit 0으로 바뀌는 것까지 직접 확인했다. 같은
+      PR에서 SonarCloud/GitGuardian도 실패 중인데, 이 둘은 이
+      저장소의 `.github/workflows/*.yml`에 없는 외부 앱/대시보드
+      기반 체크라 이 샌드박스에서는 원인 확인도(SonarCloud API가
+      네트워크 프록시에 막힘) 재현도 할 수 없었다 - 손대지 않고
+      사실만 남겨둔다. 모델/스키마/코드 변경이 아니라 마이그레이션은
+      필요 없었다(`alembic check` 대상 아님).
