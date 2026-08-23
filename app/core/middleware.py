@@ -5,6 +5,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config import get_settings
+from app.core.errors import build_error_body
 from app.core.tokens import decode_access_token
 
 access_logger = logging.getLogger("haruhan.access")
@@ -29,9 +30,13 @@ class MaxBodySizeMiddleware:
         headers = dict(scope.get("headers") or [])
         content_length = headers.get(b"content-length")
         if content_length is not None and int(content_length) > self.max_body_size:
+            # 이 미들웨어는 FastAPI 라우팅/예외 핸들러 바깥(ASGI 계층)에서 직접
+            # 응답을 만들기 때문에, app.core.errors의 HTTPException 핸들러를
+            # 거치지 않는다 - 그래서 나머지 모든 에러와 같은 {"error": {"code",
+            # "message"}} 포맷이 되도록 build_error_body를 직접 재사용한다.
             response = JSONResponse(
                 status_code=413,
-                content={"detail": "Request body too large"},
+                content=build_error_body(413, "Request body too large"),
             )
             await response(scope, receive, send)
             return

@@ -619,3 +619,21 @@
       신설해 이 플래그가 CMD에서 조용히 빠지는 회귀를 막는 테스트를
       추가했다(애플리케이션 코드 밖의 인프라 설정이라 pytest로 직접
       기동 검증은 못 하지만, 텍스트 존재 여부는 검증).
+
+## 백로그 (36라운드)
+
+- [x] 60. `MaxBodySizeMiddleware`의 413 응답이 통일된 에러 포맷을 안 쓰던
+      버그 수정 - 55~59번에 이어 보안/인프라 관점으로 계속 훑다가
+      실제 코드 버그를 발견. 21번 항목(에러 포맷 통일)과 38번 항목
+      (레이트리밋 429까지 통일)을 거쳤는데도, `MaxBodySizeMiddleware`
+      (요청 본문이 `MAX_BODY_SIZE_BYTES`를 넘으면 413으로 막는
+      ASGI 미들웨어)만 여전히 예전 `{"detail": "..."}` 포맷으로 직접
+      `JSONResponse`를 만들고 있었다 - 이 미들웨어는 FastAPI
+      라우팅/예외 핸들러 계층 바깥(ASGI 레벨)에서 응답을 완성해버려서
+      `app.core.errors`의 `http_exception_handler`를 거치지 않기
+      때문에, 21/38번 리팩터링 때 놓쳤던 것. `_DEFAULT_CODES_BY_STATUS`에
+      이미 `413: "payload_too_large"`가 정의돼 있었는데도 정작 이
+      경로에서는 안 쓰이고 있었다. `build_error_body()`를 직접
+      재사용해 나머지 모든 에러와 같은 `{"error": {"code",
+      "message"}}` 포맷이 되도록 고치고, 기존 테스트(상태코드만
+      확인하던)에 `error.code` 검증을 추가했다.

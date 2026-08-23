@@ -17,6 +17,11 @@ def test_body_size_limit_rejects_large_payload(monkeypatch):
             "/api/v1/chat", json={"prompt": "this payload is definitely longer than 10 bytes"}
         )
     assert response.status_code == 413
+    # 이 미들웨어는 FastAPI 예외 핸들러를 안 거치는 ASGI 레벨 응답이라, 나머지
+    # 에러들과 같은 {"error": {"code", "message"}} 포맷을 직접 챙겨줘야 한다 -
+    # 예전엔 {"detail": "..."}로 혼자 통일 안 된 채 남아있던 회귀가 있었다.
+    body = response.json()
+    assert body["error"]["code"] == "payload_too_large"
 
 
 def test_body_size_limit_allows_small_payload(monkeypatch):
