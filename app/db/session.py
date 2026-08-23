@@ -46,7 +46,16 @@ async def init_engine(database_url: str | None) -> None:
     if not database_url:
         logger.warning("DATABASE_URL이 설정되지 않아 DB 엔진을 생성하지 않습니다.")
         return
-    _engine = create_async_engine(to_asyncpg_url(database_url), pool_size=5, max_overflow=5)
+    # pool_pre_ping: 커넥션을 풀에서 꺼내 쓰기 직전에 가벼운 SELECT 1로 살아있는지
+    # 확인한다. Supabase 같은 관리형 Postgres는 커넥션 풀러(pgbouncer 등)가 유휴
+    # 커넥션을 서버 쪽에서 조용히 끊는 경우가 흔한데, keep_supabase_alive()는 하루
+    # 한 번(APScheduler cron)만 돌아 DB 자체의 7일 자동 정지만 막을 뿐, 그보다
+    # 훨씬 잦은 주기로 개별 풀 커넥션이 끊기는 것까지는 막지 못한다. 이게 없으면
+    # 끊긴 커넥션으로 첫 쿼리를 시도한 요청이 그대로 500으로 실패한다 - pre_ping을
+    # 켜면 SQLAlchemy가 끊긴 커넥션을 감지해 조용히 새 커넥션으로 교체해준다.
+    _engine = create_async_engine(
+        to_asyncpg_url(database_url), pool_size=5, max_overflow=5, pool_pre_ping=True
+    )
     enable_sqlite_foreign_keys(_engine)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 

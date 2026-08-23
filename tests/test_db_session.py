@@ -77,6 +77,18 @@ def test_get_db_yields_working_session_when_initialized():
     asyncio.run(_with_initialized_engine(_check))
 
 
+def test_init_engine_enables_pool_pre_ping():
+    """관리형 Postgres(Supabase 등)의 커넥션 풀러가 유휴 커넥션을 조용히 끊어도,
+    풀에서 꺼내 쓰기 전에 SQLAlchemy가 자동으로 감지하고 재연결하도록
+    pool_pre_ping이 켜져 있는지 확인한다 - 없으면 끊긴 커넥션으로 첫 쿼리를
+    시도한 요청이 그대로 500으로 실패한다."""
+
+    async def _check():
+        assert db_session._engine.pool._pre_ping is True
+
+    asyncio.run(_with_initialized_engine(_check))
+
+
 def test_check_db_health_returns_false_when_uninitialized():
     assert asyncio.run(db_session.check_db_health()) is False
 

@@ -732,3 +732,26 @@
       문서 변경은 필요 없었다. `tests/test_error_format.py`에
       응답 어디에도 `"input"` 키가 없고 `loc`은 여전히 정확한지
       검증하는 테스트를 추가했다.
+
+## 백로그 (41라운드)
+
+- [x] 65. DB 엔진에 `pool_pre_ping` 누락 - 끊긴 커넥션으로 첫 요청이
+      500으로 실패하던 문제 예방 - 64번에 이어 계속 훑다가 발견.
+      `app/db/session.py`의 `init_engine()`이 `create_async_engine`에
+      `pool_size`/`max_overflow`만 넘기고 `pool_pre_ping`은 켜지
+      않고 있었다. 이 프로젝트는 `keep_supabase_alive()`로 Supabase
+      DB의 7일 자동 정지(inactivity pause)를 막고 있지만, 이건
+      APScheduler cron으로 **하루에 한 번**만 도는 별개의 방어선이라,
+      Supabase의 커넥션 풀러(pgbouncer 등)가 그보다 훨씬 짧은 주기로
+      유휴 커넥션을 서버 쪽에서 조용히 끊는 것까지는 막지 못한다 -
+      `pool_pre_ping` 없이는 SQLAlchemy가 이미 끊긴 커넥션을 풀에서
+      그대로 꺼내 쓰다가 첫 쿼리에서 예외가 나고, 그게 어디서도
+      잡히지 않아 사용자 요청이 그대로 500으로 실패한다. 매
+      체크아웃 전에 가벼운 `SELECT 1`로 살아있는지 확인하고 죽어
+      있으면 조용히 새 커넥션으로 교체하도록 `pool_pre_ping=True`를
+      추가했다. 모델/스키마 변경이 아니라 엔진 생성 옵션이라
+      마이그레이션은 필요 없었다(`alembic check`로 드리프트 없음
+      재확인). `tests/test_db_session.py`에 `_engine.pool._pre_ping`
+      이 `True`인지 확인하는 테스트를 추가했다 - 실제 커넥션 드롭
+      재현은 mock 없이는 어려워 설정값 자체를 검증하는 선에서
+      그쳤다.
