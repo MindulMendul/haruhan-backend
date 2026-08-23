@@ -412,6 +412,29 @@ def test_submit_answers_404_for_nonexistent_quiz(client):
     assert response.status_code == 404
 
 
+def test_submit_quiz_is_rate_limited(client, monkeypatch):
+    """submit_quiz()는 LLM을 호출하지 않지만, 재도전(retake)이 정상 기능이라
+    한도 없이 반복 호출되면 quiz_attempts/quiz_answers에 쓰기가 무제한으로
+    쌓일 수 있었다 - 다른 의미 있는 상호작용(퀴즈/세션/면접 생성 등)과 같은
+    chat_rate_limit을 적용해 이 쓰기 증폭 경로도 막는다."""
+    monkeypatch.setenv("CHAT_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+
+    token = _signup_and_get_token(client)
+    headers = _auth_headers(token)
+    nonexistent_url = "/api/v1/quizzes/00000000-0000-0000-0000-000000000000/submit"
+    payload = {"answers": [{"question_id": "00000000-0000-0000-0000-000000000001", "selected_index": 0}]}
+
+    first = client.post(nonexistent_url, json=payload, headers=headers)
+    second = client.post(nonexistent_url, json=payload, headers=headers)
+    third = client.post(nonexistent_url, json=payload, headers=headers)
+
+    assert first.status_code == 404
+    assert second.status_code == 404
+    assert third.status_code == 429
+    assert third.json()["error"]["code"] == "rate_limited"
+
+
 def test_submit_answers_rejects_duplicate_question_ids(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

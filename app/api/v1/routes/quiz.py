@@ -125,7 +125,10 @@ async def rename_quiz(
 
 
 @router.post("/{quiz_id}/submit", response_model=QuizResultResponse)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
 async def submit_quiz(
+    request: Request,
+    response: Response,
     quiz_id: uuid.UUID,
     payload: QuizSubmitRequest,
     current_user: User = Depends(get_current_user),

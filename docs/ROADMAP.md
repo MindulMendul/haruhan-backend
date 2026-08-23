@@ -907,3 +907,43 @@
       네트워크 프록시에 막힘) 재현도 할 수 없었다 - 손대지 않고
       사실만 남겨둔다. 모델/스키마/코드 변경이 아니라 마이그레이션은
       필요 없었다(`alembic check` 대상 아님).
+
+## 백로그 (48라운드)
+
+- [x] 72. GitGuardian 오탐 2건 조사 + 퀴즈 재제출 레이트리밋 누락 수정 -
+      71번에서 고친 gitleaks 말고 GitGuardian도 실패 중이길래
+      `get_check_run`으로 상세 내용을 직접 확인했다. "2 secrets"로
+      잡힌 건 둘 다 실제 자격증명이 아니었다: (1) `.github/
+      workflows/ci.yml`의 `POSTGRES_PASSWORD: postgres` - 62번에서
+      추가한, CI 안에서만 잠깐 살아있는 일회용 Postgres 서비스
+      컨테이너의 더미 비밀번호, (2) `tests/test_schemas_validators.py`
+      의 `password="newsecret123"` - 63번 테스트에 쓴 순수 리터럴.
+      GitGuardian은 gitleaks와 달리 정규식이 아니라 자체 서버가 값의
+      해시(SHA)를 계산해 매칭하는 `secrets.ignored_matches` 방식이라,
+      그 해시를 얻으려면 `ggshield secret scan`을 실제로 돌려야
+      하는데 이건 GitGuardian API 키가 있어야 동작한다(로컬에 직접
+      설치해 `ggshield secret scan path ...`로 확인함 - "API key가
+      필요하다"며 거부됨). 이 샌드박스엔 그 키도, GitGuardian
+      대시보드 접근권한도 없어 hash를 알아낼 방법이 없었고, 값 대신
+      경로(`ignored_paths`) 단위로 무시하는 건 두 파일 다 이 자동
+      루프가 계속 편집하는 파일이라 앞으로 진짜 시크릿이 섞여도 못
+      잡게 되는 손실이 더 커서 하지 않았다 - 대신 두 GitGuardian
+      incident 링크(36512156, 36512917)를 그대로 남겨서, 대시보드
+      접근권한이 있는 사람이 "false positive"로 표시하면 바로
+      해결되도록 해뒀다. 이 조사 과정에서 `/quizzes/{quiz_id}/submit`
+      라우트를 다시 보다가 별개의 진짜 문제를 하나 더 발견했다 -
+      이 라우트는 LLM을 호출하지 않지만(순수 채점), 재도전(다시 풀기)
+      자체는 정상 기능이라 한도 없이 반복 제출되면 quiz_attempts/
+      quiz_answers에 쓰기가 무제한으로 쌓일 수 있었다(67번에서 고친
+      LLM 비용 증폭과 같은 종류의, "쓰기 증폭" 버전). 이 앱은
+      auth_rate_limit(브루트포스용)/chat_rate_limit(의미 있는 상호
+      작용용) 두 등급만 두고 있어서, 새 설정을 하나 더 만들기보다
+      기존 quiz 생성/세션 생성 등과 같은 chat_rate_limit을 재사용해
+      일관성을 유지했다. 기존 테스트 중 한 함수 안에서 `/submit`을
+      최대 2번까지만 연속 호출해서(재도전 검증용) 기본값(분당
+      10회)에 안전하게 들어간다는 것도 확인했다. `tests/test_quiz.py`
+      에 존재하지 않는 quiz id로 반복 호출해도 레이트리밋이 걸리는지
+      확인하는 테스트를 추가했고, `FRONTEND_INTEGRATION.md` 퀴즈
+      제출 절에 이 제한을 안내하는 문장을 추가했다. 모델/스키마
+      변경이 아니라 마이그레이션은 필요 없었다(`alembic check`로
+      드리프트 없음 재확인).
