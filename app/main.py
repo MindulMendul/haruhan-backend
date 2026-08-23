@@ -74,6 +74,21 @@ def create_app() -> FastAPI:
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["*"],
+        # 브라우저는 "CORS-safelisted" 응답 헤더(Content-Type 등 극히 일부)만
+        # 기본으로 JS에 노출하고, 그 외는 서버가 명시적으로 허용해야 fetch()의
+        # response.headers.get(...)으로 읽을 수 있다. 이 목록이 없으면
+        # FRONTEND_INTEGRATION.md가 프론트에게 직접 읽으라고 안내하는
+        # X-Total-Count(페이지네이션)/X-RateLimit-*·Retry-After(레이트리밋)가
+        # cross-origin 프론트(예: Vercel에 배포된 프론트가 다른 도메인의 이
+        # API를 호출하는 이 프로젝트의 실제 배포 형태)에서는 응답에 실려
+        # 와도 JS로는 안 보이는 상태였다.
+        expose_headers=[
+            "X-Total-Count",
+            "X-RateLimit-Limit",
+            "X-RateLimit-Remaining",
+            "X-RateLimit-Reset",
+            "Retry-After",
+        ],
     )
     app.add_middleware(SecurityHeadersMiddleware)
     # 가장 바깥쪽(가장 나중에 add된 미들웨어)에서 본문을 읽기 전에 크기부터 차단한다.

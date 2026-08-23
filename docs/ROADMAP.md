@@ -637,3 +637,26 @@
       재사용해 나머지 모든 에러와 같은 `{"error": {"code",
       "message"}}` 포맷이 되도록 고치고, 기존 테스트(상태코드만
       확인하던)에 `error.code` 검증을 추가했다.
+
+## 백로그 (37라운드)
+
+- [x] 61. CORS `expose_headers` 누락으로 프론트가 페이지네이션/레이트리밋
+      헤더를 못 읽던 버그 수정 - 60번에 이어 계속 훑다가 중대한 버그를
+      발견. `main.py`의 `CORSMiddleware` 설정에 `expose_headers`가
+      아예 없어서 기본값(빈 목록)이 적용되고 있었다 - 브라우저는
+      cross-origin 응답에서 "CORS-safelisted" 헤더 극소수만 JS에 기본
+      노출하고, 그 외는 서버가 `Access-Control-Expose-Headers`로 명시
+      허용해야 `fetch()`의 `response.headers.get(...)`으로 읽을 수
+      있다. 그런데 `FRONTEND_INTEGRATION.md`는 여러 라운드(18/32/33번
+      등 페이지네이션, 2장 레이트리밋 안내)에 걸쳐 프론트가
+      `X-Total-Count`/`X-RateLimit-Limit`/`X-RateLimit-Remaining`/
+      `X-RateLimit-Reset`/`Retry-After`를 **직접 읽으라고** 안내해왔다 -
+      이 프로젝트는 Vercel에 배포된 프론트가 다른 도메인의 이 API를
+      호출하는(`.env.example`의 `CORS_ORIGINS` 예시가 바로 그 형태)
+      cross-origin 구조라서, 실제 운영 환경에서는 이 헤더들이 응답에
+      실려 와도 프론트 JS에서는 전부 `null`로 보였을 것이다. 직접
+      `Origin` 헤더를 넣어 재현 확인 후(`access-control-expose-headers`
+      가 응답에 아예 없음) `CORSMiddleware`에 `expose_headers`로 다섯
+      헤더를 명시했다. `tests/test_cors.py`를 신설해 노출 목록,
+      허용된/안 허용된 origin 분기까지 검증했다(이전엔 CORS 전용
+      테스트가 아예 없었다).
