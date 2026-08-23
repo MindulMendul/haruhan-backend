@@ -1,3 +1,16 @@
+import asyncio
+import os
+import tempfile
+
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.core.password import hash_password
+from app.db.base import Base
+from app.repositories.user_repository import UserRepository
+from app.services.user_service import UserService
+
+
 def _signup_and_get_tokens(client, email="user@example.com", password="supersecret"):
     response = client.post("/api/v1/auth/signup", json={"email": email, "password": password})
     assert response.status_code == 201
@@ -52,6 +65,72 @@ def test_update_email_conflict_with_existing_user(client):
         headers=_auth_headers(tokens_b["access_token"]),
     )
     assert response.status_code == 409
+
+
+def test_concurrent_email_change_to_same_email_yields_clean_conflict_not_crash():
+    """update_profile()도 get_by_email 확인 후 commit하는 check-then-act 구조라
+    같은 경쟁 상태에 노출된다 - 서로 다른 두 계정이 거의 동시에 같은(아직 아무도
+    안 쓰는) 이메일로 변경을 시도하면, DB unique 제약 위반이 그대로 새어나가지
+    않고 하나는 성공/하나는 깔끔한 409로 끝나야 한다. signup()/upgrade_guest()의
+    동시성 테스트와 같은 방식(파일 기반 SQLite + asyncio.gather)으로 재현한다."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(path)
+    url = f"sqlite+aiosqlite:///{path}"
+
+    async def _run():
+        engine = create_async_engine(url, pool_size=5, max_overflow=5)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+            async with session_factory() as session_a, session_factory() as session_b:
+                hashed = hash_password("supersecret")
+                user_a = await UserRepository(session_a).create(
+                    email="account-a@example.com", hashed_password=hashed
+                )
+                await session_a.commit()
+                user_b = await UserRepository(session_b).create(
+                    email="account-b@example.com", hashed_password=hashed
+                )
+                await session_b.commit()
+
+                service_a = UserService(session=session_a)
+                service_b = UserService(session=session_b)
+                return await asyncio.gather(
+                    service_a.update_profile(
+                        user=user_a,
+                        email="race-rename@example.com",
+                        password=None,
+                        current_password="supersecret",
+                    ),
+                    service_b.update_profile(
+                        user=user_b,
+                        email="race-rename@example.com",
+                        password=None,
+                        current_password="supersecret",
+                    ),
+                    return_exceptions=True,
+                )
+        finally:
+            await engine.dispose()
+
+    try:
+        results = asyncio.run(_run())
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+    successes = [r for r in results if not isinstance(r, Exception)]
+    conflicts = [r for r in results if isinstance(r, HTTPException) and r.status_code == 409]
+    other_errors = [
+        r for r in results if isinstance(r, Exception) and not isinstance(r, HTTPException)
+    ]
+
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert other_errors == []
 
 
 def test_update_password_success_and_old_password_stops_working(client):

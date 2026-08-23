@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -50,9 +51,21 @@ class AuthService:
         except PasswordTooLongError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-        user = await self._users.create(email=email, hashed_password=hashed)
-        tokens = await self._issue_tokens(user)
-        await self._session.commit()
+        # 위 get_by_email 확인과 아래 insert 사이에는 시간차가 있다(check-then-act) -
+        # 같은 이메일로 거의 동시에 두 번 가입 요청이 오면 둘 다 "존재 안 함"을 보고
+        # 통과해버릴 수 있다. User.email의 DB unique 제약이 최종 방어선으로 남아있어
+        # 데이터가 잘못 들어가진 않지만, 그 위반이 IntegrityError로 그대로 새어나가면
+        # 나머지 흐름과 다르게 처리되지 않은 예외(500)가 되어버린다 - 정상적인
+        # "이미 존재함" 케이스와 똑같이 409로 변환한다.
+        try:
+            user = await self._users.create(email=email, hashed_password=hashed)
+            tokens = await self._issue_tokens(user)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
+            ) from None
         user_signups_total.inc()
         return tokens
 

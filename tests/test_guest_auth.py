@@ -1,3 +1,15 @@
+import asyncio
+import os
+import tempfile
+
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.db.base import Base
+from app.repositories.user_repository import UserRepository
+from app.services.user_service import UserService
+
+
 def _auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
 
@@ -123,3 +135,59 @@ def test_real_account_cannot_use_upgrade_endpoint(client):
         headers=_auth_headers(tokens["access_token"]),
     )
     assert upgrade.status_code == 409
+
+
+def test_concurrent_upgrade_to_same_email_yields_clean_conflict_not_crash():
+    """upgrade_guest()도 signup()과 같은 check-then-act(get_by_email 확인 후
+    commit) 구조라 같은 경쟁 상태에 노출된다 - 서로 다른 두 게스트가 거의 동시에
+    같은 이메일로 업그레이드를 시도하면, DB unique 제약 위반이 그대로 새어나가지
+    않고 하나는 성공/하나는 깔끔한 409로 끝나야 한다. 진짜 별개의 커넥션이
+    필요해서 test_auth.py의 동시 가입 테스트와 같은 방식(파일 기반 SQLite +
+    asyncio.gather)으로 재현한다."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(path)
+    url = f"sqlite+aiosqlite:///{path}"
+
+    async def _run():
+        engine = create_async_engine(url, pool_size=5, max_overflow=5)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+            async with session_factory() as session_a, session_factory() as session_b:
+                guest_a = await UserRepository(session_a).create_guest()
+                await session_a.commit()
+                guest_b = await UserRepository(session_b).create_guest()
+                await session_b.commit()
+
+                service_a = UserService(session=session_a)
+                service_b = UserService(session=session_b)
+                return await asyncio.gather(
+                    service_a.upgrade_guest(
+                        user=guest_a, email="race-upgrade@example.com", password="supersecret"
+                    ),
+                    service_b.upgrade_guest(
+                        user=guest_b, email="race-upgrade@example.com", password="supersecret"
+                    ),
+                    return_exceptions=True,
+                )
+        finally:
+            await engine.dispose()
+
+    try:
+        results = asyncio.run(_run())
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+    successes = [r for r in results if not isinstance(r, Exception)]
+    conflicts = [r for r in results if isinstance(r, HTTPException) and r.status_code == 409]
+    other_errors = [
+        r for r in results if isinstance(r, Exception) and not isinstance(r, HTTPException)
+    ]
+
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert other_errors == []

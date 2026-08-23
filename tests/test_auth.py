@@ -1,13 +1,19 @@
 import asyncio
+import os
+import tempfile
 from datetime import timedelta
 
+from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.clock import utcnow_naive
 from app.core.config import get_settings
 from app.core.tokens import hash_refresh_token
+from app.db.base import Base
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
+from app.services.auth_service import AuthService
 
 
 def test_signup_login_refresh_logout_flow(client):
@@ -104,6 +110,58 @@ def test_signup_duplicate_email_conflict(client):
     assert first.status_code == 201
     second = client.post("/api/v1/auth/signup", json=payload)
     assert second.status_code == 409
+
+
+def test_concurrent_signup_with_same_email_yields_clean_conflict_not_crash():
+    """signup()은 get_by_email로 "존재 안 함"을 확인한 뒤에야 insert한다
+    (check-then-act) - 같은 이메일로 거의 동시에 두 요청이 오면 둘 다 그 확인을
+    통과해버릴 수 있다. User.email의 DB unique 제약이 최종 방어선으로 남지만,
+    그 위반(IntegrityError)을 서비스가 잡지 않으면 500으로 죽는다. 진짜 별개의
+    커넥션 두 개가 필요해서(단일 커넥션을 공유하는 conftest의 :memory:+StaticPool
+    픽스처는 두 세션이 사실상 직렬화되어 이 경쟁 자체가 재현되지 않는다),
+    db_session.py 테스트에서 쓰는 것과 같은 파일 기반 SQLite로 별도 엔진을 만들어
+    asyncio.gather로 실제로 동시에 호출해 재현한다 - 하나는 성공/하나는 깔끔한
+    409로 끝나야 한다."""
+    settings = get_settings()
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(path)
+    url = f"sqlite+aiosqlite:///{path}"
+
+    async def _run():
+        engine = create_async_engine(url, pool_size=5, max_overflow=5)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+            async with session_factory() as session_a, session_factory() as session_b:
+                service_a = AuthService(session=session_a, settings=settings)
+                service_b = AuthService(session=session_b, settings=settings)
+                return await asyncio.gather(
+                    service_a.signup(email="concurrent@example.com", password="supersecret"),
+                    service_b.signup(email="concurrent@example.com", password="supersecret"),
+                    return_exceptions=True,
+                )
+        finally:
+            await engine.dispose()
+
+    try:
+        results = asyncio.run(_run())
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+    successes = [r for r in results if not isinstance(r, Exception)]
+    conflicts = [r for r in results if isinstance(r, HTTPException) and r.status_code == 409]
+    other_errors = [
+        r for r in results if isinstance(r, Exception) and not isinstance(r, HTTPException)
+    ]
+
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert other_errors == []
 
 
 def test_signup_duplicate_email_different_case_is_conflict(client):

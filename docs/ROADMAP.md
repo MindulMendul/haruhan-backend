@@ -1069,3 +1069,37 @@
       `ollama_service.py`의 커버리지도 75%에서 92%로 함께 올라갔다.
       모델/스키마 변경이 아니라 마이그레이션은 필요 없었다
       (`alembic check`로 드리프트 없음 재확인).
+
+## 백로그 (53라운드)
+
+- [x] 77. 이메일 중복 가입/변경 경쟁 상태에서 500이 나던 문제 수정 -
+      75/76번과 같은 "외부 의존성이 예상 못 한 방식으로 실패하면
+      어떻게 되는가" 각도를 세 번째 외부 의존성인 DB 자체(정확히는
+      DB의 unique 제약)에도 적용해보다가 발견. `signup()`/
+      `upgrade_guest()`/`update_profile()`(이메일 변경 시) 셋 다
+      `get_by_email`로 "존재 안 함"을 먼저 확인한 뒤에야 insert/
+      update한다(check-then-act) - 같은 이메일로 거의 동시에 두
+      요청이 오면 둘 다 그 확인을 통과해버릴 수 있다. `User.email`
+      의 DB unique 제약이 최종 방어선으로 남아있어 데이터가 잘못
+      들어가진 않지만, 그 위반이 `sqlalchemy.exc.IntegrityError`로
+      그대로 새어나가면 정상적인(경쟁 없는) "이미 존재함" 케이스는
+      깔끔한 409인데 경쟁이 실제로 발생한 케이스만 처리되지 않은
+      예외로 500이 되는 비일관성이 있었다. 파일 기반 SQLite에
+      진짜 별개의 커넥션 두 개를 만들고 `asyncio.gather`로 같은
+      이메일을 향한 두 서비스 호출을 동시에 실행해 세 메서드
+      전부에서 재현 확인(`sqlite3.IntegrityError: UNIQUE constraint
+      failed`)한 뒤, 각 메서드의 commit을 `try/except IntegrityError`
+      로 감싸 롤백 후 기존과 동일한 409 `HTTPException`으로
+      변환하도록 고쳤다 - 프론트 입장에서 보이는 응답 계약(중복
+      이메일은 409)은 그대로고, 경쟁 상태에서만 어겨지던 걸 바로
+      잡은 것이다. `signup()`은 `UserRepository.create()`가 즉시
+      `flush()`하므로 그 호출 자체를 try에 넣었고, 나머지 둘은
+      속성 변경 후 최종 `commit()` 시점에만 flush가 일어나므로
+      그 commit만 감쌌다. `tests/test_auth.py`/`test_guest_auth.py`/
+      `test_users.py`에 각각 파일 기반 SQLite + `asyncio.gather`로
+      실제 경쟁을 재현해 "하나는 성공, 하나는 깔끔한 409, 그 외
+      처리 안 된 예외는 없음"을 검증하는 테스트를 추가했다(5회
+      반복 실행으로 재현 안정성도 확인). `auth_service.py`/
+      `user_service.py` 둘 다 새 브랜치가 100% 커버리지로 잡혔다.
+      모델/스키마 변경이 아니라 마이그레이션은 필요 없었다
+      (`alembic check`로 드리프트 없음 재확인).

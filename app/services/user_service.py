@@ -1,4 +1,5 @@
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.metrics import guest_conversions_total
@@ -38,7 +39,18 @@ class UserService:
             except PasswordTooLongError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-        await self._session.commit()
+        # 위 get_by_email 확인과 이 commit 사이에는(비밀번호 해싱 시간까지 포함해)
+        # 시간차가 있다 - 같은 이메일로 두 프로필 변경/가입 요청이 동시에 오면 둘 다
+        # 통과해버릴 수 있다. DB unique 제약 위반(IntegrityError)이 그대로 새어나가면
+        # 나머지 흐름과 다르게 처리되지 않은 예외(500)가 되므로, 정상적인 "이미
+        # 존재함" 케이스와 같은 409로 변환한다.
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
+            ) from None
         return user
 
     async def upgrade_guest(self, user: User, email: str, password: str) -> User:
@@ -60,7 +72,15 @@ class UserService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         user.email = email
 
-        await self._session.commit()
+        # update_profile()과 같은 이유(check-then-act 경쟁 상태)로, DB unique
+        # 제약 위반이 그대로 새어나가지 않도록 같은 409로 변환한다.
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
+            ) from None
         guest_conversions_total.inc()
         return user
 
