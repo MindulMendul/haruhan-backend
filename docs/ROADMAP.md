@@ -1038,3 +1038,34 @@
       허용을 반환하는지 둘 다 검증하는 테스트를 추가해 100% 커버리지로
       확인했다. 모델/스키마 변경이 아니라 마이그레이션은 필요
       없었다(`alembic check`로 드리프트 없음 재확인).
+
+## 백로그 (52라운드)
+
+- [x] 76. Ollama가 200과 함께 JSON 아닌 본문을 주면 `OllamaServiceError`
+      로 안 묶이던 문제 수정 - 75번(Redis 장애 시 예외가 안 잡히는
+      경로)과 같은 각도를 다른 외부 의존성(Ollama)에도 적용해보다가
+      발견. `app/services/ollama_service.py`의 `generate`/`chat`/
+      `embed`/`list_models`/`generate_json` 다섯 메서드 모두
+      `response.json()` 호출이 `try: ... except httpx.HTTPError`
+      블록 **바깥**에 있었다 - HTTP 상태 코드 에러는 전부
+      `OllamaServiceError`로 통일해서 잡지만, Ollama 앞단 프록시
+      오작동이나 응답이 중간에 끊기는 경우처럼 상태 코드는 200인데
+      본문이 JSON이 아닌 경우는 `json.JSONDecodeError`가 그대로
+      새어나가 이 서비스의 나머지 실패 경로(어디서 호출하든
+      `except OllamaServiceError`로 깔끔하게 502/500 처리됨)와
+      다르게 처리되지 않은 예외로 상위까지 올라간다. `chat_stream`도
+      스트리밍 줄 단위 `json.loads(line)`이 try 블록 안에는
+      있었지만 `except`가 `httpx.HTTPError`만 잡고 있어 같은
+      문제가 있었다. httpx `MockTransport`로 상태 200 + 본문
+      `b"not json"`을 주는 가짜 Ollama를 만들어 다섯 메서드 전부에서
+      `JSONDecodeError`가 그대로 새는 것을 먼저 재현 확인한 뒤,
+      `response.json()` 호출을 try 블록 안으로 옮기고
+      `except (httpx.HTTPError, json.JSONDecodeError)`로 넓혀서
+      한 곳에서 통일되게 처리하도록 고쳤다. `tests/
+      test_ollama_service.py`에 여섯 메서드(`chat_stream` 포함)
+      전부 이 케이스에서 `OllamaServiceError`로 정리되는지 검증하는
+      테스트를 추가했다 - 덕분에 이전까지 "테스트하기 어려운 네트워크
+      래퍼"라 커버리지를 일부러 안 쫓기로 했던(38라운드 이전 결정)
+      `ollama_service.py`의 커버리지도 75%에서 92%로 함께 올라갔다.
+      모델/스키마 변경이 아니라 마이그레이션은 필요 없었다
+      (`alembic check`로 드리프트 없음 재확인).

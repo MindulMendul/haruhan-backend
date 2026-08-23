@@ -109,3 +109,77 @@ def test_generate_json_raises_ollama_service_error_on_http_error(monkeypatch):
         asyncio.run(
             service.generate_json(prompt="프롬프트", model="qwen2.5:3b", schema={"type": "object"})
         )
+
+
+def test_list_models_returns_model_list(monkeypatch):
+    def handler(request):
+        assert request.url.path == "/api/tags"
+        return httpx.Response(200, json={"models": [{"name": "qwen2.5:3b"}]})
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    result = asyncio.run(service.list_models())
+    assert result == [{"name": "qwen2.5:3b"}]
+
+
+# HTTP 상태는 200으로 정상이지만 본문이 JSON이 아닌 경우(Ollama 앞단 프록시
+# 오작동, 응답이 중간에 끊기는 경우 등)를 각 메서드마다 재현한다 - response.json()
+# 호출이 try 블록 밖에 있으면 json.JSONDecodeError가 OllamaServiceError로 묶이지
+# 않고 그대로 새어나가, 나머지 실패 경로(HTTP 에러)와 다르게 처리되지 않은
+# 예외로 호출부까지 올라가는 버그였다.
+def _malformed_json_handler(request):
+    return httpx.Response(200, content=b"not json")
+
+
+def test_generate_raises_ollama_service_error_on_malformed_json_body(monkeypatch):
+    _install_mock_transport(monkeypatch, _malformed_json_handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(service.generate(prompt="안녕", model="qwen2.5:3b"))
+
+
+def test_chat_raises_ollama_service_error_on_malformed_json_body(monkeypatch):
+    _install_mock_transport(monkeypatch, _malformed_json_handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(service.chat(messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b"))
+
+
+def test_embed_raises_ollama_service_error_on_malformed_json_body(monkeypatch):
+    _install_mock_transport(monkeypatch, _malformed_json_handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(service.embed(text="텍스트", model="nomic-embed-text"))
+
+
+def test_list_models_raises_ollama_service_error_on_malformed_json_body(monkeypatch):
+    _install_mock_transport(monkeypatch, _malformed_json_handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(service.list_models())
+
+
+def test_generate_json_raises_ollama_service_error_on_malformed_json_body(monkeypatch):
+    _install_mock_transport(monkeypatch, _malformed_json_handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(
+            service.generate_json(prompt="프롬프트", model="qwen2.5:3b", schema={"type": "object"})
+        )
+
+
+def test_chat_stream_raises_ollama_service_error_on_malformed_json_line(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, content=b"not json\n")
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+
+    async def _drain():
+        async for _ in service.chat_stream(
+            messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b"
+        ):
+            pass
+
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(_drain())

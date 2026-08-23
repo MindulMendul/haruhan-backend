@@ -25,10 +25,15 @@ class OllamaService:
                     json={"model": model, "prompt": prompt, "stream": False},
                 )
                 response.raise_for_status()
-            except httpx.HTTPError as exc:
+                return response.json().get("response", "")
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                # HTTP 상태 에러뿐 아니라, 200을 받았어도 본문이 JSON이 아닌 경우
+                # (Ollama 앞단 프록시 오작동, 응답이 중간에 끊기는 경우 등)도 같은
+                # OllamaServiceError로 묶는다 - response.json()이 try 밖에 있으면
+                # JSONDecodeError가 그대로 새어나가 이 메서드의 나머지 실패
+                # 경로와 다르게 처리되지 않은 예외로 잡힌다.
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
-        return response.json().get("response", "")
 
     async def chat(self, messages: list[dict[str, str]], model: str) -> str:
         """멀티턴 대화용: role/content 히스토리를 그대로 Ollama /api/chat에 전달한다."""
@@ -39,10 +44,10 @@ class OllamaService:
                     json={"model": model, "messages": messages, "stream": False},
                 )
                 response.raise_for_status()
-            except httpx.HTTPError as exc:
+                return response.json().get("message", {}).get("content", "")
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
-        return response.json().get("message", {}).get("content", "")
 
     async def chat_stream(self, messages: list[dict[str, str]], model: str) -> AsyncIterator[str]:
         """chat()의 스트리밍 버전. 응답을 토큰(조각) 단위로 하나씩 yield한다.
@@ -67,7 +72,7 @@ class OllamaService:
                             yield content
                         if chunk.get("done"):
                             break
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, json.JSONDecodeError) as exc:
             logger.error("Ollama 스트리밍 API 호출 에러: %s", exc)
             raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
 
@@ -80,10 +85,10 @@ class OllamaService:
                     json={"model": model, "prompt": text},
                 )
                 response.raise_for_status()
-            except httpx.HTTPError as exc:
+                return response.json().get("embedding", [])
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
-        return response.json().get("embedding", [])
 
     async def list_models(self) -> list[dict]:
         """Ollama 엔진에 pull되어 있는(=바로 쓸 수 있는) 모델 목록을 그대로 반환한다."""
@@ -91,10 +96,10 @@ class OllamaService:
             try:
                 response = await client.get(f"{self._base_url}/api/tags")
                 response.raise_for_status()
-            except httpx.HTTPError as exc:
+                return response.json().get("models", [])
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
-        return response.json().get("models", [])
 
     async def generate_json(self, prompt: str, model: str, schema: dict) -> str:
         """JSON 스키마로 출력 형식을 강제한다 (Ollama structured outputs).
@@ -109,7 +114,7 @@ class OllamaService:
                     json={"model": model, "prompt": prompt, "stream": False, "format": schema},
                 )
                 response.raise_for_status()
-            except httpx.HTTPError as exc:
+                return response.json().get("response", "")
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
                 logger.error("Ollama API 호출 에러: %s", exc)
                 raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
-        return response.json().get("response", "")
