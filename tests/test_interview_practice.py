@@ -346,6 +346,30 @@ def test_complete_session_generates_overall_feedback(client):
     assert answer_after_complete.status_code == 409
 
 
+def test_complete_session_is_rate_limited(client, monkeypatch):
+    """complete_session()은 내부적으로 종합 피드백을 생성하려고 LLM(ollama.chat)을
+    호출하는데도, create_session/submit_answer와 달리 라우트에 @limiter.limit()이
+    빠져 있었다 - LLM 호출 비용을 막으려고 두는 chat_rate_limit이 이 경로에는
+    전혀 적용되지 않던 누락이었다. 데코레이터는 핸들러 본문(404/409 등) 실행
+    전에 카운트를 소비하므로, 존재하지 않는 세션 id로 반복 호출해도 레이트리밋은
+    그대로 걸려야 한다."""
+    monkeypatch.setenv("CHAT_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+
+    token = _signup_and_get_token(client, email="complete-ratelimit@example.com")
+    headers = _auth_headers(token)
+    nonexistent_url = "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000/complete"
+
+    first = client.post(nonexistent_url, headers=headers)
+    second = client.post(nonexistent_url, headers=headers)
+    third = client.post(nonexistent_url, headers=headers)
+
+    assert first.status_code == 404
+    assert second.status_code == 404
+    assert third.status_code == 429
+    assert third.json()["error"]["code"] == "rate_limited"
+
+
 def test_complete_without_any_answer_returns_400(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

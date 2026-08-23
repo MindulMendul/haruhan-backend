@@ -322,6 +322,7 @@ GET /api/v1/quizzes/wrong-answers
 - 이미 종료된 세션에 답변 제출/재종료 시도 → `409`
 - 답변할 질문이 없는데 제출 → `409`
 - 한 번도 답 안 하고 `/complete` 호출 → `400`
+- 세션 생성/답변 제출/`/complete` 모두 LLM 호출이라 레이트리밋(`chat_rate_limit`, 기본 분당 10회) 적용됨.
 
 ### 3-4. 면접 복기 (`/api/v1/interview/reviews`)
 

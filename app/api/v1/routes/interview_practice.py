@@ -121,7 +121,10 @@ async def submit_answer(
 
 
 @router.post("/{session_id}/complete", response_model=InterviewPracticeSessionResponse)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
 async def complete_session(
+    request: Request,
+    response: Response,
     session_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     service: InterviewPracticeService = Depends(get_interview_practice_service),

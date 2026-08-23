@@ -784,3 +784,30 @@
       그대로 통과하는 것으로 동작 동등성을 확인했고, 미리 색인해둔
       메시지가 여러 개 섞여 있어도 아직 색인 안 된 것만 정확히
       골라내는지 검증하는 테스트를 추가했다.
+
+## 백로그 (43라운드)
+
+- [x] 67. 면접 연습 `/complete`에 레이트리밋 누락 - LLM 호출 경로인데
+      비용 제한이 안 걸려 있던 문제 수정 - 66번에 이어 계속 훑다가
+      발견. `interview_practice.py`의 `create_session`/
+      `submit_answer`는 둘 다 `@limiter.limit(lambda: get_settings().
+      chat_rate_limit)`이 걸려 있는데, 같은 라우터의
+      `POST /{session_id}/complete`만 그 데코레이터와
+      `request`/`response` 파라미터가 빠져 있었다. 서비스 코드를
+      보면 `complete_session()`도 종합 피드백을 생성하려고 다른
+      두 경로와 똑같이 `self._ollama.chat(...)`을 호출하므로,
+      LLM 호출 비용을 막으려고 두는 `chat_rate_limit`이 정확히
+      적용됐어야 할 세 번째 경로였다 - 세션이 이미 `completed`
+      상태여도 slowapi 데코레이터는 라우트 핸들러 본문(404/409
+      체크)보다 먼저 카운트를 소비하므로, 존재하지 않는/이미 끝난
+      세션 id로 반복 호출하는 것만으로도 무제한으로 호출을
+      시도할 수 있었다(각 시도 자체는 LLM까지 안 가고 실패하지만,
+      실제 진행 중인 세션에 대해서는 그대로 무제한 LLM 호출로
+      이어진다). 다른 두 경로와 동일하게 데코레이터 + `request`/
+      `response` 파라미터를 추가했다. 모델/스키마 변경이 아니라
+      마이그레이션은 필요 없었다(`alembic check`로 드리프트 없음
+      재확인). `tests/test_interview_practice.py`에 존재하지 않는
+      세션 id로 반복 호출해도 레이트리밋이 걸리는지 확인하는
+      테스트를 추가했고, `FRONTEND_INTEGRATION.md`의 면접 연습
+      절에 `/complete`도 `chat_rate_limit` 대상이라는 문장을
+      추가했다.
