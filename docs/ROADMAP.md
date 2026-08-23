@@ -947,3 +947,28 @@
       제출 절에 이 제한을 안내하는 문장을 추가했다. 모델/스키마
       변경이 아니라 마이그레이션은 필요 없었다(`alembic check`로
       드리프트 없음 재확인).
+
+## 백로그 (49라운드)
+
+- [x] 73. `LOG_LEVEL`에 소문자/오타를 넣으면 불명확한 에러로 앱이
+      죽던 문제 수정 - 72번에 이어 계속 훑다가 발견. `configure_logging()`
+      이 `settings.log_level`을 그대로 `logging.basicConfig(level=...)`
+      에 넘기는데, 파이썬 `logging` 모듈은 `"info"`처럼 소문자로 된
+      레벨 이름을 받아들이지 않고 `ValueError: Unknown level: 'info'`
+      를 던진다 - 직접 재현해서 확인했다(`.env.example`이 대문자를
+      쓰라고는 안내하지만, 다른 도구들의 흔한 관례 때문에 소문자로
+      적는 실수가 충분히 나올 수 있다). 이 호출은 `create_app()`
+      안에서 이뤄지므로, `LOG_LEVEL`을 잘못 넣으면 서버 기동뿐 아니라
+      **테스트를 돌릴 때마다** 이 불명확한 예외로 전부 실패한다.
+      55번의 `jwt_secret_key` 검증과 같은 자리(`Settings`의
+      `field_validator`)에 `log_level` 검증을 추가해서, 설정 로딩
+      시점에 `DEBUG/INFO/WARNING/ERROR/CRITICAL` 중 하나인지
+      확인하고 대문자로 정규화한다 - 그 외 값이면 어떤 값이 왜
+      잘못됐는지 명확한 한국어 메시지로 바로 거부된다.
+      `.env.example`에도 유효한 값과 대소문자 무관하다는 점을
+      안내하는 주석을 추가했다. 사용자 대상 API 동작 변화가 없는
+      설정 검증 전용 변경이라 `FRONTEND_INTEGRATION.md`는 갱신하지
+      않았고, 모델/스키마 변경도 아니라 마이그레이션은 필요 없었다
+      (`alembic check`로 드리프트 없음 재확인). `tests/test_config.py`
+      에 소문자 정규화와 잘못된 값 거부를 검증하는 테스트를
+      추가했다.

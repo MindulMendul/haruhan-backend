@@ -4,6 +4,7 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MIN_JWT_SECRET_KEY_LENGTH = 32
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
 class Settings(BaseSettings):
@@ -76,6 +77,22 @@ class Settings(BaseSettings):
                 f"(예: `openssl rand -hex 32`로 생성). 현재 {len(value)}자."
             )
         return value
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        """`logging.basicConfig(level=...)`는 소문자("info")나 오타("INOF")를
+        `create_app()`이 호출될 때(테스트마다도 매번!)마다 `ValueError: Unknown
+        level: ...`라는 불명확한 예외로 실패시킨다 - 설정 로딩 시점에 미리
+        검증해서, 뭐가 문제인지 바로 알 수 있는 메시지로 막는다. 대소문자는
+        나머지 설정과 같은 관례(`case_sensitive=False`)로 맞춰 정규화한다."""
+        normalized = value.strip().upper()
+        if normalized not in _VALID_LOG_LEVELS:
+            raise ValueError(
+                f"LOG_LEVEL은 {sorted(_VALID_LOG_LEVELS)} 중 하나여야 합니다. "
+                f"현재 값: {value!r}"
+            )
+        return normalized
 
     @property
     def cors_origin_list(self) -> list[str]:
