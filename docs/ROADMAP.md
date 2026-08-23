@@ -811,3 +811,27 @@
       테스트를 추가했고, `FRONTEND_INTEGRATION.md`의 면접 연습
       절에 `/complete`도 `chat_rate_limit` 대상이라는 문장을
       추가했다.
+
+## 백로그 (44라운드)
+
+- [x] 68. mypy가 타입 힌트 없는 함수를 조용히 통과시키던 구멍 수정 -
+      67번에 이어 계속 훑다가 발견. `mypy.ini`가 `ignore_missing_imports`
+      말고는 아무 엄격 옵션도 안 켜져 있었는데, mypy 기본값은 시그니처가
+      아예 없는 함수는 본문 검사 자체를 건너뛴다 - 즉 새 함수를 타입
+      힌트 없이 추가해도 CI의 `mypy app tests` 단계가 절대 못 잡아내는
+      사각지대였다. 직접 `app/core/cache.py`에 힌트 없는 함수를 추가해
+      기존 설정으로는 통과함을 재현 확인했다. `[mypy-app.*]
+      disallow_untyped_defs = True`를 추가해 프로덕션 코드(`app/*`)의
+      모든 함수 정의에 타입 힌트를 강제하도록 했다 - `tests/*`는
+      테스트 함수마다 반환 타입(`-> None`)을 붙이는 관행이 이
+      프로젝트에 없어서 제외했다(그대로 켰다면 426개 오류가 났을
+      정도로 관행 차이가 큼). 이 옵션을 켜자마자 실제로 힌트가
+      빠져 있던 함수 5개(`app/core/metrics.py`/`app/core/
+      middleware.py`의 ASGI `send` 래퍼 3곳, `app/db/session.py`의
+      SQLite PRAGMA 이벤트 리스너, `app/main.py`의 `lifespan`
+      반환 타입)가 실제로 걸려서 전부 타입을 채웠다 - 이미 동작은
+      맞았던 코드라 런타임 동작 변경은 없다. 다시 `app/core/
+      cache.py`에 같은 재현 함수를 추가해 이번엔 mypy가 실제로
+      막는지 재검증한 뒤 되돌렸다. 모델/스키마 변경이 아니라
+      마이그레이션은 필요 없었다(`alembic check`로 드리프트 없음
+      재확인).

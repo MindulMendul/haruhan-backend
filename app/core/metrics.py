@@ -1,7 +1,7 @@
 import time
 
 from prometheus_client import Counter, Histogram, generate_latest
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 http_requests_total = Counter(
     "haruhan_http_requests_total",
@@ -46,7 +46,7 @@ class MetricsMiddleware:
         start = time.monotonic()
         status_code = 0
 
-        async def send_and_capture_status(message):
+        async def send_and_capture_status(message: Message) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]

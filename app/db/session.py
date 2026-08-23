@@ -1,5 +1,6 @@
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -34,7 +35,7 @@ def enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
         return
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _set_sqlite_pragma(dbapi_connection, connection_record):
+    def _set_sqlite_pragma(dbapi_connection: Any, connection_record: Any) -> None:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()

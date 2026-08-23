@@ -2,7 +2,7 @@ import logging
 import time
 
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.config import get_settings
 from app.core.errors import build_error_body
@@ -71,7 +71,7 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
-        async def send_with_security_headers(message):
+        async def send_with_security_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 message["headers"] = list(message.get("headers", [])) + list(self._HEADERS)
             await send(message)
@@ -119,7 +119,7 @@ class AccessLogMiddleware:
         start = time.monotonic()
         status_code = 0
 
-        async def send_and_capture_status(message):
+        async def send_and_capture_status(message: Message) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]
