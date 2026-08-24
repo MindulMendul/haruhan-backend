@@ -1,8 +1,14 @@
+import asyncio
 import json
+
+from sqlalchemy import event
 
 from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
+from app.repositories.user_repository import UserRepository
 from app.services.ollama_service import OllamaServiceError
+from app.services.quiz_service import QuizService
+from app.services.rag_service import RagService
 
 SAMPLE_QUIZ_JSON = json.dumps(
     {
@@ -770,6 +776,64 @@ def test_wrong_answer_notebook_empty_when_no_attempts(client):
     notebook = client.get("/api/v1/quizzes/wrong-answers", headers=_auth_headers(token))
     assert notebook.status_code == 200
     assert notebook.json()["entries"] == []
+
+
+def test_get_wrong_answer_notebook_issues_a_constant_number_of_queries(db_session_factory):
+    """이전 구현은 퀴즈 목록을 파이썬으로 순회하며 퀴즈마다 "최근 제출"/"그
+    제출의 답안"/"문항 목록" 조회를 따로 날렸다 - 퀴즈가 N개면 최대 1+3N번의
+    쿼리가 나가는 N+1 패턴이었다. 윈도우 함수로 한 번에 가져오도록 바꾼 뒤,
+    퀴즈가 5개 있어도 실행되는 SELECT 문이 여전히 딱 1번인지 SQLAlchemy의
+    `before_cursor_execute` 이벤트로 직접 세어서 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = QuizService(session=session, ollama_service=ollama, rag_service=rag)
+
+            for i in range(5):
+                quiz = await service.create_quiz(
+                    user_id=user.id,
+                    title=f"퀴즈 {i}",
+                    study_session_id=None,
+                    source_text=f"소스 {i}",
+                    question_count=2,
+                    model="qwen2.5:3b",
+                )
+                _, questions = await service.get_quiz_with_questions(quiz.id, user.id)
+                wrong_index = (questions[0].choices.index(questions[0].correct_answer) + 1) % len(
+                    questions[0].choices
+                )
+                correct_index = questions[1].choices.index(questions[1].correct_answer)
+                await service.submit_answers(
+                    quiz.id,
+                    user.id,
+                    [(questions[0].id, wrong_index), (questions[1].id, correct_index)],
+                )
+
+            select_statements: list[str] = []
+
+            def _record_select(conn, cursor, statement, parameters, context, executemany):
+                if statement.strip().upper().startswith("SELECT"):
+                    select_statements.append(statement)
+
+            engine = session.bind.sync_engine
+            event.listen(engine, "before_cursor_execute", _record_select)
+            try:
+                entries = await service.get_wrong_answer_notebook(user.id)
+            finally:
+                event.remove(engine, "before_cursor_execute", _record_select)
+
+            return entries, select_statements
+
+    entries, select_statements = asyncio.run(_run())
+
+    assert len(entries) == 5  # 퀴즈마다 오답 1개씩
+    assert len(select_statements) == 1  # 퀴즈 개수와 무관하게 SELECT는 딱 한 번
 
 
 def test_list_attempts_returns_full_history_newest_first(client):

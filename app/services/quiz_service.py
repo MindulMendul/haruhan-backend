@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from fastapi import HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -177,22 +178,40 @@ class QuizService:
 
         같은 퀴즈를 다시 풀어서 맞혔다면 더 이상 오답노트에 나오지 않는다(최신 제출
         기준이라서). 새 테이블 없이 기존 Quiz/QuizAttempt/QuizAnswer만으로 계산한다.
+
+        이전 구현은 퀴즈 목록을 파이썬으로 순회하면서 퀴즈마다 "최근 제출"/"그
+        제출의 답안"/"문항 목록" 조회를 따로 날렸다 - 퀴즈가 N개면 최대 1+3N번의
+        쿼리가 나가는 N+1 패턴이었다. 퀴즈별 최신 제출을 윈도우 함수(`ROW_NUMBER()
+        OVER (PARTITION BY quiz_id ORDER BY submitted_at DESC)`)로 한 번에 골라낸
+        뒤, 그 최신 제출의 오답만 Quiz/QuizQuestion과 조인해 쿼리 하나로 가져온다.
         """
-        quizzes = await self._quizzes.list_all_for_user(user_id)
-        entries: list[tuple[Quiz, QuizQuestion, QuizAnswer]] = []
-        for quiz in quizzes:
-            attempt = await self._attempts.get_latest_for_quiz(quiz.id, user_id)
-            if attempt is None:
-                continue
-            wrong_answers = [a for a in await self._answers.list_for_attempt(attempt.id) if not a.is_correct]
-            if not wrong_answers:
-                continue
-            questions_by_id = {q.id: q for q in await self._questions.list_for_quiz(quiz.id)}
-            for answer in wrong_answers:
-                question = questions_by_id.get(answer.question_id)
-                if question is not None:
-                    entries.append((quiz, question, answer))
-        return entries
+        latest_attempt_rank = (
+            func.row_number()
+            .over(
+                partition_by=QuizAttempt.quiz_id,
+                order_by=(QuizAttempt.submitted_at.desc(), QuizAttempt.id.desc()),
+            )
+            .label("rank")
+        )
+        ranked_attempts = (
+            select(
+                QuizAttempt.id.label("attempt_id"),
+                QuizAttempt.quiz_id.label("quiz_id"),
+                latest_attempt_rank,
+            )
+            .where(QuizAttempt.user_id == user_id)
+            .subquery()
+        )
+
+        result = await self._session.execute(
+            select(Quiz, QuizQuestion, QuizAnswer)
+            .join(ranked_attempts, and_(ranked_attempts.c.quiz_id == Quiz.id, ranked_attempts.c.rank == 1))
+            .join(QuizAnswer, QuizAnswer.attempt_id == ranked_attempts.c.attempt_id)
+            .join(QuizQuestion, QuizQuestion.id == QuizAnswer.question_id)
+            .where(Quiz.user_id == user_id, QuizAnswer.is_correct.is_(False))
+            .order_by(Quiz.created_at.desc(), QuizQuestion.order_index)
+        )
+        return [(quiz, question, answer) for quiz, question, answer in result.all()]
 
     async def submit_answers(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID, answers: list[tuple[uuid.UUID, int]]
