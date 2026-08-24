@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -166,6 +167,45 @@ def test_generate_json_raises_ollama_service_error_on_malformed_json_body(monkey
         asyncio.run(
             service.generate_json(prompt="프롬프트", model="qwen2.5:3b", schema={"type": "object"})
         )
+
+
+def test_chat_stream_yields_content_in_order_and_stops_at_done(monkeypatch):
+    """chat_stream()의 실제 ndjson 파싱 로직(빈 줄 건너뛰기, 청크별 content
+    누적, done=true에서 멈추기)은 이 파일에서 여태 malformed-JSON 에러 경로
+    하나로만 테스트되고 있었다 - study/interview-review 스트리밍 라우트
+    테스트들은 전부 이 실제 구현을 통째로 갈아치우는 FakeOllamaService를 쓰기
+    때문에, 정작 실제 Ollama와 통신하는 이 코드의 정상 동작 경로는 전체
+    테스트 스위트 어디에서도 검증되지 않고 있었다. 실제 Ollama가 보내는
+    형태(줄 사이 빈 줄 포함, done=true인 마지막 줄은 content가 비어있음)를
+    흉내 낸 ndjson 스트림을 흘려보내, content가 순서대로만 yield되고
+    (빈 content는 안 나오고) done을 만나면 정확히 거기서 멈추는지 확인한다."""
+    lines = [
+        json.dumps({"message": {"content": "안"}, "done": False}),
+        "",  # 실제 Ollama 스트림에도 섞여 오는 빈 줄 - continue로 건너뛰어야 함
+        json.dumps({"message": {"content": "녕"}, "done": False}),
+        json.dumps({"message": {"content": ""}, "done": True}),
+        # done 이후에도 줄이 더 올 수 있는 상황을 흉내낸다 - break가 없으면
+        # 이 줄까지 읽어 "하세요"가 결과에 섞여 들어가 버린다.
+        json.dumps({"message": {"content": "하세요"}, "done": False}),
+    ]
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+
+    def handler(request):
+        assert request.url.path == "/api/chat"
+        return httpx.Response(200, content=body)
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+
+    async def _collect():
+        return [
+            chunk
+            async for chunk in service.chat_stream(
+                messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b"
+            )
+        ]
+
+    assert asyncio.run(_collect()) == ["안", "녕"]
 
 
 def test_chat_stream_raises_ollama_service_error_on_malformed_json_line(monkeypatch):
