@@ -281,6 +281,64 @@ def test_quiz_from_nonexistent_session_404(client):
     assert response.status_code == 404
 
 
+def test_create_quiz_from_study_session_truncates_oversized_source_to_recent_messages(
+    client, monkeypatch
+):
+    """max_quiz_source_length는 core/config.py 주석에도 "학습 세션 전체를 소스로
+    쓸 수 있어서" 일반 프롬프트 제한보다 넉넉하게 잡았다고 돼 있는데, 정작
+    study_session_id로 퀴즈를 만드는 경로에서는 이 제한이 전혀 적용되지 않고
+    있었다 - QuizCreateRequest의 길이 검증은 source_text를 직접 붙여넣은
+    경우에만 걸리고, 이 분기가 세션 메시지를 이어붙여 만드는 source_text는
+    그 검증을 거치지 않기 때문이다. 세션 메시지 수에는 제한이 없어서, 대화가
+    길어질수록 Ollama에 보내는 프롬프트가 무한정 커질 수 있었다. 사용자가
+    세션 길이를 조절할 방법은 없으므로 거부 대신 가장 최근 메시지만 남기는지,
+    그리고 오래된 메시지는 실제로 잘려나가는지 확인한다."""
+    monkeypatch.setenv("MAX_QUIZ_SOURCE_LENGTH", "50")
+    get_settings.cache_clear()
+
+    captured_prompts = []
+
+    class CapturingOllamaService(FakeOllamaService):
+        async def generate_json(self, prompt, model, schema):
+            captured_prompts.append(prompt)
+            return SAMPLE_QUIZ_JSON
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: CapturingOllamaService()
+    token = _signup_and_get_token(client)
+
+    session = client.post(
+        "/api/v1/study/sessions", json={"title": "긴 세션"}, headers=_auth_headers(token)
+    )
+    session_id = session.json()["id"]
+
+    for i in range(5):
+        response = client.post(
+            f"/api/v1/study/sessions/{session_id}/messages",
+            json={"content": f"오래된 메시지 내용입니다 번호는 {i}번입니다"},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 200
+
+    latest = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "가장 최근에 보낸 메시지입니다"},
+        headers=_auth_headers(token),
+    )
+    assert latest.status_code == 200
+
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "긴 세션 기반 퀴즈", "study_session_id": session_id},
+        headers=_auth_headers(token),
+    )
+    assert create.status_code == 201
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "가장 최근에 보낸 메시지입니다" in prompt
+    assert "번호는 0번입니다" not in prompt
+
+
 def test_create_quiz_generation_failure_returns_502(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
     token = _signup_and_get_token(client)
@@ -875,7 +933,7 @@ def test_get_wrong_answer_notebook_issues_a_constant_number_of_queries(db_sessio
 
             ollama = FakeOllamaService()
             rag = RagService(session=session, ollama_service=ollama, settings=settings)
-            service = QuizService(session=session, ollama_service=ollama, rag_service=rag)
+            service = QuizService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
 
             for i in range(5):
                 quiz = await service.create_quiz(

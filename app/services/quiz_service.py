@@ -9,6 +9,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
+from app.core.config import Settings
 from app.core.metrics import quiz_created_total
 from app.db.models.quiz import Quiz
 from app.db.models.quiz_answer import QuizAnswer
@@ -63,7 +64,11 @@ def _build_quiz_prompt(source_text: str, question_count: int) -> str:
 
 class QuizService:
     def __init__(
-        self, session: AsyncSession, ollama_service: OllamaService, rag_service: RagService
+        self,
+        session: AsyncSession,
+        ollama_service: OllamaService,
+        rag_service: RagService,
+        settings: Settings,
     ) -> None:
         self._session = session
         self._quizzes = QuizRepository(session)
@@ -74,6 +79,7 @@ class QuizService:
         self._study_messages = StudyMessageRepository(session)
         self._ollama = ollama_service
         self._rag = rag_service
+        self._settings = settings
 
     async def create_quiz(
         self,
@@ -95,6 +101,23 @@ class QuizService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="학습 세션에 메시지가 없어 퀴즈를 생성할 수 없습니다.",
                 )
+            # max_quiz_source_length는 원래 "학습 세션 전체를 소스로 쓸 수 있어서"
+            # (core/config.py 주석) 일반 프롬프트 제한보다 넉넉하게 잡은 값인데,
+            # 정작 이 study_session_id 경로에서는 한 번도 적용되지 않고 있었다 -
+            # 스키마 검증(QuizCreateRequest)은 source_text를 직접 붙여넣은 경우에만
+            # 걸리고, study_session_id와 source_text는 동시에 못 쓰게 막혀 있어서
+            # 이 분기에서 만든 source_text는 그 검증을 절대 거치지 않는다. 세션이
+            # 계속 길어질수록(메시지 수 자체엔 제한이 없음) 이 문자열이 무한정
+            # 커져서 Ollama 호출이 느려지거나 타임아웃되거나, 모델 컨텍스트
+            # 윈도우를 넘겨 조용히 품질이 떨어질 수 있었다. 직접 붙여넣기와
+            # 달리 사용자가 세션 길이를 조절할 방법이 없으므로 거부 대신, 가장
+            # 최근 대화가 더 유의미하다고 보고 뒤쪽(최근)만 남긴다 - 메시지 중간이
+            # 아니라 줄바꿈 경계에서 잘리도록 보정한다.
+            if len(source_text) > self._settings.max_quiz_source_length:
+                source_text = source_text[-self._settings.max_quiz_source_length :]
+                newline_index = source_text.find("\n")
+                if newline_index != -1:
+                    source_text = source_text[newline_index + 1 :]
 
         # 둘 중 하나는 반드시 있어야 한다는 건 요청 스키마(QuizCreateRequest)가 이미
         # 검증했다 - study_session_id 분기에서 못 채웠다면 source_text가 채워져 있어야 함.

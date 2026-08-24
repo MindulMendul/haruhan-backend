@@ -40,7 +40,7 @@ def test_quiz_from_raw_source_text_gets_indexed_for_rag(db_session_factory):
             await session.commit()
 
             rag = RagService(session=session, ollama_service=FakeOllamaService(), settings=settings)
-            quiz_service = QuizService(session=session, ollama_service=FakeOllamaService(), rag_service=rag)
+            quiz_service = QuizService(session=session, ollama_service=FakeOllamaService(), rag_service=rag, settings=settings)
 
             quiz = await quiz_service.create_quiz(
                 user_id=user.id,
@@ -72,7 +72,7 @@ def test_quiz_from_study_session_is_not_double_indexed(db_session_factory):
             await session.commit()
 
             rag = RagService(session=session, ollama_service=FakeOllamaService(), settings=settings)
-            quiz_service = QuizService(session=session, ollama_service=FakeOllamaService(), rag_service=rag)
+            quiz_service = QuizService(session=session, ollama_service=FakeOllamaService(), rag_service=rag, settings=settings)
 
             quiz = await quiz_service.create_quiz(
                 user_id=user.id,

@@ -265,6 +265,10 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 }
 ```
 `study_session_id`와 `source_text`를 동시에 넣거나 둘 다 안 넣으면 `422`. AI 생성 실패 시 `502`.
+`source_text`를 직접 붙여넣는 경우 `MAX_QUIZ_SOURCE_LENGTH`(기본 20000자)를 넘으면 `422`로
+거부되지만, `study_session_id`로 만드는 경우는 세션이 길어서 합친 대화가 이 길이를 넘으면
+에러 없이 **가장 최근 대화만 남기고 앞부분이 조용히 잘립니다** — 아주 긴 세션으로 만든
+퀴즈가 세션 초반 내용을 반영 못 해도 버그가 아니라 의도된 동작입니다.
 
 문제 목록(`GET /quizzes/{id}`)의 각 문항:
 ```json

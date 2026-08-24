@@ -2,6 +2,7 @@ import asyncio
 from datetime import timedelta
 
 from app.core.clock import utcnow_naive
+from app.core.config import get_settings
 from app.repositories.quiz_repository import QuizQuestionRepository, QuizRepository
 from app.repositories.user_repository import UserRepository
 from app.services.quiz_service import QuizService
@@ -39,7 +40,10 @@ def test_resubmitting_identical_answers_after_window_creates_new_attempt(db_sess
             await session.commit()
 
             service = QuizService(
-                session=session, ollama_service=UnusedOllamaService(), rag_service=UnusedRagService()
+                session=session,
+                ollama_service=UnusedOllamaService(),
+                rag_service=UnusedRagService(),
+                settings=get_settings(),
             )
 
             first_attempt, _ = await service.submit_answers(
@@ -78,7 +82,10 @@ def test_resubmitting_identical_answers_within_window_reuses_attempt(db_session_
             await session.commit()
 
             service = QuizService(
-                session=session, ollama_service=UnusedOllamaService(), rag_service=UnusedRagService()
+                session=session,
+                ollama_service=UnusedOllamaService(),
+                rag_service=UnusedRagService(),
+                settings=get_settings(),
             )
 
             first_attempt, first_graded = await service.submit_answers(
