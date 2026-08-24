@@ -1832,3 +1832,46 @@
       엔드포인트 목록과 export 섹션에 안내를 추가하도록
       `FRONTEND_INTEGRATION.md`를 갱신했다.
 
+## 백로그 (76라운드)
+
+- [x] 100. 학습챗/면접복기 스트리밍 WebSocket이 깨진 JSON 프레임을 받으면
+      처리되지 않은 예외로 연결이 비정상 종료되던 문제 수정 - 이번에도
+      서브에이전트에게 독립 조사를 맡겼다. `study.py`의 `stream_message`와
+      `interview_review.py`의 `stream_create_review`는 둘 다
+      `await asyncio.wait_for(websocket.receive_json(), ...)`를 부르면서
+      `asyncio.TimeoutError`만 잡고 있었는데, Starlette의
+      `WebSocket.receive_json()`은 내부적으로 `json.loads(text)`를 그대로
+      호출할 뿐 예외를 전혀 잡지 않는다 - 즉 클라이언트가 깨진/부분
+      전송된 JSON을 보내면(느린 모바일 네트워크, 클라이언트 버그 등)
+      `json.JSONDecodeError`가 그대로 터진다. WebSocket 스코프에는 HTTP용
+      전역 예외 핸들러(`main.py`의 `ServerErrorMiddleware`)가 적용되지
+      않으므로(스코프가 `"http"`가 아니면 그냥 통과시킴), 이 예외는 어디서도
+      잡히지 않고 그대로 ASGI 서버까지 올라가 연결이 처리되지 않은 서버
+      예외로 끊긴다 - 같은 라우트 안에서 빈 내용/길이 초과/레이트리밋
+      초과 등 다른 모든 잘못된 입력은 `{"type": "error", "detail": "..."}`
+      프레임으로 우아하게 처리하고 연결을 유지하는 것과 정면으로 모순되는
+      동작이었다. `study.py`는 한 가지 문제가 더 있었는데, JSON이긴 하지만
+      객체가 아닌 페이로드(`[1,2,3]`, `42`, `null` 등)가 오면
+      `payload.get("content")`에서 `AttributeError`가 나서 이 역시 같은
+      방식으로 죽었다(`interview_review.py`는 `InterviewReviewCreateRequest.
+      model_validate(raw_payload)`가 non-dict 입력에도 `ValidationError`를
+      던지도록 pydantic이 이미 처리해줘서 이 두 번째 문제는 없었다 - 직접
+      실행해 확인). 두 라우트 모두 `except json.JSONDecodeError`를 추가해
+      에러 프레임을 보내고 루프를 계속하도록 고쳤고, `study.py`에는
+      `isinstance(payload, dict)` 가드도 추가했다. 기존 WS 테스트는 전부
+      `ws.send_json({...})`으로 항상 올바른 형태의 페이로드만 보내고
+      있어서 이 구멍을 전혀 잡아내지 못했다 - `ws.send_text("...")`로
+      깨진 텍스트 프레임을 보내는 테스트
+      (`test_stream_message_rejects_malformed_json_frame`,
+      `test_stream_create_review_rejects_malformed_json_frame`)를 각각
+      추가하고, 에러 프레임을 받은 뒤에도 연결이 살아있어 두 번째
+      메시지에 응답하는지까지 확인했다. 수정 전 코드로 되돌려서 두
+      테스트 모두 실제로 `JSONDecodeError`로 실패하는 것을 직접 확인한
+      뒤(`git stash`로 수정 부분만 되돌렸다가 복원) 다시 적용했다. 전체
+      337개 테스트 통과, 전체 커버리지 99%, mypy 클린. 순수 라우트 계층
+      예외 처리 수정이라 모델/스키마 변경이나 마이그레이션은 필요
+      없었다. `FRONTEND_INTEGRATION.md`는 이미 "실패하면 에러 프레임이
+      오고 연결은 끊기지 않는다"고 문서화해뒀던 기존 계약을 실제 동작이
+      이제야 지키게 된 것뿐이라 별도 갱신은 필요 없었다.
+
+

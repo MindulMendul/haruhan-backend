@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 
 from fastapi import (
@@ -176,6 +177,12 @@ async def stream_message(
             except asyncio.TimeoutError:
                 await websocket.close(code=status.WS_1000_NORMAL_CLOSURE, reason="idle timeout")
                 break
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
+                continue
+            if not isinstance(payload, dict):
+                await websocket.send_json({"type": "error", "detail": "잘못된 요청 형식입니다."})
+                continue
             content = payload.get("content")
             if not isinstance(content, str) or not content.strip():
                 await websocket.send_json({"type": "error", "detail": "content는 비어 있을 수 없습니다."})

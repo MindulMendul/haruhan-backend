@@ -430,6 +430,26 @@ def test_stream_create_review_rejects_invalid_payload(client):
         assert error_event["type"] == "error"
 
 
+def test_stream_create_review_rejects_malformed_json_frame(client):
+    """websocket.receive_json()은 json.loads()를 그대로 호출하고 예외를 잡지
+    않는다 - 이 라우트는 asyncio.TimeoutError만 잡고 있어서, 깨진 JSON
+    프레임이 오면 처리되지 않은 JSONDecodeError가 그대로 터져 연결이
+    비정상 종료됐다. study.py의 동일한 스트리밍 라우트와 같은 문제라
+    같은 방식(잡아서 {"type": "error"} 프레임으로 응답 후 연결 유지)으로
+    고쳤다."""
+    token = _signup_and_get_token(client, email="stream-review-badjson@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_text("이건 JSON이 아닙니다")
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        # 연결이 죽지 않고 계속 살아있는지, 유효하지 않은 페이로드로 다시 확인한다.
+        ws.send_json({"company": "하루한"})
+        second_error = ws.receive_json()
+        assert second_error["type"] == "error"
+
+
 def test_stream_create_review_ai_failure_sends_error_event(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
     token = _signup_and_get_token(client, email="stream-review-fail@example.com")

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 
 from fastapi import (
@@ -155,6 +156,9 @@ async def stream_create_review(
             except asyncio.TimeoutError:
                 await websocket.close(code=status.WS_1000_NORMAL_CLOSURE, reason="idle timeout")
                 break
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
+                continue
             try:
                 payload = InterviewReviewCreateRequest.model_validate(raw_payload)
             except ValidationError as exc:

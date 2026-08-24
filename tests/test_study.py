@@ -671,6 +671,34 @@ def test_stream_message_rejects_empty_content(client):
         assert error_event["type"] == "error"
 
 
+def test_stream_message_rejects_malformed_json_frame(client):
+    """websocket.receive_json()은 내부적으로 json.loads()를 그대로 호출하고
+    예외를 잡지 않는다 - 이 라우트는 asyncio.TimeoutError만 잡고 있어서,
+    깨진 JSON 프레임(느린 모바일 네트워크에서의 부분 전송, 클라이언트 버그
+    등)이 오면 서버 쪽에서 처리되지 않은 JSONDecodeError가 그대로 터져
+    연결이 비정상 종료됐다 - 다른 모든 잘못된 입력(빈 내용, 길이 초과 등)은
+    {"type": "error"} 프레임으로 우아하게 처리하면서 이 경우만 예외로
+    죽는 건 이 라우트 자신의 에러 처리 규약과 모순이다."""
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "깨진 JSON 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_text("이건 JSON이 아닙니다")
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        # 연결이 죽지 않고 계속 살아있는지, JSON이지만 객체가 아닌 페이로드로도
+        # 확인한다 (payload.get("content")가 그대로면 AttributeError가 났을 것).
+        ws.send_json([1, 2, 3])
+        second_error = ws.receive_json()
+        assert second_error["type"] == "error"
+
+
 def test_stream_message_rejects_content_over_max_length(client, monkeypatch):
     monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
     get_settings.cache_clear()
