@@ -1,3 +1,9 @@
 {$DOMAIN} {
+	# 학습챗 세션 상세/데이터 export처럼 응답이 커질 수 있는 JSON 엔드포인트가
+	# 있는데, Caddy는 (nginx와 달리) 압축을 기본으로 켜주지 않는다 - encode
+	# 지시어가 없으면 이 앱이 내려주는 모든 응답이 압축 없이 그대로 나간다.
+	# zstd/gzip을 명시적으로 켜서 대역폭을 줄인다 (WebSocket 업그레이드 응답처럼
+	# 본문이 없는 응답이나 이미 압축된 타입은 Caddy가 알아서 건너뛴다).
+	encode zstd gzip
 	reverse_proxy haruhan-backend:8000
 }
