@@ -165,6 +165,8 @@ def test_export_my_data_groups_each_entitys_children_correctly(client):
     quizzes_by_id = {q["id"]: q for q in body["quizzes"]}
     assert {q["id"] for q in quizzes_by_id[quiz_1["id"]]["questions"]} == set(q1_ids)
     assert {q["id"] for q in quizzes_by_id[quiz_2["id"]]["questions"]} == set(q2_ids)
+    assert quizzes_by_id[quiz_1["id"]]["source_text"] == "소스 1"
+    assert quizzes_by_id[quiz_2["id"]]["source_text"] == "소스 2"
 
     quiz_1_attempt_ids = {a["id"] for a in quizzes_by_id[quiz_1["id"]]["attempts"]}
     assert quiz_1_attempt_ids == {attempt_1a["attempt_id"], attempt_1b["attempt_id"]}
@@ -182,3 +184,39 @@ def test_export_my_data_groups_each_entitys_children_correctly(client):
     assert [t["id"] for t in practice_by_id[practice_b["id"]]["turns"]] == [
         t["id"] for t in practice_b["turns"]
     ]
+
+
+def test_export_includes_pasted_quiz_source_text_but_not_for_session_based_quiz(client):
+    """source_text는 사용자가 직접 붙여넣은 퀴즈에서만 채워지고, 학습 세션
+    기반 퀴즈는 원본이 이미 study_sessions 쪽 메시지로 export에 들어가 있으므로
+    중복해서 채우지 않는다(null로 남는다) - export가 이 둘을 구분해서 정확히
+    반영하는지 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: _FakeOllamaService()
+    token = _signup_and_get_token(client)
+    headers = _auth_headers(token)
+
+    pasted_quiz = client.post(
+        "/api/v1/quizzes",
+        json={"title": "붙여넣은 퀴즈", "source_text": "원본 텍스트", "model": "qwen2.5:3b"},
+        headers=headers,
+    ).json()
+
+    session = client.post(
+        "/api/v1/study/sessions", json={"title": "세션"}, headers=headers
+    ).json()
+    client.post(
+        f"/api/v1/study/sessions/{session['id']}/messages",
+        json={"content": "학습 내용입니다"},
+        headers=headers,
+    )
+    session_quiz = client.post(
+        "/api/v1/quizzes",
+        json={"title": "세션 기반 퀴즈", "study_session_id": session["id"]},
+        headers=headers,
+    ).json()
+
+    body = client.get("/api/v1/export/me", headers=headers).json()
+    quizzes_by_id = {q["id"]: q for q in body["quizzes"]}
+
+    assert quizzes_by_id[pasted_quiz["id"]]["source_text"] == "원본 텍스트"
+    assert quizzes_by_id[session_quiz["id"]]["source_text"] is None

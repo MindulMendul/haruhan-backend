@@ -63,6 +63,7 @@ class QuizExport(BaseModel):
     id: uuid.UUID
     title: str
     source_study_session_id: uuid.UUID | None
+    source_text: str | None
     created_at: datetime
     questions: list[QuizQuestionExport]
     attempts: list[QuizAttemptExport]

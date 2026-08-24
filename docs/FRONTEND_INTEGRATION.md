@@ -413,12 +413,12 @@ GET /api/v1/export/me   (인증 필요)
   "exported_at": "2026-01-01T00:00:00",
   "user_id": "...",
   "study_sessions": [ { "id": "...", "title": "...", "model": "...", "created_at": "...", "updated_at": "...", "messages": [ { "id": "...", "role": "user", "content": "...", "created_at": "..." } ] } ],
-  "quizzes": [ { "id": "...", "title": "...", "source_study_session_id": null, "created_at": "...", "questions": [ { "id": "...", "order_index": 0, "question_text": "...", "choices": ["..."], "correct_answer": "...", "explanation": "..." } ], "attempts": [ { "id": "...", "score": 1, "total": 1, "submitted_at": "...", "answers": [ { "id": "...", "question_id": "...", "selected_index": 0, "is_correct": true } ] } ] } ],
+  "quizzes": [ { "id": "...", "title": "...", "source_study_session_id": null, "source_text": "...", "created_at": "...", "questions": [ { "id": "...", "order_index": 0, "question_text": "...", "choices": ["..."], "correct_answer": "...", "explanation": "..." } ], "attempts": [ { "id": "...", "score": 1, "total": 1, "submitted_at": "...", "answers": [ { "id": "...", "question_id": "...", "selected_index": 0, "is_correct": true } ] } ] } ],
   "interview_practice_sessions": [ { "id": "...", "topic": "...", "model": "...", "status": "completed", "overall_feedback": null, "created_at": "...", "updated_at": "...", "turns": [ { "id": "...", "order_index": 0, "question": "...", "answer": null, "feedback": null, "created_at": "..." } ] } ],
   "interview_reviews": [ { "id": "...", "company": "...", "position": "...", "interview_date": "2026-01-01", "content": "...", "model": "...", "ai_feedback": null, "created_at": "...", "updated_at": "..." } ]
 }
 ```
-본인 소유 기록 전체를 한 번에 JSON으로 내려받습니다. 퀴즈 문제에는 (풀이용 목록 조회와 달리) `correct_answer`/`explanation`이 그대로 포함됩니다. 파일 다운로드로 만들고 싶으면 프론트에서 이 응답을 그대로 Blob으로 감싸서 저장하면 됩니다 (서버가 `Content-Disposition`을 붙여주진 않음).
+본인 소유 기록 전체를 한 번에 JSON으로 내려받습니다. 퀴즈 문제에는 (풀이용 목록 조회와 달리) `correct_answer`/`explanation`이 그대로 포함됩니다. 퀴즈의 `source_text`는 직접 붙여넣어 만든 퀴즈에서만 원본 텍스트가 채워지고, `study_session_id`로 만든 퀴즈는 원본이 이미 `study_sessions` 쪽 메시지에 들어있으므로 중복 없이 `null`입니다. 파일 다운로드로 만들고 싶으면 프론트에서 이 응답을 그대로 Blob으로 감싸서 저장하면 됩니다 (서버가 `Content-Disposition`을 붙여주진 않음).
 
 ## 4. 헬스체크/메트릭 (인증 불필요, 버전 프리픽스 없음)
 

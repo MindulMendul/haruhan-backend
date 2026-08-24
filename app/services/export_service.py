@@ -118,6 +118,7 @@ class ExportService:
                     id=quiz.id,
                     title=quiz.title,
                     source_study_session_id=quiz.source_study_session_id,
+                    source_text=quiz.source_text,
                     created_at=quiz.created_at,
                     questions=[
                         QuizQuestionExport.model_validate(q) for q in questions_by_quiz.get(quiz.id, [])

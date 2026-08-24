@@ -1719,3 +1719,43 @@
       내용을 반영 못 할 수 있다는 사용자 대상 동작 변화라
       `FRONTEND_INTEGRATION.md`의 퀴즈 생성 섹션에 안내를 추가했다.
       모델/스키마 변경은 아니라 마이그레이션은 필요 없었다.
+
+## 백로그 (73라운드)
+
+- [x] 97. 데이터 export(`GET /export/me`)가 직접 붙여넣어 만든 퀴즈의
+      원본 텍스트(`Quiz.source_text`)를 누락하고 있던 문제 수정 -
+      이번에도 서브에이전트에게 독립 조사를 맡겼다. `db/models/quiz.py`의
+      `source_text` 컬럼 주석은 "이 텍스트는 study_message/
+      interview_review와 달리 다른 어떤 테이블에도 저장되지 않는다"고
+      스스로 밝히고 있다 - 즉 직접 붙여넣기로 만든 퀴즈에서는 이
+      컬럼이 사용자가 원래 입력한 내용이 DB에 남는 유일한 자리다.
+      그런데 `schemas/export.py`의 `QuizExport`에는 `source_text`
+      필드 자체가 없었고, `export_service.py`의 `_build_quizzes()`도
+      이 컬럼을 전혀 읽지 않았다 - 학습챗의 `StudyMessageExport.content`,
+      면접복기의 `InterviewReviewExport.content`는 원본을 그대로
+      내보내면서, 퀴즈만 사용자 본인 데이터를 통째로 되돌려주지
+      못하는 export 완전성 구멍이었다. 72번 라운드 로드맵 항목이
+      "source_text는 어떤 응답 스키마에도 노출되지 않는다"고 적어둔
+      것과 겹쳐 보일 수 있지만, 그건 퀴즈 조회 API(`QuizResponse`/
+      `QuizDetailResponse`)에서 사용자가 이미 갖고 있는 입력을 그대로
+      돌려줄 필요가 없다는 의도적 설계였고, export는 "본인 데이터를
+      빠짐없이 내려받는다"는 전혀 다른 목적이라 이 구멍은 별개의
+      누락이다. `QuizExport`에 `source_text: str | None` 필드를
+      추가하고 `_build_quizzes()`가 `quiz.source_text`를 채우도록
+      고쳤다. 기존 `test_export.py`의
+      `test_export_my_data_groups_each_entitys_children_correctly`는
+      이미 `source_text: "소스 1"`/`"소스 2"`로 퀴즈를 만들고
+      있었는데도 export 응답에서 이 값을 확인하는 assert가 없어서
+      이 구멍을 잡아내지 못하고 있었다 - 여기에 assert를 추가하고,
+      직접 붙여넣은 퀴즈는 `source_text`가 그대로 나오고 학습 세션
+      기반 퀴즈는(원본이 이미 `study_sessions` 쪽 메시지로 export에
+      들어가 있으므로 중복 없이) `null`로 남는지 함께 확인하는 테스트
+      (`test_export_includes_pasted_quiz_source_text_but_not_for_session_based_quiz`)
+      를 추가했다. `export.py`/`export_service.py` 모두 새 테스트로
+      100% 커버리지를 유지한다(전체 333개 테스트 통과, 전체 커버리지
+      99%, mypy 클린). DB 컬럼은 이미 존재하던 것을 스키마/서비스
+      계층에서 읽어 노출하기만 한 변경이라 마이그레이션은 필요
+      없었다. export 응답 스키마가 바뀌는 사용자 대상 변화라
+      `FRONTEND_INTEGRATION.md`의 export 섹션 예시 응답에
+      `source_text` 필드를 추가하고, 직접 붙여넣은 퀴즈에서만
+      채워지고 세션 기반 퀴즈는 `null`이라는 설명을 덧붙였다.
