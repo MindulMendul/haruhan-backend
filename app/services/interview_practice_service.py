@@ -176,9 +176,7 @@ class InterviewPracticeService:
     async def submit_answer(
         self, session_id: uuid.UUID, user_id: uuid.UUID, answer: str
     ) -> tuple[InterviewPracticeTurn, InterviewPracticeTurn | None]:
-        # get_for_user_locked()로 같은 세션에 대한 답변 제출/종료를 직렬화한다 -
-        # 자세한 이유는 그 메서드의 docstring 참고.
-        practice_session = await self._sessions.get_for_user_locked(session_id, user_id)
+        practice_session = await self._sessions.get_for_user(session_id, user_id)
         if practice_session is None:
             raise _NOT_FOUND
         if practice_session.status != "in_progress":
@@ -187,6 +185,32 @@ class InterviewPracticeService:
         turns = await self._turns.list_for_session(session_id)
         current_turn = turns[-1] if turns else None
         if current_turn is None or current_turn.answer is not None:
+            raise _NO_PENDING_QUESTION
+        expected_turn_id = current_turn.id
+
+        # get_for_user_locked()로 같은 세션에 대한 답변 제출/종료를 직렬화한다
+        # (102번 라운드) - 자세한 이유는 그 메서드의 docstring 참고. 다만 이
+        # 잠금 때문에 대기했다 깨어난 요청이 "지금 마지막 턴"을 위치로 다시
+        # 골랐다면, 그 사이 다른 제출이 이미 처리해 새로 만든 턴을 자기 것인
+        # 양 잘못 답변해버릴 수 있다 - 이중 클릭/느린 네트워크 재시도로 같은
+        # 턴에 답변이 두 번 오면, 원래는(잠금 도입 전) mark_answered_if_pending의
+        # CAS가 둘째 요청을 깔끔히 거부했는데, 잠금이 둘째 요청을 첫째 요청의
+        # 커밋 이후까지 대기시켜버리면 둘째 요청이 깨어난 뒤 위치 기반으로
+        # "마지막 턴"을 다시 골라 이미 존재하는 *다음* 턴을 대상으로 삼게 된다
+        # (그 턴은 아직 미답변 상태라 통과됨) - 원래 그 답변과 무관한 질문에
+        # 엉뚱한 답이 붙는 데이터 정합성 문제였다. 잠금을 얻은 뒤 애초에
+        # 답하려던 턴(expected_turn_id)이 여전히 최신 미답변 턴인지 다시
+        # 확인해서, 그 사이 상황이 바뀌었으면(=누군가 먼저 처리함) 엉뚱한
+        # 턴에 조용히 적용하는 대신 안전하게 거부한다.
+        practice_session = await self._sessions.get_for_user_locked(session_id, user_id)
+        if practice_session is None:
+            raise _NOT_FOUND
+        if practice_session.status != "in_progress":
+            raise _ALREADY_FINISHED
+
+        turns = await self._turns.list_for_session(session_id)
+        current_turn = turns[-1] if turns else None
+        if current_turn is None or current_turn.id != expected_turn_id or current_turn.answer is not None:
             raise _NO_PENDING_QUESTION
 
         # 답변을 먼저 커밋하지 않고 AI 호출까지 한 트랜잭션으로 묶는다: AI 호출이 실패하면

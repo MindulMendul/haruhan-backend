@@ -81,11 +81,22 @@ class InterviewPracticeSessionRepository:
         지원하지 않아 이 조회가 일반 SELECT로 컴파일된다 - 그래서 이 잠금에
         의존하는 동시성 자체는 SQLite 기반 테스트로 재현/검증할 수 없다(92/101번
         라운드에서 이미 마주친 것과 같은 성격의 한계).
-        """
+
+        `submit_answer()`가 이 조회 전에 같은 행을 잠금 없이 한 번 먼저 읽어두는데
+        (자기 자신과의 경쟁을 막기 위해 답하려던 턴을 먼저 확정해두는 용도 -
+        103번 라운드), SQLAlchemy는 기본적으로 세션에 이미 로드된(identity map)
+        객체를 이후 같은 PK로 다시 조회해도 속성을 새로 덮어쓰지 않는다 - 그래서
+        `populate_existing=True` 없이 이 조회만 잠갔다면, 다른 트랜잭션이 그 사이
+        커밋한 최신 status를 무시하고 방금 전 조회 때 캐시해둔 낡은 객체를 그대로
+        돌려줘서, 잠금 자체(FOR UPDATE로 대기했다가 깨어난 것)는 정상 동작해도
+        본문이 참조하는 `.status`는 여전히 옛날 값일 수 있었다 - 잠금을 거는
+        의미가 없어지는 상황이라 `populate_existing=True`로 항상 방금 커밋된
+        실제 행 값으로 객체를 갱신하도록 강제한다."""
         result = await self._session.execute(
             select(InterviewPracticeSession)
             .where(InterviewPracticeSession.id == session_id, InterviewPracticeSession.user_id == user_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 

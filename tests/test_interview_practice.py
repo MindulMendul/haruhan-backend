@@ -6,7 +6,10 @@ from sqlalchemy import select
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_ollama_service
 from app.db.models.interview_practice_turn import InterviewPracticeTurn
-from app.repositories.interview_practice_repository import InterviewPracticeTurnRepository
+from app.repositories.interview_practice_repository import (
+    InterviewPracticeSessionRepository,
+    InterviewPracticeTurnRepository,
+)
 from app.repositories.user_repository import UserRepository
 from app.services.interview_practice_service import InterviewPracticeService
 from app.services.ollama_service import OllamaServiceError
@@ -793,3 +796,256 @@ def test_get_for_user_locked_requests_row_lock_on_postgres():
     assert session.captured_statement is not None
     compiled = str(session.captured_statement.compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE" in compiled
+
+
+def test_submit_answer_rejects_stale_retry_instead_of_misapplying_to_next_turn(db_session_factory):
+    """102번 라운드에서 submit_answer()/complete_session() 경쟁을 막으려고 추가한
+    get_for_user_locked()가, submit_answer()를 자기 자신과도 직렬화시켜버린다는
+    걸 뒤늦게 발견했다(102번 라운드 자체가 만든 회귀) - 이 잠금 때문에 대기했다
+    깨어난 요청이 "지금 마지막 턴"을 위치로 다시 고르면, 그 사이 다른 제출이
+    이미 답변하고 새로 만든 턴을 자기 것인 양 잘못 답변해버릴 수 있다(원래는
+    mark_answered_if_pending의 CAS가 같은 턴에 대한 중복 제출을 깔끔히
+    거부했는데, 잠금이 둘째 요청을 완전히 다른 -다음- 턴 앞으로 데려다
+    놓아버린다).
+
+    실제 운영 환경처럼 요청마다 별도 세션(별도 identity map)을 쓰지 않고 하나의
+    세션을 공유해서 재현하면, mark_answered_if_pending()의 세션 단위 bulk
+    update 동기화(synchronize_session)가 이 테스트가 붙잡고 있는 "오래된"
+    current_turn 객체의 answer 속성까지 우연히 갱신해버려서, 진짜 원인(턴을
+    위치로 잘못 고름)과 무관하게 기존 `current_turn.answer is not None` 체크만
+    으로도 우연히 거부돼버린다(고쳐야 할 버그를 재현하지 못하고 통과해버림 -
+    실제로 확인함). 서로 다른 세션 두 개(같은 커넥션을 쓰지만 순차적으로만
+    동작해 SQLite의 단일 커넥션 제약을 안 건드림)로 진짜 격리된 상태를 만든다.
+
+    실제 Postgres에서는 바깥쪽 요청이 `get_for_user_locked()`의 `FOR UPDATE`
+    잠금 자체에서 (다른 요청의 트랜잭션이 끝날 때까지) 블록된다 - 즉 바깥쪽
+    요청은 그 어떤 턴 조회도 하기 전에 멈춰 있다가, 다른 요청이 완전히 끝난
+    "뒤에야" 깨어나서 그제서야 처음(구버전 코드라면 유일한) 턴 조회를 한다.
+    그래서 경쟁은 `get_for_user_locked()` 호출 지점에 주입해야 실제 타이밍과
+    맞다 - `list_for_session()` 호출 "이후"에 다른 요청을 끼워넣으면(바깥쪽이
+    이미 자기 몫의 조회를 마친 뒤라) 최초 재현 시도에서는 구버전 코드도
+    우연히 통과해버렸다(직접 확인함 - `mark_answered_if_pending`이 자기가
+    들고 있던 오래된 turn.id에 대해서는 여전히 CAS로 정상 거부했기 때문).
+    `get_for_user_locked()`를 가로채, 첫 호출이 반환하기 "전에" 별도 세션의
+    "다른 요청"이 같은 턴에 완전히 답하고 커밋하도록 만든다 - 이러면 바깥쪽
+    요청이 잠금을 얻은 뒤 읽는 턴 목록은 진짜로 다른 세션이 막 커밋한 최신
+    상태([첫 턴 답변 완료, 다음 턴 미답변])다. submit_answer()가 이 상황에서
+    엉뚱한(다음) 턴에 조용히 답을 붙이는 대신 깔끔한 409로 끝나는지 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            ollama = FakeOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    # 바깥쪽(session_a)이 여기까지 오면서 이미 읽었을 수 있는
+                    # 읽기전용 트랜잭션을 커밋해 커넥션을 비운 뒤, 별도 세션의
+                    # "다른 요청"이 같은 턴에 완전히 답하고 다음 턴을 만들도록
+                    # 한다 - Postgres라면 이 시점에 바깥쪽 요청이 FOR UPDATE에서
+                    # 블록돼 있었을 것이다.
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            answered_turn, next_turn = await service_b.submit_answer(
+                                session_id=practice_session.id,
+                                user_id=user.id,
+                                answer="먼저 도착한 답변",
+                            )
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                    assert answered_turn.id == first_turn.id
+                    assert next_turn is not None
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id,
+                        user_id=user.id,
+                        answer="뒤늦게 도착한 답변(사실 첫 턴용이었음)",
+                    )
+                    return None
+                except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    return exc
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
+
+
+def test_submit_answer_rejects_when_session_completed_while_waiting_for_lock(db_session_factory):
+    """submit_answer()가 잠금을 얻은 뒤 세션 status를 다시 확인하는 부분(102번
+    라운드의 원래 목적: complete_session과의 경쟁 방지)이 여전히 제대로
+    동작하는지 확인한다 - 위 테스트가 잠금 지점에 주입한 것과 같은 방식으로,
+    이번엔 "다른 요청"이 완전한 답변 1개를 가진 세션을 완전히 종료시키도록
+    해서, 바깥쪽 제출이 (엉뚱한 턴에 답하는 대신) 이미 종료된 세션이라고
+    올바르게 거부하는지 검증한다."""
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            ollama = FakeOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            # 첫 턴을 미리 정상적으로 답변해서 complete_session이 종합 피드백을
+            # 만들 답변한 질문을 최소 1개 갖도록 만든다.
+            _, second_turn = await service_a.submit_answer(
+                session_id=practice_session.id, user_id=user.id, answer="첫 답변"
+            )
+            assert second_turn is not None
+            await session_a.commit()
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            completed = await service_b.complete_session(
+                                session_id=practice_session.id, user_id=user.id
+                            )
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                    assert completed.status == "completed"
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id, user_id=user.id, answer="두 번째 답변"
+                    )
+                    return None
+                except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    return exc
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "이미 종료된 면접 연습입니다."
+
+
+def test_submit_answer_rejects_when_session_deleted_while_waiting_for_lock(db_session_factory):
+    """submit_answer()가 잠금을 얻은 뒤 세션 존재 여부를 다시 확인하는 부분이
+    여전히 제대로 동작하는지 확인한다 - "다른 요청"이 그 사이 세션 자체를
+    삭제해버리면, 바깥쪽 제출이 (이미 사라진 세션의 턴에 답하려 드는 대신)
+    404로 거부하는지 검증한다."""
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            ollama = FakeOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            await service_b.delete_session(session_id=practice_session.id, user_id=user.id)
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id, user_id=user.id, answer="답변"
+                    )
+                    return None
+                except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    return exc
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
