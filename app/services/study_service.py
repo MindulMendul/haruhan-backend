@@ -2,6 +2,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -135,11 +136,22 @@ class StudyService:
         except OllamaServiceError as exc:
             raise _GENERATION_FAILED from exc
 
-        assistant_message = await self._messages.create(
-            session_id=session_id, role="assistant", content=reply
-        )
-        await self._sessions.touch(study_session)
-        await self._session.commit()
+        # get_for_user() 확인과 여기 사이에 느린 Ollama 호출이 끼어 있어, 그 사이
+        # 세션이 삭제되면(다른 탭/요청의 DELETE, CASCADE로 방금 만든 user_message도
+        # 함께 사라짐) session_id가 더는 존재하지 않는 부모를 가리키게 된다 -
+        # StudyMessage.session_id는 nullable=False FK라 이 INSERT가 IntegrityError로
+        # 실패한다. 잡지 않으면 애써 받은 AI 응답을 저장도 못 하고 버리면서 처리되지
+        # 않은 예외(500)까지 나가버린다 - 세션이 이미 사라졌다는 걸 다른 "세션 없음"
+        # 케이스와 같은 404로 알려준다.
+        try:
+            assistant_message = await self._messages.create(
+                session_id=session_id, role="assistant", content=reply
+            )
+            await self._sessions.touch(study_session)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _SESSION_NOT_FOUND from None
 
         # 이번 대화도 향후 질문에 그라운딩 자료로 쓰일 수 있도록 색인해둔다.
         await self._rag.index_content(
@@ -187,11 +199,18 @@ class StudyService:
             raise _GENERATION_FAILED from exc
 
         reply = "".join(reply_parts)
-        assistant_message = await self._messages.create(
-            session_id=session_id, role="assistant", content=reply
-        )
-        await self._sessions.touch(study_session)
-        await self._session.commit()
+        # send_message()와 같은 이유(위 docstring 참고)로, 스트리밍 도중 세션이
+        # 삭제되면 이 INSERT가 IntegrityError로 실패할 수 있다 - 404로 변환해
+        # 라우트가 {"type": "error"} 프레임으로 우아하게 처리하게 한다.
+        try:
+            assistant_message = await self._messages.create(
+                session_id=session_id, role="assistant", content=reply
+            )
+            await self._sessions.touch(study_session)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _SESSION_NOT_FOUND from None
 
         # 색인은 클라이언트에게 "done"을 알리기 전에 전부 끝내둔다 - WebSocket은
         # 클라이언트가 마지막 이벤트를 받자마자 연결을 끊을 수 있는데, yield 이후에

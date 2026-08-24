@@ -2057,4 +2057,48 @@
       모델/스키마 변경이나 마이그레이션, `FRONTEND_INTEGRATION.md` 갱신은
       필요 없었다.
 
+## 백로그 (81라운드)
+
+- [x] 105. 학습챗 메시지 전송 중 세션이 삭제되면 처리되지 않은
+      `IntegrityError`(500)로 끝나던 문제 수정 - 78~80번 라운드가 연속으로
+      면접연습 한 파일만 파고든 걸 감안해, 이번엔 서브에이전트에게 완전히
+      다른 영역을 보라고 명시적으로 지시했다. `send_message()`/
+      `stream_message()`는 둘 다 세션 존재를 확인한 뒤 느린 Ollama 호출을
+      거쳐서야 `assistant_message`를 만드는 check-then-act다 - `StudyMessage.
+      session_id`는 `nullable=False`, `ondelete="CASCADE"` FK라서, 그 사이
+      다른 탭/요청이 `DELETE /study/sessions/{id}`로 이 세션을 지워버리면
+      (CASCADE로 방금 만든 user_message도 함께 사라짐) `session_id`가 더는
+      존재하지 않는 부모를 가리키게 되어 `assistant_message` INSERT가
+      `IntegrityError`로 실패한다. 이걸 잡는 코드가 어디에도 없어서, 애써
+      받은 AI 응답을 저장도 못 하고 버리면서 REST 경로는 처리되지 않은
+      예외로 500이 나가고, WebSocket 경로는(100번 라운드에서 이미 확인한
+      대로 WS 스코프에는 전역 예외 핸들러가 적용되지 않아) 연결 자체가
+      처리되지 않은 서버 예외로 죽어버렸다. 이 사이 다른 세션과 관련된
+      check-then-act 경쟁들(92/101/102/103/104번 라운드)은 전부 `SELECT
+      ... FOR UPDATE` 잠금으로 고쳤지만, 이번엔 다르게 접근했다 - 학습챗
+      스트리밍은 응답 생성 시간이 잠금을 걸어두기엔 너무 길 수 있고, FK
+      위반은 SQLite에서도 실제로 재현되는 진짜 제약 위반(잠금 흉내가
+      필요 없음)이라, `auth_service.py`/`user_service.py`가 이미 이메일
+      중복 가입 경쟁에 쓰고 있던 `except IntegrityError: rollback() + 409
+      (여기서는 404)로 변환` 패턴을 그대로 재사용하는 게 더 간단하고
+      확실했다. `send_message()`/`stream_message()` 둘 다 `assistant_message`
+      생성 부분을 이 패턴으로 감쌌다 - `_SESSION_NOT_FOUND`(이미 있는 404)를
+      그대로 재사용해, WS 라우트의 기존 `except HTTPException` 처리(100번
+      라운드가 확립)가 자동으로 `{"type": "error"}` 프레임으로 바꿔준다.
+      가짜 Ollama가 응답을 반환하기 "직전"에 별도 세션으로 세션을 완전히
+      지우도록 만들어 REST/WS 두 경로 모두 결정론적으로 재현하는 테스트
+      (`tests/test_study_message_session_deleted_race.py`)를 추가했고, 수정
+      전 코드에서 `IntegrityError`가 그대로 새어나오는 것까지 확인한 뒤
+      (`git stash`로 수정 부분만 되돌렸다가 복원) 다시 적용했다. 서브에이전트는
+      같은 패턴(체크 후 느린 AI 호출 후 그 세션을 참조하는 자식 행 생성)이
+      `QuizService.create_quiz()`(학습 세션 기반 퀴즈 생성)에도 있다고
+      짚어줬는데 - `source_study_session_id`는 `ondelete="SET NULL"`이라
+      CASCADE로 지워지진 않지만 INSERT 시점에 이미 없어진 부모를 참조하면
+      마찬가지로 `IntegrityError`가 날 수 있다 - 이번 라운드 범위에는
+      포함하지 않고 다음 라운드를 위해 여기 남겨둔다. 전체 345개 테스트
+      통과, 전체 커버리지 99%, mypy 클린(`study_service.py` 100% 유지).
+      순수 서비스 계층 예외 처리 추가라 모델/스키마 변경이나 마이그레이션은
+      필요 없었고, 이미 문서화된 404(`Study session not found`) 케이스로
+      수렴하는 수정이라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
 
