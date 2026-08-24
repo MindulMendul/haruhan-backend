@@ -1639,3 +1639,39 @@
       하는 것도 확인했다. 응답 형태나 기본 정렬 기준(최신순)은
       그대로라 사용자 대상 문서 갱신은 필요 없었고, 모델/스키마
       변경도 아니라 마이그레이션은 필요 없었다.
+
+## 백로그 (71라운드)
+
+- [x] 95. 하루 한 번 도는 스케줄러 job들이 실행 시각이 아주 조금만
+      밀려도 그날 실행을 통째로 조용히 건너뛸 수 있던 문제 수정 -
+      이번에도 서브에이전트에게 독립 조사를 맡겼고, APScheduler 설정
+      쪽을 구체적으로 보라고 지시했다. `app/core/scheduler.py`의
+      `AsyncIOScheduler`는 FastAPI/uvicorn과 같은 이벤트 루프를
+      공유하는데, `add_job()` 호출 세 곳 모두 `misfire_grace_time`을
+      지정하지 않아 라이브러리 기본값인 1초가 적용되고 있었다 -
+      실제 설치된 `apscheduler==3.11.3` 소스(`schedulers/base.py`의
+      `_configure`, `executors/base.py`의 `run_job`)까지 직접 추적해
+      확인했다. 예정된 실행 시각(예: 새벽 3시 정각)에 이벤트 루프가
+      요청 처리/GC 등으로 1초 이상만 밀려도(평범한 트래픽에서 충분히
+      있을 수 있는 일) 그 job은 재시도 없이 그날 실행을 통째로
+      건너뛰고, `apscheduler.scheduler` 로거에 WARNING 한 줄만 남기고
+      지나간다 - 이 앱은 `EVENT_JOB_MISSED`/`EVENT_JOB_ERROR` 리스너가
+      전혀 없고 Sentry 같은 별도 에러 트래킹도 없어서, 그 로그 한
+      줄을 누가 직접 보지 않는 한 놓친 사실 자체를 알 방법이 없었다.
+      특히 `keep_supabase_alive`는 코드 주석에도 "7일 연속 정지를
+      막는 게 목적"이라고 명시돼 있는데, 정작 이 job을 놓치기 쉽게
+      만드는 좁은 기본 grace window와 아무 경보 장치가 없는 조합이
+      그 목적 자체를 무력화할 수 있는 상태였다. 세 `add_job()` 호출
+      모두 `misfire_grace_time=None`(실행 시각이 아무리 늦어도 다음
+      트리거 전까지는 건너뛰지 않고 실행)으로 바꾸고, `EVENT_JOB_
+      MISSED`/`EVENT_JOB_ERROR` 리스너를 추가해 이 앱 자신의 로거
+      ("haruhan")에도 ERROR 레벨로 남기도록 했다(다른 곳의 `logger.
+      exception(...)` 패턴과 동일한 가시성 수준). `tests/test_
+      scheduler.py`를 새로 만들어 (1) 리스너가 MISSED/ERROR 이벤트를
+      실제로 ERROR 레벨 로그로 남기는지, (2) 세 job 모두 `misfire_
+      grace_time=None`으로 등록되는지 확인했다 - 수정 전 코드로는
+      리스너 함수 자체가 없어 테스트 임포트부터 실패하는 것도
+      확인했다. `scheduler.py`는 새 테스트로 100% 커버리지를
+      유지한다. 사용자 대상 API 변경은 전혀 없는 내부 운영 안정성
+      개선이라 문서 갱신은 필요 없었고, 모델/스키마 변경도 아니라
+      마이그레이션은 필요 없었다.
