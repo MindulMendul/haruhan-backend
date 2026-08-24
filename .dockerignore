@@ -1,4 +1,27 @@
+# 가상환경 - 이미지에는 requirements.txt로 새로 설치하므로 로컬 .venv/venv는
+# 전혀 필요 없다. 이 프로젝트의 실제 디렉터리명은 .venv(점 포함)인데 예전에는
+# venv/만 제외 목록에 있어서, docker build/docker-compose build를 실행할 때마다
+# .venv/(수백 MB) 전체가 빌드 컨텍스트로 그대로 딸려가 전송되고 있었다.
 venv/
+.venv/
+env/
+.env/
+ENV/
+
 __pycache__/
+*.py[cod]
+
 .git/
 .env
+.env.*
+!.env.example
+
+# mypy/pytest 캐시와 커버리지 산출물 - 로컬 캐시일 뿐이라 이미지에 필요 없는데,
+# .mypy_cache/는 수십~수백 MB까지 커질 수 있어 위 .venv/ 누락과 같은 이유로
+# 제외해야 한다.
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.db
+*.sqlite3
