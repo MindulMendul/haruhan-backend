@@ -66,3 +66,14 @@ class QuizAnswerRepository:
             select(QuizAnswer).where(QuizAnswer.attempt_id == attempt_id)
         )
         return list(result.scalars().all())
+
+    async def list_for_attempts(self, attempt_ids: list[uuid.UUID]) -> list[QuizAnswer]:
+        """여러 시도의 답안을 한 번에 가져온다 (데이터 export처럼 시도마다
+        따로 조회하면 시도 개수만큼 쿼리가 느는 N+1을 피하려는 용도). 호출부에서
+        attempt_id별로 묶어서 쓴다."""
+        if not attempt_ids:
+            return []
+        result = await self._session.execute(
+            select(QuizAnswer).where(QuizAnswer.attempt_id.in_(attempt_ids)).order_by(QuizAnswer.attempt_id)
+        )
+        return list(result.scalars().all())

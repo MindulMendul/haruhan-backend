@@ -86,6 +86,20 @@ class InterviewPracticeTurnRepository:
         )
         return list(result.scalars().all())
 
+    async def list_for_sessions(self, session_ids: list[uuid.UUID]) -> list[InterviewPracticeTurn]:
+        """여러 세션의 턴을 한 번에 가져온다 (데이터 export처럼 세션마다 따로
+        조회하면 세션 개수만큼 쿼리가 느는 N+1을 피하려는 용도). 정렬은
+        session_id, order_index 순이라 호출부에서 session_id별로 묶기만
+        하면 각 그룹 내부도 원래 순서가 유지된다."""
+        if not session_ids:
+            return []
+        result = await self._session.execute(
+            select(InterviewPracticeTurn)
+            .where(InterviewPracticeTurn.session_id.in_(session_ids))
+            .order_by(InterviewPracticeTurn.session_id, InterviewPracticeTurn.order_index)
+        )
+        return list(result.scalars().all())
+
     async def mark_answered_if_pending(self, turn_id: uuid.UUID, answer: str, feedback: str) -> bool:
         """turn이 아직 답변되지 않은 상태(answer IS NULL)일 때만 answer/feedback을
         기록하는 compare-and-swap이다. 같은 질문에 거의 동시에 두 번 답변이

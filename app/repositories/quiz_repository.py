@@ -88,3 +88,17 @@ class QuizQuestionRepository:
             .order_by(QuizQuestion.order_index)
         )
         return list(result.scalars().all())
+
+    async def list_for_quizzes(self, quiz_ids: list[uuid.UUID]) -> list[QuizQuestion]:
+        """여러 퀴즈의 문항을 한 번에 가져온다 (데이터 export처럼 퀴즈마다
+        따로 조회하면 퀴즈 개수만큼 쿼리가 느는 N+1을 피하려는 용도). 정렬은
+        quiz_id, order_index 순이라 호출부에서 quiz_id별로 묶기만 하면 각
+        그룹 내부도 원래 순서가 유지된다."""
+        if not quiz_ids:
+            return []
+        result = await self._session.execute(
+            select(QuizQuestion)
+            .where(QuizQuestion.quiz_id.in_(quiz_ids))
+            .order_by(QuizQuestion.quiz_id, QuizQuestion.order_index)
+        )
+        return list(result.scalars().all())
