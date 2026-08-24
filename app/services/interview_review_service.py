@@ -134,7 +134,10 @@ class InterviewReviewService:
         interview_date: date | None,
         content: str | None,
     ) -> InterviewReview:
-        review = await self._reviews.get_for_user(review_id, user_id)
+        # get_for_user_locked()로 같은 복기에 대한 거의 동시 수정을 직렬화한다 -
+        # 자세한 이유는 그 메서드의 docstring 참고. 커밋 전에 RAG 재색인까지
+        # 끝내서, 잠금이 풀리기 전에 이번 수정의 색인까지 전부 반영되게 한다.
+        review = await self._reviews.get_for_user_locked(review_id, user_id)
         if review is None:
             raise _NOT_FOUND
 
@@ -153,12 +156,12 @@ class InterviewReviewService:
             review.content = content
             review.ai_feedback = feedback
 
-        await self._session.commit()
-
         if content_changed:
             await self._rag.index_content(
                 user_id=user_id, source_type="interview_review", source_id=review.id, content=review.content
             )
+
+        await self._session.commit()
         return review
 
     async def delete_review(self, review_id: uuid.UUID, user_id: uuid.UUID) -> None:

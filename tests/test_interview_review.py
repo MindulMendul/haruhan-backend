@@ -483,3 +483,45 @@ def test_stream_create_review_rate_limited_after_exceeding_chat_rate_limit(clien
 
     listing = client.get("/api/v1/interview/reviews", headers=_auth_headers(token))
     assert len(listing.json()) == 1
+
+
+def test_get_for_user_locked_requests_row_lock_on_postgres():
+    """update_review()는 content가 바뀌면 피드백을 재생성하고 RAG 색인도 다시
+    만드는 check-then-act다 - RagService.index_content()가 delete_for_source
+    후 임베딩 호출을 거쳐 create하는 동안 커밋 없이 진행되는데, knowledge_chunks의
+    source_id에는 유니크 제약이 없어서 같은 복기에 대한 거의 동시 수정(이중
+    클릭, 네트워크 재시도)이 겹치면 중복 행(하나는 최신 content와 안 맞는 낡은
+    내용)을 남길 수 있다. get_for_user_locked()가 실제로 FOR UPDATE를 요청하는
+    쿼리를 만드는지, 세션에 전달되는 실제 statement를 가로채 확인한다(92번
+    라운드의 QuizRepository.get_for_user_locked 테스트와 같은 패턴).
+
+    SQLite는 FOR UPDATE 자체를 지원하지 않아 컴파일 시 조용히 빠져버리므로,
+    이 잠금에 의존하는 동시성은 SQLite 기반 테스트 스위트로 재현/검증할 수
+    없다 - 가로챈 statement를 실제로 잠그는 Postgres 방언으로 다시 컴파일해
+    SQL 문자열에 "FOR UPDATE"가 포함되는지 확인하는 것으로 대신한다."""
+    import asyncio
+    import uuid
+
+    from sqlalchemy.dialects import postgresql
+
+    from app.repositories.interview_review_repository import InterviewReviewRepository
+
+    class _CapturingResult:
+        def scalar_one_or_none(self):
+            return None
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = InterviewReviewRepository(session)
+    asyncio.run(repo.get_for_user_locked(uuid.uuid4(), uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    compiled = str(session.captured_statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled

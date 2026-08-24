@@ -1874,4 +1874,45 @@
       오고 연결은 끊기지 않는다"고 문서화해뒀던 기존 계약을 실제 동작이
       이제야 지키게 된 것뿐이라 별도 갱신은 필요 없었다.
 
+## 백로그 (77라운드)
+
+- [x] 101. 면접복기 수정(`PATCH /interview-reviews/{id}`)이 content를 바꿀 때
+      RAG 재색인이 원자적이지 않아, 거의 동시에 두 번 수정하면
+      `knowledge_chunks`에 중복 행(하나는 최신 content와 안 맞는 낡은 내용)이
+      남을 수 있던 문제 수정 - 이번에도 서브에이전트에게 독립 조사를 맡겼다.
+      `RagService.index_content()`는 `delete_for_source()`로 기존 색인을
+      지운 뒤, Ollama 임베딩 호출(네트워크 왕복)을 거쳐서야 `create()`로 새
+      청크를 만든다 - 이 둘 사이에 커밋이 없고, `KnowledgeChunk.source_id`는
+      의도적으로 FK가 아닌 폴리모픽 참조라 `(source_type, source_id)`에
+      유니크 제약도 없다(`db/models/knowledge_chunk.py`). `update_review()`는
+      이 메서드를 호출하기 전 `get_for_user()`로 잠금 없이 리뷰를 읽는
+      check-then-act였다 - 이중 클릭이나 느린 네트워크에서의 클라이언트
+      재시도로 서로 다른 content를 담은 두 PATCH 요청이 거의 동시에 오면,
+      둘 다 "content가 바뀌었다"고 판단해 각자 피드백을 생성/커밋하고
+      각자 `index_content()`를 부르는데, 첫 번째 요청의 삭제-임베딩 대기
+      구간에 두 번째 요청의 삭제-임베딩-생성이 끼어들면 최종적으로 같은
+      `source_id`에 대해 청크가 두 개 남을 수 있다(하나는 실제
+      `interview_reviews.content`와 더 이상 일치하지 않는 내용). 다른
+      모든 `index_content()` 호출부(퀴즈/학습챗/면접연습)는 생성 시점에
+      한 번만 색인하고 수정 후 재색인하는 경로가 없어서, 이 패턴은
+      `update_review()`가 유일했다(직접 각 서비스의 호출부를 다 확인함).
+      92번 라운드에서 퀴즈 답안 제출 중복 방지에 쓴 것과 같은 패턴으로,
+      `InterviewReviewRepository`에 `get_for_user_locked()`(`SELECT ...
+      FOR UPDATE`)를 추가해 같은 복기에 대한 수정을 직렬화하고,
+      `rag.index_content()` 호출을 `session.commit()` 이전으로 옮겨 삭제
+      -임베딩-생성 전 구간이 잠금이 걸린 트랜잭션 안에서 끝나도록 고쳤다 -
+      먼저 도착한 요청의 커밋(재색인까지 포함)이 끝나야 잠금이 풀리고,
+      나중 요청은 그제야 이미 반영된 content를 보고 다시 판단한다. 92번
+      라운드와 같은 이유로 SQLite는 `FOR UPDATE`를 조용히 빼고 컴파일하므로
+      이 잠금에 의존하는 동시성 자체는 SQLite 기반 테스트로 재현/검증할 수
+      없다 - 대신 세션에 전달되는 실제 statement를 가로채 Postgres 방언으로
+      다시 컴파일해 `FOR UPDATE`가 포함되는지 확인하는 테스트
+      (`test_get_for_user_locked_requests_row_lock_on_postgres`)를
+      추가했고, `get_for_user_locked` 자체가 없던 수정 전 코드에서 이
+      테스트가 실제로 `AttributeError`로 실패하는 것까지 확인한 뒤(`git
+      stash`로 수정 부분만 되돌렸다가 복원) 다시 적용했다. 전체 338개
+      테스트 통과, 전체 커버리지 99%, mypy 클린. 순수 서비스/리포지토리
+      계층 변경(잠금 쿼리 추가 + 호출 순서 재배치)이라 모델/스키마 변경이나
+      마이그레이션, `FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
+
 
