@@ -136,6 +136,58 @@ def test_list_reviews_pagination(client):
     assert first_ids.isdisjoint(second_ids)
 
 
+def test_list_for_user_breaks_interview_date_ties_deterministically():
+    """interview_date는 하루 단위 정밀도의 사용자 입력값이라, 하루에 면접을 여러
+    개 본 경우처럼 같은 날짜인 복기가 여러 개 있는 게 실제로 흔하다.
+    `ORDER BY interview_date DESC`만으로는 값이 같은 행끼리의 순서가 SQL
+    표준상 정의돼 있지 않다 - 페이지마다(혹은 같은 쿼리를 다시 실행할 때마다)
+    그 순서가 달라질 수 있어서, `LIMIT/OFFSET`으로 나눠 받으면 같은 복기가
+    두 페이지에 다시 나오거나(중복) 어느 페이지에도 안 나올(누락) 수 있다.
+
+    바로 위 `test_list_reviews_pagination`이 정확히 이 동률 상황(고정된
+    `_create_payload`의 interview_date로 복기 5개를 만듦)을 이미 재현하고
+    있는데도 SQLite에서는 우연히 안정적인 순서를 돌려줘서 통과해버린다(직접
+    확인함) - SQLite가 이 정도로 단순한 비동시성 시나리오에서 내부적으로
+    일관된 순서를 우연히 돌려주기 때문이지, `id` 2차 정렬 기준이 있어서가
+    아니다. 그래서 이 회귀는 SQLite 기반 테스트로 실제로 재현할 수 없다
+    (68번 라운드에서 `SELECT ... FOR UPDATE`가 SQLite에서 조용히 빠지는
+    것과 같은 성격의 한계) - 대신 리포지토리가 세션에 전달하는 실제 statement
+    를 가로채, 컴파일된 SQL의 ORDER BY 절에 `interview_date`뿐 아니라 `id`도
+    2차 기준으로 포함돼 있는지 직접 확인한다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.interview_review_repository import InterviewReviewRepository
+
+    class _CapturingResult:
+        def scalar_one_or_none(self):
+            return None
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = InterviewReviewRepository(session)
+    asyncio.run(repo.list_for_user(uuid.uuid4(), limit=20, offset=0))
+
+    assert session.captured_statement is not None
+    compiled = str(session.captured_statement)
+    order_by_clause = compiled.split("ORDER BY")[1]
+    assert "interview_date" in order_by_clause
+    assert "id" in order_by_clause
+
+
 def test_update_without_content_keeps_feedback(client):
     fake = FakeOllamaService()
     client.app.dependency_overrides[get_ollama_service] = lambda: fake

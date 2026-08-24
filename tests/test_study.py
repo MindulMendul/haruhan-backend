@@ -79,6 +79,48 @@ def test_list_sessions_pagination(client):
     assert first_ids.isdisjoint(second_ids)
 
 
+def test_list_for_user_breaks_updated_at_ties_deterministically():
+    """`ORDER BY updated_at DESC`만으로는 값이 같은 행(같은 순간에 만들어졌거나
+    touch()된 세션들) 사이의 순서가 SQL 표준상 정의돼 있지 않다 - 페이지마다
+    그 순서가 달라질 수 있어서, LIMIT/OFFSET으로 나눠 받으면 같은 세션이 두
+    페이지에 다시 나오거나(중복) 어느 페이지에도 안 나올(누락) 수 있다.
+    updated_at은 마이크로초 정밀도라 실제로 동률이 나기는 훨씬 드물지만
+    (interview_review의 interview_date처럼 날짜 단위는 아님), 이 정렬
+    로직 자체는 여전히 SQL 표준상 순서가 보장되지 않는 미정의 동작에
+    기대고 있었다. 이 동시성은 SQLite 기반 테스트로 재현할 수 없어(68번
+    라운드와 같은 성격의 한계), 리포지토리가 세션에 전달하는 statement를
+    가로채 컴파일된 SQL의 ORDER BY 절에 updated_at뿐 아니라 id도 2차
+    기준으로 포함돼 있는지 직접 확인한다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.study_session_repository import StudySessionRepository
+
+    class _CapturingResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = StudySessionRepository(session)
+    asyncio.run(repo.list_for_user(uuid.uuid4(), limit=20, offset=0))
+
+    assert session.captured_statement is not None
+    order_by_clause = str(session.captured_statement).split("ORDER BY")[1]
+    assert "updated_at" in order_by_clause
+    assert "id" in order_by_clause
+
+
 def test_list_sessions_default_pagination_returns_all_when_under_limit(client):
     token = _signup_and_get_token(client)
     client.post("/api/v1/study/sessions", json={"title": "세션"}, headers=_auth_headers(token))

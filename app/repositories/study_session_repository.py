@@ -18,10 +18,15 @@ class StudySessionRepository:
         return study_session
 
     async def list_for_user(self, user_id: uuid.UUID, limit: int, offset: int) -> list[StudySession]:
+        # updated_at만으로 정렬하면 값이 같은 행(같은 순간에 만들어졌거나 touch()된
+        # 세션들) 사이의 순서가 SQL 표준상 정의되어 있지 않다 - 페이지마다 그 순서가
+        # 달라질 수 있어서, LIMIT/OFFSET으로 나눠 받으면 같은 세션이 두 페이지에 다시
+        # 나오거나(중복) 어느 페이지에도 안 나올(누락) 수 있다. id를 2차 정렬
+        # 기준으로 추가해 동률을 항상 같은 순서로 결정론적으로 깨지도록 한다.
         result = await self._session.execute(
             select(StudySession)
             .where(StudySession.user_id == user_id)
-            .order_by(StudySession.updated_at.desc())
+            .order_by(StudySession.updated_at.desc(), StudySession.id.desc())
             .limit(limit)
             .offset(offset)
         )

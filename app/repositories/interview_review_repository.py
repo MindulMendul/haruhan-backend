@@ -33,10 +33,16 @@ class InterviewReviewRepository:
         return review
 
     async def list_for_user(self, user_id: uuid.UUID, limit: int, offset: int) -> list[InterviewReview]:
+        # interview_date는 하루 단위 정밀도의 사용자 입력값이라, 같은 날짜로 등록한
+        # 복기가 여러 개면(예: 하루에 여러 면접을 본 경우) 동률이 실제로 흔하다.
+        # 2차 정렬 기준이 없으면 동률 사이의 순서가 SQL 표준상 정의되어 있지 않아,
+        # 페이지마다 그 순서가 달라져 LIMIT/OFFSET으로 나눠 받을 때 같은 복기가
+        # 두 페이지에 다시 나오거나(중복) 어느 페이지에도 안 나올(누락) 수 있다.
+        # id를 2차 정렬 기준으로 추가해 동률을 항상 같은 순서로 결정론적으로 깨지도록 한다.
         result = await self._session.execute(
             select(InterviewReview)
             .where(InterviewReview.user_id == user_id)
-            .order_by(InterviewReview.interview_date.desc())
+            .order_by(InterviewReview.interview_date.desc(), InterviewReview.id.desc())
             .limit(limit)
             .offset(offset)
         )
