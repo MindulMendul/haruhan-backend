@@ -2101,4 +2101,33 @@
       필요 없었고, 이미 문서화된 404(`Study session not found`) 케이스로
       수렴하는 수정이라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (82라운드)
+
+- [x] 106. 학습 세션 기반 퀴즈 생성 중 그 세션이 삭제되면 처리되지 않은
+      `IntegrityError`(500)로 끝나던 문제 수정 - 81번 라운드가 같은 버그
+      계열의 형제 사례로 직접 짚어둔 것을 이번 라운드에서 마저 고쳤다.
+      `QuizService.create_quiz()`는 `study_session_id`로 만드는 경로에서
+      학습 세션 존재를 확인한 뒤(`get_for_user`), 느린 Ollama 호출(파싱
+      실패 시 최대 2회 재시도)을 거쳐서야 `Quiz`를 만드는 check-then-act다 -
+      `Quiz.source_study_session_id`는 `ondelete="SET NULL"`이라 CASCADE로
+      지워지진 않지만, 그 사이 다른 요청이 이 학습 세션을 지워버리면 이
+      INSERT 시점엔 이미 사라진 부모를 참조하게 되어 여전히 `IntegrityError`
+      가 난다(SET NULL은 기존 행이 삭제될 때의 동작이지, 존재하지 않는
+      부모를 가리키는 새 INSERT를 허용해주지 않는다). 81번 라운드에서
+      `study_service.py`의 `send_message`/`stream_message`에 적용한 것과
+      똑같은 패턴 - `auth_service.py`/`user_service.py`가 이메일 중복 가입
+      경쟁에 쓰던 `except IntegrityError: rollback() + 에러 응답 변환`을
+      재사용해, 기존 `_SESSION_NOT_FOUND`(404)로 변환했다. `Quiz` 생성 +
+      문항 생성 + 커밋을 한 `try` 블록으로 묶었다(`QuizRepository.create()`
+      가 즉시 flush해 이 시점에 위반이 드러남). 가짜 Ollama가 퀴즈 JSON을
+      반환하기 "직전"에 별도 세션으로 학습 세션을 완전히 지우도록 만들어
+      이 타이밍을 결정적으로 재현하는 테스트
+      (`tests/test_quiz_session_deleted_race.py`)를 추가했고, 수정 전
+      코드에서 `IntegrityError`가 그대로 새어나오는 것까지 확인한 뒤(`git
+      stash`로 수정 부분만 되돌렸다가 복원) 다시 적용했다. 전체 346개
+      테스트 통과, 전체 커버리지 99%, mypy 클린(`quiz_service.py` 100%
+      유지). 순수 서비스 계층 예외 처리 추가라 모델/스키마 변경이나
+      마이그레이션은 필요 없었고, 이미 문서화된 404 케이스로 수렴하는
+      수정이라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
 

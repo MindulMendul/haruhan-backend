@@ -6,6 +6,7 @@ from datetime import timedelta
 from fastapi import HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -125,25 +126,36 @@ class QuizService:
         prompt = _build_quiz_prompt(source_text, question_count)
         generated = await self._generate_quiz(prompt, model)
 
-        quiz = await self._quizzes.create(
-            user_id=user_id,
-            title=title,
-            source_study_session_id=study_session_id,
-            # 학습 세션에서 파생된 source_text는 세션 메시지에서 언제든 다시 만들 수
-            # 있으니 중복 저장하지 않는다 - 사용자가 직접 붙여넣은 경우에만 저장한다
-            # (아래 RAG 색인이 실패해도 나중에 재시도할 원본으로 남겨두기 위함).
-            source_text=source_text if study_session_id is None else None,
-        )
-        for index, question in enumerate(generated.questions):
-            await self._questions.create(
-                quiz_id=quiz.id,
-                order_index=index,
-                question_text=question.question,
-                choices=question.choices,
-                correct_answer=question.correct_answer,
-                explanation=question.explanation,
+        # get_for_user() 확인과 여기 사이에 느린 Ollama 호출(재시도 포함)이 끼어
+        # 있어, 그 사이 다른 요청이 이 학습 세션을 지우면 source_study_session_id가
+        # 더는 존재하지 않는 부모를 가리키게 된다 - study_service.py의 send_message/
+        # stream_message와 같은 이유(그쪽 docstring 참고)로 IntegrityError가 나므로
+        # 같은 방식으로 404로 변환한다(source_study_session_id는 ondelete="SET NULL"
+        # 이라 삭제 자체는 CASCADE가 아니지만, 지금 이 INSERT 시점엔 이미 사라진
+        # 부모를 참조하려는 것이라 여전히 위반이다).
+        try:
+            quiz = await self._quizzes.create(
+                user_id=user_id,
+                title=title,
+                source_study_session_id=study_session_id,
+                # 학습 세션에서 파생된 source_text는 세션 메시지에서 언제든 다시 만들 수
+                # 있으니 중복 저장하지 않는다 - 사용자가 직접 붙여넣은 경우에만 저장한다
+                # (아래 RAG 색인이 실패해도 나중에 재시도할 원본으로 남겨두기 위함).
+                source_text=source_text if study_session_id is None else None,
             )
-        await self._session.commit()
+            for index, question in enumerate(generated.questions):
+                await self._questions.create(
+                    quiz_id=quiz.id,
+                    order_index=index,
+                    question_text=question.question,
+                    choices=question.choices,
+                    correct_answer=question.correct_answer,
+                    explanation=question.explanation,
+                )
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _SESSION_NOT_FOUND from None
         quiz_created_total.inc()
 
         if study_session_id is None:
