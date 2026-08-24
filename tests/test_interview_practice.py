@@ -1049,3 +1049,106 @@ def test_submit_answer_rejects_when_session_deleted_while_waiting_for_lock(db_se
 
     assert exc is not None
     assert exc.status_code == 404
+
+
+def test_submit_answer_rejects_stale_retry_on_final_turn_without_wasting_ai_call(
+    db_session_factory, monkeypatch
+):
+    """103번 라운드가 잠금 뒤 다시 읽은 턴이 애초에 답하려던 턴과 여전히
+    일치하는지 확인하도록 고쳤지만, 마지막 질문(다음 턴을 새로 만들지 않는
+    분기)에서는 이 재확인이 무력화된다는 걸 놓쳤다 - `list_for_session()`에는
+    `get_for_user_locked()`(103번 라운드)와 달리 `populate_existing`이 없어서,
+    잠금 대기 중 다른 요청이 이미 답해버린 바로 그 턴(새 턴이 안 생기므로
+    두 번째 조회도 같은 turn 객체를 돌려받음)을 여전히 "미답변"으로 잘못
+    보고, 값싸게 걸러내야 할 재확인을 통과해버린 뒤 AI 호출까지 낭비하고서야
+    (mark_answered_if_pending의 CAS로) 뒤늦게 409로 거부한다 - 데이터가
+    잘못 저장되진 않지만, 재확인을 추가한 원래 목적(AI 호출 낭비 없이 안전하게
+    거부하기)이 이 분기에서만 무력화된다. MAX_INTERVIEW_QUESTIONS=1로 설정해
+    첫 답변이 곧바로 마지막 답변이 되게 만들고, 잠금 지점에서 "다른 요청"이
+    그 턴에 먼저 완전히 답하도록 한 뒤, 바깥쪽 제출이 (여전히 409로 거부되긴
+    하지만) 실제로 AI를 다시 호출하지 않는지 확인한다."""
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32, max_interview_questions=1)
+
+            class CountingOllamaService(FakeOllamaService):
+                def __init__(self):
+                    self.chat_calls = 0
+
+                async def chat(self, messages, model):
+                    self.chat_calls += 1
+                    return await super().chat(messages, model)
+
+            ollama = CountingOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            answered_turn, next_turn = await service_b.submit_answer(
+                                session_id=practice_session.id,
+                                user_id=user.id,
+                                answer="먼저 도착한 답변",
+                            )
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                    assert answered_turn.id == first_turn.id
+                    assert next_turn is None  # 마지막 질문이라 다음 턴이 생기지 않음
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id,
+                        user_id=user.id,
+                        answer="뒤늦게 도착한 답변(사실 첫 턴용이었음)",
+                    )
+                    exc = None
+                except Exception as e:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    exc = e
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+            return exc, ollama.chat_calls
+
+    exc, chat_calls = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
+    # 다른 요청이 이미 답한 것과 같은 턴이라는 걸 잠금 후 재확인에서 값싸게
+    # 걸러냈어야 한다 - chat()이 두 번(먼저 도착한 요청 몫 + 뒤늦은 요청이
+    # 낭비한 몫) 호출됐다면 이 재확인이 무력화된 것이다.
+    assert chat_calls == 1

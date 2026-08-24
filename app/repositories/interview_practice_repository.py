@@ -122,10 +122,24 @@ class InterviewPracticeTurnRepository:
         return turn
 
     async def list_for_session(self, session_id: uuid.UUID) -> list[InterviewPracticeTurn]:
+        # submit_answer()는 잠금(get_for_user_locked) 전후로 이 메서드를 두 번
+        # 부른다(103번 라운드) - 잠금 대기 중 다른 요청이 마지막 질문에 먼저
+        # 답해버리면(다음 턴을 새로 만들지 않는 분기), 두 번째 호출이 돌려주는
+        # turn 객체는 첫 번째 호출 때 이미 이 세션의 identity map에 로드된 바로
+        # 그 객체다 - populate_existing 없이는 SQLAlchemy가 이미 로드된 객체의
+        # 속성을 새 쿼리 결과로 덮어쓰지 않아서, 다른 트랜잭션이 막 커밋한
+        # answer/feedback을 반영하지 못하고 여전히 "미답변"으로 보여, 잠금 후
+        # 재확인이 값싸게 걸러내야 할 걸 못 걸러내고 AI 호출까지 낭비한 뒤에야
+        # (mark_answered_if_pending의 CAS로) 뒤늦게 거부하게 된다 - 데이터가
+        # 틀리게 저장되진 않지만, 재확인을 추가한 원래 목적(비싼 재작업 없이
+        # 안전하게 거부하기)이 이 분기에서만 무력화된다. 다른 세 호출부는 메서드당
+        # 한 번만 호출해 이 위험이 없지만, 이 메서드 자체에 걸어두는 게
+        # get_for_user_locked()에 이미 적용한 것과 같은 방어라 더 안전하다.
         result = await self._session.execute(
             select(InterviewPracticeTurn)
             .where(InterviewPracticeTurn.session_id == session_id)
             .order_by(InterviewPracticeTurn.order_index)
+            .execution_options(populate_existing=True)
         )
         return list(result.scalars().all())
 
