@@ -590,6 +590,29 @@ def test_stream_message_rejects_token_for_deleted_user(client):
             ws.receive_json()
 
 
+def test_stream_message_closes_connection_after_idle_timeout(client, monkeypatch):
+    """이 WebSocket 연결은 살아있는 동안 DB 커넥션 풀의 커넥션 하나와 Ollama
+    클라이언트를 계속 붙잡고 있는다 - 클라이언트가 접속만 해두고 메시지를 하나도
+    안 보내면 그 자원이 무한정 잠긴다(방치된 연결 몇 개만으로도 풀 전체가
+    고갈될 수 있음). ws_idle_timeout_seconds를 짧게 줄여서, 아무것도 안 보내고
+    기다리기만 해도 서버가 먼저 연결을 끊는지 확인한다."""
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("WS_IDLE_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "유휴 타임아웃 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.receive_json()
+
+
 def test_stream_message_rejects_empty_content(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

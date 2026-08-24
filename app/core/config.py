@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     # 학습챗 답변 생성 시 참고자료로 첨부할 최대 청크 개수.
     rag_top_k: int = 3
 
+    # WebSocket 스트리밍 엔드포인트(학습챗/면접복기)가 클라이언트로부터 다음
+    # 메시지를 이 시간(초) 안에 못 받으면 연결을 끊는다. get_db/get_ollama_service
+    # 의존성은 WebSocket 연결이 살아있는 동안 DB 커넥션 풀의 커넥션 하나와 Ollama
+    # httpx 클라이언트를 계속 붙잡고 있는데, 클라이언트가 접속만 해두고 메시지를
+    # 영영 안 보내면(느린 네트워크, 방치, 또는 의도적 남용) 이 자원이 무한정
+    # 잠긴다 - DB 풀 크기(기본 pool_size=5 + max_overflow=5 = 10)보다 적은 수의
+    # 이런 방치된 연결만으로도 풀 전체가 고갈되어 다른 모든 요청이 막힐 수 있다.
+    ws_idle_timeout_seconds: float = 300.0
+
     @field_validator("jwt_secret_key")
     @classmethod
     def _validate_jwt_secret_key_length(cls, value: str) -> str:

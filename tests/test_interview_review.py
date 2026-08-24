@@ -351,6 +351,24 @@ def test_stream_create_review_rejects_missing_token(client):
             ws.receive_json()
 
 
+def test_stream_create_review_closes_connection_after_idle_timeout(client, monkeypatch):
+    """이 WebSocket 연결도 학습챗 스트리밍과 마찬가지로 살아있는 동안 DB 커넥션
+    풀의 커넥션 하나와 Ollama 클라이언트를 계속 붙잡고 있는다 - 클라이언트가
+    접속만 해두고 메시지를 하나도 안 보내면 그 자원이 무한정 잠긴다.
+    ws_idle_timeout_seconds를 짧게 줄여서, 아무것도 안 보내고 기다리기만 해도
+    서버가 먼저 연결을 끊는지 확인한다."""
+    import pytest
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("WS_IDLE_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client, email="stream-review-idle@example.com")
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+            ws.receive_json()
+
+
 def test_stream_create_review_rejects_invalid_payload(client):
     token = _signup_and_get_token(client, email="stream-review-invalid@example.com")
 

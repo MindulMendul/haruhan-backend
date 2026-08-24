@@ -231,6 +231,10 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
   독립적으로 적용됩니다 (REST 쪽 카운트와는 별도 버킷). 초과하면 연결이 끊기지 않고
   `{ "type": "error", "detail": "...", "retry_after": <초> }`가 옴 - `retry_after`초
   뒤에 다시 보내면 됨.
+- `WS_IDLE_TIMEOUT_SECONDS`(기본 5분) 동안 아무 메시지도 안 보내면 서버가 먼저
+  연결을 정상 종료(코드 1000)합니다 - 오래 열어두고 방치된 연결이 서버 자원을
+  계속 붙잡는 걸 막기 위함입니다. 탭을 오래 띄워만 두는 시나리오라면 `onclose`를
+  감지해서 다음 메시지를 보낼 때 재연결하도록 처리해두세요.
 
 ### 3-2. 퀴즈 (`/api/v1/quizzes`)
 
@@ -369,6 +373,7 @@ WS /api/v1/interview/reviews/stream?token=<access_token>
 - 검증 실패(필드 누락 등)나 생성 실패는 `{ "type": "error", "detail": "..." }`가
   오고 연결은 끊기지 않습니다. `CHAT_RATE_LIMIT` 초과 시에도 마찬가지로
   `retry_after`가 포함된 에러 이벤트가 옵니다(3-1-1과 동일).
+- 유휴 타임아웃(`WS_IDLE_TIMEOUT_SECONDS`, 기본 5분)도 3-1-1과 동일하게 적용됩니다.
 - 같은 연결로 여러 건을 연달아 생성할 수 있습니다.
 
 ### 3-5. (참고) 범용 Ollama 프록시 `/api/v1/chat`

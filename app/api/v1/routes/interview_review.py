@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from fastapi import (
@@ -137,12 +138,23 @@ async def stream_create_review(
     스트리밍 가치가 크다고 판단해 학습챗과 같은 패턴으로 추가했다 - 수정
     시 피드백을 재생성하는 PATCH 흐름은 상대적으로 드문 케이스라 이번 범위에
     넣지 않았다.
+
+    클라이언트가 ws_idle_timeout_seconds(기본 5분) 동안 메시지를 하나도 안 보내면
+    연결을 끊는다 - 이 연결이 붙잡고 있는 DB 커넥션/Ollama 클라이언트를 방치된
+    연결이 무한정 점유해 커넥션 풀을 고갈시키는 것을 막기 위함이다.
     """
     await websocket.accept()
+    settings = get_settings()
     client_ip = websocket.client.host if websocket.client else "127.0.0.1"
     try:
         while True:
-            raw_payload = await websocket.receive_json()
+            try:
+                raw_payload = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=settings.ws_idle_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await websocket.close(code=status.WS_1000_NORMAL_CLOSURE, reason="idle timeout")
+                break
             try:
                 payload = InterviewReviewCreateRequest.model_validate(raw_payload)
             except ValidationError as exc:

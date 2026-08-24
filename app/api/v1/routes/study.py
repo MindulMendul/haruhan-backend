@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from fastapi import (
@@ -157,13 +158,24 @@ async def stream_message(
     공유하는 core.rate_limit.check_rate_limit()로 메시지 하나하나마다 수동으로
     확인한다 (REST 엔드포인트와는 별도 버킷 - IP당 chat_rate_limit을 이 경로에도
     독립적으로 적용).
+
+    클라이언트가 ws_idle_timeout_seconds(기본 5분) 동안 메시지를 하나도 안 보내면
+    연결을 끊는다 - 이 연결이 붙잡고 있는 DB 커넥션/Ollama 클라이언트를 방치된
+    연결이 무한정 점유해 커넥션 풀을 고갈시키는 것을 막기 위함이다.
     """
     await websocket.accept()
-    max_length = get_settings().max_prompt_length
+    settings = get_settings()
+    max_length = settings.max_prompt_length
     client_ip = websocket.client.host if websocket.client else "127.0.0.1"
     try:
         while True:
-            payload = await websocket.receive_json()
+            try:
+                payload = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=settings.ws_idle_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                await websocket.close(code=status.WS_1000_NORMAL_CLOSURE, reason="idle timeout")
+                break
             content = payload.get("content")
             if not isinstance(content, str) or not content.strip():
                 await websocket.send_json({"type": "error", "detail": "content는 비어 있을 수 없습니다."})
