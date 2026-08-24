@@ -222,7 +222,12 @@ class QuizService:
     async def submit_answers(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID, answers: list[tuple[uuid.UUID, int]]
     ) -> tuple[QuizAttempt, list[tuple[QuizQuestion, int, bool]]]:
-        quiz = await self._quizzes.get_for_user(quiz_id, user_id)
+        # get_for_user_locked()로 같은 퀴즈+사용자에 대한 동시 제출을 직렬화한다 -
+        # 아래 _find_recent_duplicate_attempt()가 "최근 제출 없음"을 확인한 뒤
+        # 실제로 새 QuizAttempt를 커밋하기까지는 시간차가 있는 check-then-act라,
+        # 이 잠금 없이는 네트워크 재시도/이중 클릭으로 거의 동시에 온 완전히 같은
+        # 답안 제출이 중복 방지를 뚫고 QuizAttempt를 두 개 만들 수 있다.
+        quiz = await self._quizzes.get_for_user_locked(quiz_id, user_id)
         if quiz is None:
             raise _QUIZ_NOT_FOUND
 

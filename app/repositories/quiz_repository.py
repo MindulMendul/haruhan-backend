@@ -58,6 +58,26 @@ class QuizRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_for_user_locked(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> Quiz | None:
+        """get_for_user()와 같지만 `SELECT ... FOR UPDATE`로 이 퀴즈 행을 잠근다.
+
+        submit_answers()는 "최근 5초 안에 완전히 같은 답안 제출이 있었는지"를
+        확인한 뒤에야 새 QuizAttempt를 만드는 check-then-act다 - 네트워크 재시도나
+        이중 클릭으로 같은 답안이 거의 동시에 두 번 제출되면, 서로 다른 트랜잭션인
+        두 요청이 둘 다 "최근 제출 없음"을 보고 통과해서 각자 QuizAttempt를 만들 수
+        있다(중복 방지 로직이 막으려던 상황을 그대로 허용). 이 조회로 같은 퀴즈+
+        사용자에 대한 제출을 직렬화하면, 먼저 도착한 요청이 커밋을 마칠 때까지
+        나중 요청이 이 SELECT에서 대기했다가 그제야 (이미 커밋된) 직전 제출을
+        보게 되어 중복 감지가 정상 동작한다. Postgres(운영)에서만 실제로 잠그고,
+        SQLite(테스트/로컬)는 FOR UPDATE를 지원하지 않아 이 조회가 일반 SELECT로
+        컴파일된다 - 그래서 이 잠금에 의존하는 동시성 자체는 SQLite 기반 테스트로
+        재현/검증할 수 없다(54번 라운드에서 이미 마주친 것과 같은 성격의 한계).
+        """
+        result = await self._session.execute(
+            select(Quiz).where(Quiz.id == quiz_id, Quiz.user_id == user_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def update_title(self, quiz: Quiz, title: str) -> None:
         quiz.title = title
         await self._session.flush()

@@ -418,6 +418,49 @@ def test_submit_answers_404_for_nonexistent_quiz(client):
     assert response.status_code == 404
 
 
+def test_get_for_user_locked_requests_row_lock_on_postgres():
+    """submit_answers()는 "최근 5초 안에 완전히 같은 답안 제출이 있었는지"를
+    확인한 뒤에야 QuizAttempt를 커밋하는 check-then-act다 - 네트워크 재시도나
+    이중 클릭으로 같은 답안이 거의 동시에 두 번 제출되면, 이 잠금 없이는 두
+    요청이 둘 다 "최근 제출 없음"을 보고 통과해 QuizAttempt를 두 개 만들 수
+    있다. get_for_user_locked()가 실제로 FOR UPDATE를 요청하는 쿼리를 만드는지,
+    세션에 전달되는 실제 statement를 가로채 확인한다(리포지토리 메서드가 하는
+    일을 우회하지 않고 그대로 실행시킨다) - 나중에 누군가 `.with_for_update()`를
+    실수로 지워도 이 테스트가 잡아낸다.
+
+    SQLite는 FOR UPDATE 자체를 지원하지 않아 컴파일 시 조용히 빠져버리므로
+    (직접 확인함), 이 잠금에 의존하는 동시성은 SQLite 기반 테스트 스위트로
+    재현/검증할 수 없다 - 가로챈 statement를 실제로 잠그는 Postgres 방언으로
+    다시 컴파일해 SQL 문자열에 "FOR UPDATE"가 포함되는지 확인하는 것으로
+    대신한다(54번 라운드에서 이미 마주친 것과 같은 성격의 SQLite 한계)."""
+    import asyncio
+    import uuid
+
+    from sqlalchemy.dialects import postgresql
+
+    from app.repositories.quiz_repository import QuizRepository
+
+    class _CapturingResult:
+        def scalar_one_or_none(self):
+            return None
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = QuizRepository(session)
+    asyncio.run(repo.get_for_user_locked(uuid.uuid4(), uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    compiled = str(session.captured_statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
+
+
 def test_submit_quiz_is_rate_limited(client, monkeypatch):
     """submit_quiz()는 LLM을 호출하지 않지만, 재도전(retake)이 정상 기능이라
     한도 없이 반복 호출되면 quiz_attempts/quiz_answers에 쓰기가 무제한으로
