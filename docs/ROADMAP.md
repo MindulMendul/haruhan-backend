@@ -1759,3 +1759,45 @@
       `FRONTEND_INTEGRATION.md`의 export 섹션 예시 응답에
       `source_text` 필드를 추가하고, 직접 붙여넣은 퀴즈에서만
       채워지고 세션 기반 퀴즈는 `null`이라는 설명을 덧붙였다.
+
+## 백로그 (74라운드)
+
+- [x] 98. 학습챗 세션을 삭제해도 그 세션의 메시지들이 RAG로 색인해둔
+      내용은 지워지지 않아, 사용자가 지운 대화가 이후 무관한 학습챗
+      질문의 그라운딩 자료로 계속 되살아나던 문제 수정 - 이번에도
+      서브에이전트에게 독립 조사를 맡겼다. `StudyService.send_message`/
+      `stream_message`는 메시지마다 `rag.index_content(source_type=
+      "study_message", source_id=message.id, ...)`로 개별 색인해두는데,
+      `StudyService.delete_session`은 그냥 `sessions.delete(study_session)`
+      후 커밋만 하고 끝났다. `KnowledgeChunk.source_id`는 의도적으로
+      FK가 아닌 폴리모픽 참조(`db/models/knowledge_chunk.py`)라서,
+      `study_sessions -> study_messages`의 CASCADE는 메시지 로우까지만
+      지우고 `knowledge_chunks`는 전혀 건드리지 못한다. `RagService.
+      retrieve_relevant()`는 source가 실제로 남아있는지 확인하는 절차
+      없이 사용자의 전체 색인을 코사인 유사도로만 훑어 그라운딩에
+      쓰므로, 삭제된 세션의 내용이 계속 다른 학습챗 답변에 참고자료로
+      섞여 들어갈 수 있었다 - 사용자 입장에서는 "지운 대화 내용이
+      AI 답변에서 다시 튀어나오는" 눈에 띄는 사생활/정합성 문제다.
+      같은 "세션 삭제 전 자식 id를 먼저 모아 개별 forget_content" 패턴을
+      이미 쓰고 있는 `InterviewPracticeService.delete_session`을 그대로
+      따라 했다 - `delete_session`이 (CASCADE로 사라지기 전에)
+      `messages = await self._messages.list_for_session(session_id)`로
+      메시지 id를 먼저 모아두고, 세션 삭제/커밋 후 각 메시지에 대해
+      `rag.forget_content(source_type="study_message", source_id=
+      message.id)`를 호출하도록 고쳤다. 기존 `test_study.py::
+      test_delete_session`은 세션이 정말 지워지는지만 확인할 뿐
+      `knowledge_chunks`는 전혀 보지 않아 이 구멍을 잡아내지 못했고,
+      `test_account_deletion_cascade.py`가 `knowledge_chunks` 청소를
+      검증하긴 하지만 그건 계정 전체 삭제(별개의 `user_id` CASCADE
+      경로) 케이스라 "계정은 유지한 채 세션 하나만 삭제" 경로는
+      아무 테스트도 없었다. 새 테스트 파일
+      `test_study_session_delete_rag_cleanup.py`를 추가해, 메시지를
+      보내 색인이 2개(사용자/어시스턴트) 생기는 것까지 확인한 뒤
+      세션을 지우고 그 사용자의 색인이 0개가 되는지 검증했다 - 수정
+      전 코드로 되돌려서 이 테스트가 실제로 실패하는 것까지 확인한
+      뒤(`git stash`로 수정 부분만 되돌렸다가 복원) 다시 적용했다.
+      `study_service.py`는 새 테스트로 100% 커버리지를 유지한다(전체
+      334개 테스트 통과, 전체 커버리지 99%, mypy 클린). 순수 서비스
+      계층 내부 정리 로직이고 API 응답 형태는 그대로라 모델/스키마
+      변경이나 마이그레이션, `FRONTEND_INTEGRATION.md` 갱신은 필요
+      없었다.

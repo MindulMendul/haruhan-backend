@@ -96,8 +96,17 @@ class StudyService:
         study_session = await self._sessions.get_for_user(session_id, user_id)
         if study_session is None:
             raise _SESSION_NOT_FOUND
+        # send_message/stream_message가 메시지마다 "study_message" source_type/
+        # message.id로 개별 색인해두므로(세션 단위가 아님), 세션을 지우기 전에
+        # message id를 먼저 모아둬야 한다 - 세션을 지우면 CASCADE로 메시지 로우
+        # 자체가 사라진다. 이걸 안 하면 색인된 내용이 이 세션이 삭제된 뒤에도
+        # 계속 남아, 사용자가 지운 대화가 나중에 무관한 학습챗 답변의 참고자료로
+        # 되살아날 수 있다.
+        messages = await self._messages.list_for_session(session_id)
         await self._sessions.delete(study_session)
         await self._session.commit()
+        for message in messages:
+            await self._rag.forget_content(source_type="study_message", source_id=message.id)
 
     async def send_message(
         self, session_id: uuid.UUID, user_id: uuid.UUID, content: str
