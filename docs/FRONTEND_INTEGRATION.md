@@ -168,7 +168,7 @@ DELETE /api/v1/auth/sessions           → 204 (모든 기기에서 로그아웃
 
 `error.code`는 프론트가 문자열 매칭 없이 에러 종류를 분기할 때 씁니다. 로그인 실패(`invalid_credentials`), 만료/위조된 access token(`invalid_token`), 재사용된 refresh token(`invalid_refresh_token`)처럼 자주 분기해야 하는 케이스부터 구체적인 code를 붙여뒀고, 아직 안 붙은 나머지는 상태코드 기반 기본값(`not_found`, `conflict`, `bad_request`, `internal_error` 등)이 들어갑니다 - 점진적으로 늘려나가는 중이라 오늘 `not_found`였던 에러가 나중에 더 구체적인 code로 바뀔 수 있습니다. 코드로 분기하되, `message`는 사용자에게 보여줄 최종 문구로 쓰지 말고 참고용으로만 쓰세요 (한글/영어가 섞여 있고 국제화 대상이 아닙니다).
 
-레이트리밋이 걸린 엔드포인트(로그인/회원가입/토큰 refresh·로그아웃/프로필수정/학습챗·퀴즈·면접 생성 등)는 **성공 응답에도** `X-RateLimit-Limit`/`X-RateLimit-Remaining`/`X-RateLimit-Reset` 헤더가 실립니다. 429 응답에는 추가로 `Retry-After`(재시도까지 남은 초)가 실리니, 카운트다운 UI를 만들 때 응답 바디를 파싱할 필요 없이 이 헤더만 읽으면 됩니다.
+레이트리밋이 걸린 엔드포인트(로그인/회원가입/토큰 refresh·로그아웃/프로필수정/학습챗·퀴즈·면접 생성/데이터 export 등)는 **성공 응답에도** `X-RateLimit-Limit`/`X-RateLimit-Remaining`/`X-RateLimit-Reset` 헤더가 실립니다. 429 응답에는 추가로 `Retry-After`(재시도까지 남은 초)가 실리니, 카운트다운 UI를 만들 때 응답 바디를 파싱할 필요 없이 이 헤더만 읽으면 됩니다.
 
 다른 사용자 소유의 리소스에 접근하면 (예: 남의 quiz_id로 조회) `403`이 아니라 **`404`**로 응답합니다 (리소스 존재 여부 자체를 숨김).
 
@@ -419,6 +419,7 @@ GET /api/v1/export/me   (인증 필요)
 }
 ```
 본인 소유 기록 전체를 한 번에 JSON으로 내려받습니다. 퀴즈 문제에는 (풀이용 목록 조회와 달리) `correct_answer`/`explanation`이 그대로 포함됩니다. 퀴즈의 `source_text`는 직접 붙여넣어 만든 퀴즈에서만 원본 텍스트가 채워지고, `study_session_id`로 만든 퀴즈는 원본이 이미 `study_sessions` 쪽 메시지에 들어있으므로 중복 없이 `null`입니다. 파일 다운로드로 만들고 싶으면 프론트에서 이 응답을 그대로 Blob으로 감싸서 저장하면 됩니다 (서버가 `Content-Disposition`을 붙여주진 않음).
+페이지네이션 없이 계정 전체 기록을 매번 조회하는 유일한 엔드포인트라 레이트리밋(`export_rate_limit`, 기본 분당 10회)이 적용됩니다 - "내 데이터 내보내기" 버튼을 연타할 수 있는 UI라면 로딩 상태로 막아두세요.
 
 ## 4. 헬스체크/메트릭 (인증 불필요, 버전 프리픽스 없음)
 

@@ -1,5 +1,6 @@
 import json
 
+from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
 
 _SAMPLE_QUIZ_JSON = json.dumps(
@@ -220,3 +221,25 @@ def test_export_includes_pasted_quiz_source_text_but_not_for_session_based_quiz(
 
     assert quizzes_by_id[pasted_quiz["id"]]["source_text"] == "원본 텍스트"
     assert quizzes_by_id[session_quiz["id"]]["source_text"] is None
+
+
+def test_export_my_data_is_rate_limited(client, monkeypatch):
+    """/export/me는 학습챗/퀴즈/면접연습/면접복기 전체 기록을 페이지네이션 없이
+    한 번에 조회하는 유일한 엔드포인트인데, 다른 모든 비용이 큰/쓰기 엔드포인트와
+    달리 레이트리밋이 전혀 걸려 있지 않았다 - 계정 이력이 커질수록 한 번 호출
+    비용도 커지는데, 반복 호출을 막을 방법이 없어 무제한 DB 부하를 유발할 수
+    있었다. auth/chat 계열과 성격이 달라 분리해둔 export_rate_limit을 적용한다."""
+    monkeypatch.setenv("EXPORT_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+
+    token = _signup_and_get_token(client)
+    headers = _auth_headers(token)
+
+    first = client.get("/api/v1/export/me", headers=headers)
+    second = client.get("/api/v1/export/me", headers=headers)
+    third = client.get("/api/v1/export/me", headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 429
+    assert third.json()["error"]["code"] == "rate_limited"

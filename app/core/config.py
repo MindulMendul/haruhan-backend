@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # LLM 호출 비용 때문에 두는 chat_rate_limit과는 성격이 달라 분리해둔다.
     auth_rate_limit: str = "5/minute"
 
+    # 데이터 export(/export/me)용 제한. 학습챗/퀴즈/면접연습/면접복기 전체 기록을
+    # 페이지네이션 없이 한 번에 조회하는 유일한 엔드포인트라, LLM 호출 비용이나
+    # 브루트포스와는 다른 이유(무제한 반복 호출 시 계정 이력 크기에 비례하는 DB
+    # 부하)로 별도로 분리해둔다.
+    export_rate_limit: str = "10/minute"
+
     # 요청 바디 최대 크기 (바이트). 기본 1MB.
     max_body_size_bytes: int = 1_048_576
 
