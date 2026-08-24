@@ -103,7 +103,13 @@ class QuizService:
         generated = await self._generate_quiz(prompt, model)
 
         quiz = await self._quizzes.create(
-            user_id=user_id, title=title, source_study_session_id=study_session_id
+            user_id=user_id,
+            title=title,
+            source_study_session_id=study_session_id,
+            # 학습 세션에서 파생된 source_text는 세션 메시지에서 언제든 다시 만들 수
+            # 있으니 중복 저장하지 않는다 - 사용자가 직접 붙여넣은 경우에만 저장한다
+            # (아래 RAG 색인이 실패해도 나중에 재시도할 원본으로 남겨두기 위함).
+            source_text=source_text if study_session_id is None else None,
         )
         for index, question in enumerate(generated.questions):
             await self._questions.create(

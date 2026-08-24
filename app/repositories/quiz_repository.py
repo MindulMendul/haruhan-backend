@@ -11,8 +11,19 @@ class QuizRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(self, user_id: uuid.UUID, title: str, source_study_session_id: uuid.UUID | None) -> Quiz:
-        quiz = Quiz(user_id=user_id, title=title, source_study_session_id=source_study_session_id)
+    async def create(
+        self,
+        user_id: uuid.UUID,
+        title: str,
+        source_study_session_id: uuid.UUID | None,
+        source_text: str | None = None,
+    ) -> Quiz:
+        quiz = Quiz(
+            user_id=user_id,
+            title=title,
+            source_study_session_id=source_study_session_id,
+            source_text=source_text,
+        )
         self._session.add(quiz)
         await self._session.flush()
         return quiz

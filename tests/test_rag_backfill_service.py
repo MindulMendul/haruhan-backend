@@ -10,8 +10,13 @@ from app.core.config import get_settings
 from app.db import session as db_session_module
 from app.db.base import Base
 from app.db.session import enable_sqlite_foreign_keys
+from app.repositories.interview_practice_repository import (
+    InterviewPracticeSessionRepository,
+    InterviewPracticeTurnRepository,
+)
 from app.repositories.interview_review_repository import InterviewReviewRepository
 from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+from app.repositories.quiz_repository import QuizRepository
 from app.repositories.study_message_repository import StudyMessageRepository
 from app.repositories.study_session_repository import StudySessionRepository
 from app.repositories.user_repository import UserRepository
@@ -61,9 +66,11 @@ def test_backfill_unindexed_content_only_indexes_missing_chunks(db_session_facto
                 user_id=user.id, source_type="study_message", source_id=message1.id, content=message1.content
             )
 
-            message_count, review_count = await backfill_unindexed_content(session, rag)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
             assert message_count == 1
             assert review_count == 1
+            assert quiz_count == 0
+            assert turn_count == 0
 
             chunks = KnowledgeChunkRepository(session)
             indexed_messages = await chunks.get_indexed_source_ids("study_message")
@@ -98,10 +105,10 @@ def test_backfill_unindexed_content_is_idempotent(db_session_factory):
 
             rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
 
-            first_message_count, first_review_count = await backfill_unindexed_content(session, rag)
-            second_message_count, second_review_count = await backfill_unindexed_content(session, rag)
-            assert (first_message_count, first_review_count) == (1, 1)
-            assert (second_message_count, second_review_count) == (0, 0)
+            first = await backfill_unindexed_content(session, rag)
+            second = await backfill_unindexed_content(session, rag)
+            assert first == (1, 1, 0, 0)
+            assert second == (0, 0, 0, 0)
 
     asyncio.run(_run())
 
@@ -125,7 +132,7 @@ def test_backfill_unindexed_content_retries_previously_failed_embedding(db_sessi
             )
             # 임베딩 호출이 실패하면 knowledge_chunks에 행이 안 남으므로, 다음 백필에서
             # 다시 대상이 되어야 한다.
-            failed_count, _ = await backfill_unindexed_content(session, failing_rag)
+            failed_count, *_ = await backfill_unindexed_content(session, failing_rag)
             assert failed_count == 1
 
             chunks = KnowledgeChunkRepository(session)
@@ -134,7 +141,7 @@ def test_backfill_unindexed_content_retries_previously_failed_embedding(db_sessi
             working_rag = RagService(
                 session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings
             )
-            retried_count, _ = await backfill_unindexed_content(session, working_rag)
+            retried_count, *_ = await backfill_unindexed_content(session, working_rag)
             assert retried_count == 1
             assert message.id in await chunks.get_indexed_source_ids("study_message")
 
@@ -177,13 +184,97 @@ def test_backfill_unindexed_content_scales_with_unindexed_count_not_total_count(
             )
             await session.commit()
 
-            message_count, review_count = await backfill_unindexed_content(session, rag)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
             assert message_count == 1
             assert review_count == 0
+            assert quiz_count == 0
+            assert turn_count == 0
 
             chunks = KnowledgeChunkRepository(session)
             indexed_messages = await chunks.get_indexed_source_ids("study_message")
             assert indexed_messages == already_indexed_ids | {unindexed.id}
+
+    asyncio.run(_run())
+
+
+def test_backfill_unindexed_content_recovers_pasted_quiz_source_after_failed_embedding(db_session_factory):
+    """직접 붙여넣은 텍스트로 만든 퀴즈(quiz_source)는 study_message/interview_review와
+    달리 원본이 quizzes.source_text 컬럼에만 있다 - 생성 시점 임베딩 호출이
+    실패하면(Ollama 일시 장애 등) 이 백필이 재시도해주지 않는 한 그 텍스트는
+    영영 RAG 검색 대상이 될 기회를 잃는다. source_text가 채워진 채로 아직
+    색인이 없는 퀴즈(=실패 직후 상태를 그대로 재현)를 이 job이 찾아내 색인하는지,
+    그리고 학습 세션에서 파생돼 source_text가 비어있는 퀴즈는 애초에 원본이
+    study_message 쪽에 이미 있으므로 여기서 건드리지 않는지 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            # 생성 시점 임베딩이 실패한 상태 - source_text는 남아있지만 색인은 없다.
+            pasted_quiz = await QuizRepository(session).create(
+                user_id=user.id,
+                title="붙여넣은 퀴즈",
+                source_study_session_id=None,
+                source_text="사용자가 직접 붙여넣은 학습 자료 원문",
+            )
+            # 학습 세션에서 파생된 퀴즈는 source_text를 안 남긴다 - 원본이 이미
+            # study_message 쪽에 있어서 quiz_source로 중복 색인할 필요가 없다.
+            derived_quiz = await QuizRepository(session).create(
+                user_id=user.id, title="세션에서 만든 퀴즈", source_study_session_id=None, source_text=None
+            )
+            await session.commit()
+
+            rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
+            assert (message_count, review_count, turn_count) == (0, 0, 0)
+            assert quiz_count == 1
+
+            chunks = KnowledgeChunkRepository(session)
+            indexed_quizzes = await chunks.get_indexed_source_ids("quiz_source")
+            assert indexed_quizzes == {pasted_quiz.id}
+            assert derived_quiz.id not in indexed_quizzes
+
+    asyncio.run(_run())
+
+
+def test_backfill_unindexed_content_recovers_interview_practice_turn_after_failed_embedding(db_session_factory):
+    """면접연습 문답(interview_practice_turn)도 study_message/interview_review와
+    같은 방식으로 답변 제출 시점에 동기 색인되는데, 이 백필 job에는 원래 빠져
+    있었다 - 답변은 interview_practice_turns 테이블에 영구 보존되니 데이터
+    유실은 아니지만, 임베딩이 일시 실패하면 재시도할 방법이 없었다. 답변이
+    채워진 채로 색인이 없는 턴(=실패 직후 상태)은 찾아내고, 아직 답변 안 한
+    턴(=애초에 색인 대상이 아님)은 건드리지 않는지 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            practice_session = await InterviewPracticeSessionRepository(session).create(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            turns = InterviewPracticeTurnRepository(session)
+            answered_turn = await turns.create(
+                session_id=practice_session.id, order_index=0, question="질문1"
+            )
+            await turns.mark_answered_if_pending(answered_turn.id, "답변1", "피드백1")
+            unanswered_turn = await turns.create(
+                session_id=practice_session.id, order_index=1, question="질문2"
+            )
+            await session.commit()
+
+            rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
+            assert (message_count, review_count, quiz_count) == (0, 0, 0)
+            assert turn_count == 1
+
+            chunks = KnowledgeChunkRepository(session)
+            indexed_turns = await chunks.get_indexed_source_ids("interview_practice_turn")
+            assert indexed_turns == {answered_turn.id}
+            assert unanswered_turn.id not in indexed_turns
 
     asyncio.run(_run())
 
