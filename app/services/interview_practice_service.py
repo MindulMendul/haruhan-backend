@@ -176,7 +176,9 @@ class InterviewPracticeService:
     async def submit_answer(
         self, session_id: uuid.UUID, user_id: uuid.UUID, answer: str
     ) -> tuple[InterviewPracticeTurn, InterviewPracticeTurn | None]:
-        practice_session = await self._sessions.get_for_user(session_id, user_id)
+        # get_for_user_locked()로 같은 세션에 대한 답변 제출/종료를 직렬화한다 -
+        # 자세한 이유는 그 메서드의 docstring 참고.
+        practice_session = await self._sessions.get_for_user_locked(session_id, user_id)
         if practice_session is None:
             raise _NOT_FOUND
         if practice_session.status != "in_progress":
@@ -248,7 +250,9 @@ class InterviewPracticeService:
     async def complete_session(
         self, session_id: uuid.UUID, user_id: uuid.UUID
     ) -> InterviewPracticeSession:
-        practice_session = await self._sessions.get_for_user(session_id, user_id)
+        # get_for_user_locked()로 같은 세션에 대한 답변 제출/종료를 직렬화한다 -
+        # 자세한 이유는 그 메서드의 docstring 참고.
+        practice_session = await self._sessions.get_for_user_locked(session_id, user_id)
         if practice_session is None:
             raise _NOT_FOUND
         if practice_session.status != "in_progress":

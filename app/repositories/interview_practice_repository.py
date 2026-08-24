@@ -62,6 +62,33 @@ class InterviewPracticeSessionRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_for_user_locked(
+        self, session_id: uuid.UUID, user_id: uuid.UUID
+    ) -> InterviewPracticeSession | None:
+        """get_for_user()와 같지만 `SELECT ... FOR UPDATE`로 이 세션 행을 잠근다.
+
+        submit_answer()와 complete_session()은 둘 다 `status == "in_progress"`인지
+        확인한 뒤(check) 느린 Ollama 호출을 거쳐서야 쓰는(act) check-then-act다 -
+        이 잠금 없이는 두 요청(예: 마지막 답변 제출과 "면접 종료"를 거의 동시에
+        누름)이 서로 다른 트랜잭션에서 둘 다 "아직 진행중"이라고 읽고 통과할 수
+        있다. 그러면 complete_session이 먼저 커밋해 세션을 completed로 만들어도,
+        이미 시작된 submit_answer가 뒤늦게 자기 턴을 응답 완료 처리하고 새 다음
+        턴까지 만들어버려 - 이미 끝난 세션에 답변할 수 없는 턴 하나가 영원히
+        남는(누구도 답할 수 없고 지울 방법도 없는) 데이터 정합성 문제가 생긴다.
+        이 조회로 같은 세션에 대한 두 작업을 직렬화하면, 먼저 도착한 쪽이 커밋을
+        마칠 때까지 나중 쪽이 대기했다가 이미 반영된 status를 보고 다시 판단한다.
+        Postgres(운영)에서만 실제로 잠그고, SQLite(테스트/로컬)는 FOR UPDATE를
+        지원하지 않아 이 조회가 일반 SELECT로 컴파일된다 - 그래서 이 잠금에
+        의존하는 동시성 자체는 SQLite 기반 테스트로 재현/검증할 수 없다(92/101번
+        라운드에서 이미 마주친 것과 같은 성격의 한계).
+        """
+        result = await self._session.execute(
+            select(InterviewPracticeSession)
+            .where(InterviewPracticeSession.id == session_id, InterviewPracticeSession.user_id == user_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def touch(self, practice_session: InterviewPracticeSession) -> None:
         practice_session.updated_at = utcnow_naive()
         await self._session.flush()

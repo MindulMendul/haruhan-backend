@@ -1915,4 +1915,42 @@
       계층 변경(잠금 쿼리 추가 + 호출 순서 재배치)이라 모델/스키마 변경이나
       마이그레이션, `FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
 
+## 백로그 (78라운드)
+
+- [x] 102. 면접연습에서 "답변 제출"과 "면접 종료"를 거의 동시에 누르면
+      이미 종료된 세션에 아무도 답할 수 없는 턴이 하나 남을 수 있던 문제
+      수정 - 이번에도 서브에이전트에게 독립 조사를 맡겼다.
+      `InterviewPracticeService.submit_answer()`와 `.complete_session()`은
+      둘 다 `practice_session.status != "in_progress"`인지 확인한 뒤(check)
+      느린 Ollama 호출을 거쳐서야 쓰는(act) check-then-act였는데,
+      `InterviewPracticeSessionRepository`에는 92번(퀴즈)/101번(면접복기)
+      라운드에서 같은 종류의 버그를 막으려고 추가한 `get_for_user_locked()`가
+      없었다 - 세션 상태를 잠그지 않고 읽는 유일한 곳이었다. 마지막 질문에
+      대한 "답변 제출"(`POST .../answers`)과 "면접 종료"(`POST .../complete`)
+      요청이 거의 동시에(이중 클릭, 느린 네트워크에서의 재시도) 오면 둘 다
+      "아직 진행중"이라고 읽고 통과할 수 있다 - `complete_session`이 먼저
+      커밋해 세션을 `completed`로 만들어도, 이미 시작된 `submit_answer`는
+      상태를 다시 확인하지 않고 뒤늦게 `mark_answered_if_pending`으로 자기
+      턴을 응답 완료 처리하고 새 다음 턴까지 만들어버린다 - `submit_answer`는
+      호출마다 상태를 `in_progress`로 재확인하므로, 이렇게 남은 다음 턴은
+      이미 끝난 세션에 영원히 답할 수 없는 채로 남는다(완결된 면접
+      연습에는 미답변 턴이 없어야 한다는 도메인 불변조건이 깨짐). 92/101번
+      라운드와 같은 패턴으로 `get_for_user_locked()`(`SELECT ... FOR
+      UPDATE`)를 추가해 `submit_answer`/`complete_session` 둘 다 이걸로
+      세션을 읽도록 바꿔, 같은 세션에 대한 두 작업이 직렬화되게 했다.
+      기존 테스트는 `mark_answered_if_pending`이 자기 자신과 경합하는
+      경우(같은 질문에 답변 중복 제출)만 다뤘을 뿐 `submit_answer`와
+      `complete_session`이 서로 경합하는 경우는 전혀 다루지 않았다.
+      92/101번 라운드와 같은 이유로 SQLite는 `FOR UPDATE`를 조용히 빼고
+      컴파일하므로 이 잠금에 의존하는 동시성 자체는 SQLite 기반 테스트로
+      재현/검증할 수 없다 - 대신 세션에 전달되는 실제 statement를 가로채
+      Postgres 방언으로 다시 컴파일해 `FOR UPDATE`가 포함되는지 확인하는
+      테스트(`test_get_for_user_locked_requests_row_lock_on_postgres`)를
+      추가했고, `get_for_user_locked` 자체가 없던 수정 전 코드에서 이
+      테스트가 실제로 `AttributeError`로 실패하는 것까지 확인한 뒤(`git
+      stash`로 수정 부분만 되돌렸다가 복원) 다시 적용했다. 전체 339개
+      테스트 통과, 전체 커버리지 99%, mypy 클린. 순수 서비스/리포지토리
+      계층 변경이라 모델/스키마 변경이나 마이그레이션,
+      `FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
+
 

@@ -753,3 +753,43 @@ def test_delete_session_with_answered_turns(client):
         f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
     )
     assert delete.status_code == 204
+
+
+def test_get_for_user_locked_requests_row_lock_on_postgres():
+    """submit_answer()/complete_session()은 둘 다 세션 status가 "in_progress"인지
+    확인한 뒤 느린 Ollama 호출을 거쳐서야 쓰는 check-then-act다 - 이 잠금 없이는
+    "마지막 답변 제출"과 "면접 종료"를 거의 동시에 누르면 둘 다 "아직 진행중"을
+    보고 통과해, 이미 completed로 끝난 세션에 아무도 답할 수 없는 턴이 하나
+    남는 데이터 정합성 문제가 생길 수 있다. get_for_user_locked()가 실제로
+    FOR UPDATE를 요청하는 쿼리를 만드는지, 세션에 전달되는 실제 statement를
+    가로채 확인한다(92/101번 라운드의 같은 패턴).
+
+    SQLite는 FOR UPDATE 자체를 지원하지 않아 컴파일 시 조용히 빠져버리므로,
+    이 잠금에 의존하는 동시성은 SQLite 기반 테스트 스위트로 재현/검증할 수
+    없다 - 가로챈 statement를 실제로 잠그는 Postgres 방언으로 다시 컴파일해
+    SQL 문자열에 "FOR UPDATE"가 포함되는지 확인하는 것으로 대신한다."""
+    import uuid
+
+    from sqlalchemy.dialects import postgresql
+
+    from app.repositories.interview_practice_repository import InterviewPracticeSessionRepository
+
+    class _CapturingResult:
+        def scalar_one_or_none(self):
+            return None
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = InterviewPracticeSessionRepository(session)
+    asyncio.run(repo.get_for_user_locked(uuid.uuid4(), uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    compiled = str(session.captured_statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
