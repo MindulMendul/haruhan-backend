@@ -188,6 +188,8 @@ DELETE /api/v1/auth/sessions           → 204 (모든 기기에서 로그아웃
 | POST | `/study/sessions/{id}/messages` | `{ "content": "..." }` → `{ user_message, assistant_message }` |
 
 메시지 전송은 LLM 호출이라 레이트리밋(`chat_rate_limit`, 기본 분당 10회) 적용됨.
+Ollama 엔진 호출 자체가 실패하면(엔진 다운/타임아웃 등) `502`(다른 AI 생성
+엔드포인트와 동일하게 "우리 서버가 아니라 업스트림 엔진 문제"로 분류됩니다).
 
 한 세션의 대화가 계속 길어지면, AI에게 매번 실어 보내는 히스토리는 가장 최근
 `max_chat_history_messages`개(기본 40개)로 제한됨 — `GET /study/sessions/{id}`로

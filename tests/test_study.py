@@ -445,7 +445,7 @@ def test_user_message_preserved_when_ai_call_fails(client):
         json={"content": "이 메시지는 저장돼야 한다"},
         headers=_auth_headers(token),
     )
-    assert send.status_code == 500
+    assert send.status_code == 502
 
     detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
     messages = detail.json()["messages"]

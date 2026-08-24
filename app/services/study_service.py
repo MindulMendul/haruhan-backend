@@ -15,6 +15,15 @@ from app.services.rag_service import RagService
 _SESSION_NOT_FOUND = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND, detail="Study session not found"
 )
+# quiz_service/interview_practice_service/interview_review_service는 전부 Ollama
+# 호출 실패(OllamaServiceError)를 502(우리 서버가 아니라 업스트림 AI 엔진의
+# 문제)로 응답하는데, 이 서비스만 500으로 응답하고 있었다 - 같은 실패 원인인데
+# 라우트마다 다른 상태 코드가 나가면, 상태 코드로 분기하는 프론트가("502/503이면
+# 재시도 유도, 500이면 버그 신고 유도" 같은 처리) 학습챗의 AI 엔진 장애를
+# 엉뚱하게 "우리 서버 버그"로 잘못 분류하게 된다.
+_GENERATION_FAILED = HTTPException(
+    status_code=status.HTTP_502_BAD_GATEWAY, detail="답변 생성에 실패했습니다. 다시 시도해주세요."
+)
 
 _GROUNDING_HEADER = (
     "[참고자료] 섹션은 이 사용자가 과거에 나눈 학습 대화나 면접 복기에서 가져온 내용입니다. "
@@ -115,7 +124,7 @@ class StudyService:
         try:
             reply = await self._ollama.chat(messages=chat_messages, model=study_session.model)
         except OllamaServiceError as exc:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+            raise _GENERATION_FAILED from exc
 
         assistant_message = await self._messages.create(
             session_id=session_id, role="assistant", content=reply
@@ -166,7 +175,7 @@ class StudyService:
                 reply_parts.append(delta)
                 yield "delta", delta
         except OllamaServiceError as exc:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+            raise _GENERATION_FAILED from exc
 
         reply = "".join(reply_parts)
         assistant_message = await self._messages.create(
