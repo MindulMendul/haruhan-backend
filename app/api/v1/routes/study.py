@@ -13,7 +13,7 @@ from fastapi import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.dependencies import (
     get_current_user,
     get_current_user_ws,
@@ -43,8 +43,11 @@ def get_study_service(
     session: AsyncSession = Depends(get_db),
     ollama_service: OllamaService = Depends(get_ollama_service),
     rag_service: RagService = Depends(get_rag_service),
+    settings: Settings = Depends(get_settings),
 ) -> StudyService:
-    return StudyService(session=session, ollama_service=ollama_service, rag_service=rag_service)
+    return StudyService(
+        session=session, ollama_service=ollama_service, rag_service=rag_service, settings=settings
+    )
 
 
 @router.post("", response_model=StudySessionResponse, status_code=status.HTTP_201_CREATED)

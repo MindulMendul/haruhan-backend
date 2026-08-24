@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.db.models.study_message import StudyMessage
 from app.db.models.study_session import StudySession
 from app.repositories.study_message_repository import StudyMessageRepository
@@ -27,13 +28,29 @@ def _build_grounding_message(chunks: list[str]) -> dict[str, str]:
     return {"role": "system", "content": f"{_GROUNDING_HEADER}\n\n[참고자료]\n{joined}"}
 
 
+def _recent_history(history: list[StudyMessage], limit: int) -> list[StudyMessage]:
+    """가장 최근 `limit`개의 메시지만 남긴다. 파이썬의 `history[-0:]`은 (음수 0이
+    없어서) 빈 리스트가 아니라 전체 리스트가 되어버리므로, limit이 0 이하인 경우를
+    별도로 처리해야 한다."""
+    if limit <= 0:
+        return []
+    return history[-limit:]
+
+
 class StudyService:
-    def __init__(self, session: AsyncSession, ollama_service: OllamaService, rag_service: RagService) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        ollama_service: OllamaService,
+        rag_service: RagService,
+        settings: Settings,
+    ) -> None:
         self._session = session
         self._sessions = StudySessionRepository(session)
         self._messages = StudyMessageRepository(session)
         self._ollama = ollama_service
         self._rag = rag_service
+        self._settings = settings
 
     async def create_session(self, user_id: uuid.UUID, title: str, model: str) -> StudySession:
         study_session = await self._sessions.create(user_id=user_id, title=title, model=model)
@@ -86,7 +103,8 @@ class StudyService:
         # AI 호출 성패와 무관하게 사용자가 입력한 메시지는 먼저 커밋해서 보존한다.
         await self._session.commit()
 
-        chat_messages = [{"role": m.role, "content": m.content} for m in history]
+        recent_history = _recent_history(history, self._settings.max_chat_history_messages)
+        chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
 
         relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=content)
         if relevant_chunks:
@@ -133,7 +151,8 @@ class StudyService:
         await self._session.commit()
         yield "user_message", user_message
 
-        chat_messages = [{"role": m.role, "content": m.content} for m in history]
+        recent_history = _recent_history(history, self._settings.max_chat_history_messages)
+        chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
 
         relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=content)
         if relevant_chunks:

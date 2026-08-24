@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     chat_rate_limit: str = "10/minute"
     max_prompt_length: int = 4000
 
+    # 학습챗 한 세션의 대화가 길어질수록 send_message/stream_message가 매번 그
+    # 세션의 전체 메시지 히스토리를 그대로 Ollama 프롬프트에 다시 실어 보낸다 -
+    # 대화가 계속될수록 한 번의 호출에 드는 토큰 수가 무한정 늘어나서, 언젠가
+    # 모델의 컨텍스트 윈도우를 넘기면 앞부분이 조용히 잘리거나 응답 품질/지연이
+    # 나빠진다. 가장 최근 이 개수만큼의 메시지만 골라 프롬프트에 포함한다
+    # (0 이하로 설정하면 히스토리 없이 이번 메시지만 보낸다).
+    max_chat_history_messages: int = 40
+
     # 로그인/회원가입/비밀번호 변경처럼 브루트포스 대상이 될 수 있는 엔드포인트용 제한.
     # LLM 호출 비용 때문에 두는 chat_rate_limit과는 성격이 달라 분리해둔다.
     auth_rate_limit: str = "5/minute"

@@ -3,6 +3,7 @@ import pytest
 from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
 from app.services.ollama_service import OllamaServiceError
+from app.services.study_service import _recent_history
 
 
 class FakeOllamaService:
@@ -135,6 +136,99 @@ def test_send_message_rejects_content_over_max_length(client, monkeypatch):
         headers=_auth_headers(token),
     )
     assert response.status_code == 422
+
+
+def test_recent_history_treats_non_positive_limit_as_empty():
+    """파이썬 슬라이싱에서 `history[-0:]`은 음수 0이 없어서 `history[0:]`, 즉
+    전체 리스트가 되어버린다 - limit=0으로 "히스토리 없이 보내라"는 의도가
+    조용히 "전체 히스토리를 다 보내라"로 뒤집히는 함정이다. 0과 음수를 둘 다
+    빈 리스트로 명시 처리하는지, 그리고 양수일 때는 정말 뒤쪽 N개만 남기는지
+    확인한다."""
+    history = ["a", "b", "c", "d"]
+    assert _recent_history(history, 0) == []
+    assert _recent_history(history, -1) == []
+    assert _recent_history(history, 2) == ["c", "d"]
+    assert _recent_history(history, 100) == ["a", "b", "c", "d"]
+
+
+class HistoryTrackingOllamaService:
+    """chat()/chat_stream()에 실제로 전달된 메시지 목록을 그대로 기록해둔다.
+    embed()는 항상 빈 벡터를 반환해 RAG 그라운딩이 절대 끼어들지 않게 해서,
+    히스토리 길이 자체만 결정적으로 검증할 수 있게 한다."""
+
+    def __init__(self):
+        self.last_messages = None
+
+    async def chat(self, messages, model):
+        self.last_messages = messages
+        return "assistant reply"
+
+    async def chat_stream(self, messages, model):
+        self.last_messages = messages
+        yield "assistant reply"
+
+    async def embed(self, text, model):
+        return []
+
+
+def test_send_message_truncates_history_to_configured_limit(client, monkeypatch):
+    """send_message는 세션의 지금까지 전체 메시지 히스토리를 매번 그대로 다시
+    프롬프트에 실어 Ollama에 보낸다 - 대화가 길어질수록 한 번의 호출에 드는
+    토큰 수가 무한정 늘어나서, 언젠가 모델의 컨텍스트 윈도우를 넘기면 앞부분이
+    조용히 잘리거나 응답 품질/지연이 나빠질 수 있다. MAX_CHAT_HISTORY_MESSAGES로
+    가장 최근 메시지만 프롬프트에 포함되는지 확인한다."""
+    monkeypatch.setenv("MAX_CHAT_HISTORY_MESSAGES", "2")
+    get_settings.cache_clear()
+    fake = HistoryTrackingOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "히스토리 제한 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    for i in range(3):
+        response = client.post(
+            f"/api/v1/study/sessions/{session_id}/messages",
+            json={"content": f"메시지 {i}"},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 200
+
+    # 세 번째 호출 시점엔 이전 대화 4개(사용자 2 + 어시스턴트 2)가 이미 쌓여 있었다 -
+    # MAX_CHAT_HISTORY_MESSAGES=2라 그중 최근 2개만 프롬프트에 포함되고, 거기에
+    # 이번에 새로 보낸 메시지 1개가 더해져 총 3개여야 한다(전체 히스토리를 그대로
+    # 실었다면 4 + 1 = 5개였을 것).
+    assert len(fake.last_messages) == 3
+    assert fake.last_messages[-1] == {"role": "user", "content": "메시지 2"}
+
+
+def test_stream_message_truncates_history_to_configured_limit(client, monkeypatch):
+    """위 REST 버전과 같은 확인을 stream_message(WebSocket)에도 반복한다 - 두
+    경로가 같은 _recent_history() 헬퍼를 쓰지만 별도 코드 경로(제너레이터)라
+    회귀가 한쪽에만 생길 수 있다."""
+    monkeypatch.setenv("MAX_CHAT_HISTORY_MESSAGES", "2")
+    get_settings.cache_clear()
+    fake = HistoryTrackingOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "WS 히스토리 제한 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        for i in range(3):
+            ws.send_json({"content": f"메시지 {i}"})
+            ws.receive_json()  # user_message
+            ws.receive_json()  # delta
+            ws.receive_json()  # done
+        ws.close()
+
+    assert len(fake.last_messages) == 3
+    assert fake.last_messages[-1] == {"role": "user", "content": "메시지 2"}
 
 
 def test_other_user_cannot_access_session(client):
