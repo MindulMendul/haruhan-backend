@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import uuid
 
 import pytest
@@ -7,6 +8,7 @@ from app.core.config import get_settings
 from app.repositories.user_repository import UserRepository
 from app.services.ollama_service import OllamaServiceError
 from app.services.rag_service import RagService, _cosine_similarity
+import app.services.rag_service as rag_service_module
 
 
 class FakeEmbeddingOllamaService:
@@ -226,6 +228,46 @@ def test_retrieve_relevant_skips_when_query_embedding_is_empty(db_session_factor
                 results = await empty_embedding_rag.retrieve_relevant(user_id=user.id, query="고양이")
             assert results == []
             assert any("RAG 검색 건너뜀" in record.message for record in caplog.records)
+
+    asyncio.run(_run())
+
+
+def test_retrieve_relevant_scores_candidates_off_the_event_loop_thread(db_session_factory, monkeypatch):
+    """색인된 청크 수는 사용자가 오래 쓸수록 계속 늘어나기만 하는데, 예전에는
+    후보 전체에 대한 코사인 유사도 채점을 이벤트 루프에서 그대로(await 없이)
+    돌렸다 - 후보가 많아지면 이 채점 시간만큼 같은 워커의 다른 모든 동시
+    요청이 멈춘다. asyncio.to_thread로 스레드 풀에 위임했는지를, 실제
+    채점(_cosine_similarity)이 이벤트 루프 스레드가 아닌 다른 스레드에서
+    호출되는지로 직접 확인한다 - 시간차 기반 검증은 asyncio.sleep이 실제
+    경과 시간 기준이라 이벤트 루프가 막혀 있어도 우연히 비슷한 결과가 나올
+    수 있어(타이머가 이미 만료된 채로 대기 중이었을 수 있음) 신뢰할 수 없다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            fake_ollama = FakeEmbeddingOllamaService({"질문": [1.0, 0.0, 0.0]})
+            rag = RagService(session=session, ollama_service=fake_ollama, settings=settings)
+            await rag.index_content(
+                user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="내용"
+            )
+
+            main_thread = threading.current_thread()
+            scoring_threads: list[threading.Thread] = []
+            original_cosine_similarity = rag_service_module._cosine_similarity
+
+            def _tracking_cosine_similarity(a, b):
+                scoring_threads.append(threading.current_thread())
+                return original_cosine_similarity(a, b)
+
+            monkeypatch.setattr(rag_service_module, "_cosine_similarity", _tracking_cosine_similarity)
+
+            await rag.retrieve_relevant(user_id=user.id, query="질문")
+
+            assert scoring_threads, "채점 함수가 호출되지 않음"
+            assert all(t is not main_thread for t in scoring_threads)
 
     asyncio.run(_run())
 

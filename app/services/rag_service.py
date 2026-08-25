@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 import uuid
@@ -18,6 +19,21 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _rank_top_k(
+    query_embedding: list[float], candidates: list[tuple[list[float], str]], top_k: int
+) -> list[str]:
+    """사용자가 오래 쓸수록 색인된 청크 수는 계속 늘어나기만 하는데(만료/정리
+    없음), retrieve_relevant는 매 학습챗 메시지/면접연습 턴마다 후보 전체를
+    코사인 유사도로 채점한다 - 후보가 많아지면 이 채점 자체가 무시 못 할
+    CPU 작업이 되는데, 예전엔 이걸 이벤트 루프에서 그대로(await 없이) 돌려서
+    그 시간만큼 같은 워커의 다른 모든 동시 요청이 멈췄다. 세션/ORM 객체가
+    아니라 이미 로드된 (embedding, content) 순수 데이터만 넘겨받아, 이벤트
+    루프와 무관한 스레드 풀에서 계산해도 안전하게 만들었다."""
+    scored = [(_cosine_similarity(query_embedding, embedding), content) for embedding, content in candidates]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [content for _, content in scored[:top_k]]
 
 
 class RagService:
@@ -95,10 +111,8 @@ class RagService:
             logger.warning("RAG 검색 건너뜀 (빈 임베딩 반환): user_id=%s", user_id)
             return []
 
-        scored = [(_cosine_similarity(query_embedding, chunk.embedding), chunk) for chunk in candidates]
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        top_k = self._settings.rag_top_k
-        return [chunk.content for _, chunk in scored[:top_k]]
+        pairs = [(chunk.embedding, chunk.content) for chunk in candidates]
+        return await asyncio.to_thread(_rank_top_k, query_embedding, pairs, self._settings.rag_top_k)
 
     async def forget_content(self, source_type: str, source_id: uuid.UUID) -> None:
         """원본이 삭제될 때 색인도 함께 지운다."""
