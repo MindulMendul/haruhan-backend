@@ -1061,3 +1061,71 @@ def test_list_attempts_404_for_other_users_quiz(client):
 
     response = client.get(f"/api/v1/quizzes/{quiz_id}/attempts", headers=_auth_headers(token_b))
     assert response.status_code == 404
+
+
+class LongCorrectAnswerOllamaService(FakeOllamaService):
+    """choices/question_text/explanation은 전부 길이 제한이 없는데(JSON/Text
+    컬럼) correct_answer만 String(500)이었다 - LLM이 500자를 넘는 정답 문자열을
+    뱉는 것 자체는 스키마상 아무 문제 없이 통과하고(_generate_quiz는 choices
+    소속 여부만 검증, 길이는 안 봄), DB INSERT 시점에야 실패했다."""
+
+    _LONG_ANSWER = "정답" * 300  # 문자 수 600, UTF-8 바이트로도 500을 넉넉히 넘음
+
+    async def generate_json(self, prompt, model, schema):
+        return json.dumps(
+            {
+                "questions": [
+                    {
+                        "question": "긴 정답 문제",
+                        "choices": [self._LONG_ANSWER, "B", "C", "D"],
+                        "correct_answer": self._LONG_ANSWER,
+                        "explanation": "설명",
+                    }
+                ]
+            }
+        )
+
+
+def test_create_quiz_persists_correct_answer_over_500_chars(client):
+    """quiz_question.correct_answer는 choices(JSON)/question_text/explanation
+    (전부 Text, 길이 무제한)과 짝을 맞춰 길이 제한 없는 Text로 저장돼야 한다 -
+    예전엔 String(500)이라 500자를 넘는 정답은 Postgres에서 DataError로
+    INSERT 자체가 실패해 처리되지 않은 500이 됐다(로컬에서 실제로 재현·확인함:
+    SQLite는 컬럼 길이를 강제하지 않아 이 테스트 자체는 SQLite에서는 수정 전
+    코드로도 통과하므로, 이 회귀를 실제로 잡아내지는 못한다 - 대신 아래
+    test_quiz_question_correct_answer_column_has_no_length_limit이 SQLite에서도
+    실패하는 결정적 회귀 테스트다). 여기서는 생성부터 채점까지 전체 흐름이
+    긴 정답으로도 깨지지 않고 값이 그대로 보존되는지 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: LongCorrectAnswerOllamaService()
+    token = _signup_and_get_token(client, email="long-answer@example.com")
+
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "긴 정답 퀴즈", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    assert create.status_code == 201
+    quiz_id = create.json()["id"]
+
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    question = detail.json()["questions"][0]
+    correct_index = question["choices"].index(LongCorrectAnswerOllamaService._LONG_ANSWER)
+
+    submit = client.post(
+        f"/api/v1/quizzes/{quiz_id}/submit",
+        json={"answers": [{"question_id": question["id"], "selected_index": correct_index}]},
+        headers=_auth_headers(token),
+    )
+    assert submit.status_code == 200
+    assert submit.json()["score"] == 1
+
+
+def test_quiz_question_correct_answer_column_has_no_length_limit():
+    """위 통합 테스트는 SQLite가 컬럼 길이를 강제하지 않아 수정 전 코드로도
+    통과해버린다 - 컬럼 정의 자체를 직접 확인해야 백엔드와 무관하게 회귀를
+    잡아낼 수 있다. String(500)이었을 때는 `.length == 500`이었고, Text로
+    고친 뒤에는 길이 제한 자체가 없다(`.length`가 없거나 None)."""
+    from app.db.models.quiz_question import QuizQuestion
+
+    column_type = QuizQuestion.__table__.c.correct_answer.type
+    assert getattr(column_type, "length", None) is None

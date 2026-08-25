@@ -2369,4 +2369,52 @@
       할 케이스가 500 대신 정상적인 401/403으로 바뀌는 것뿐이라
       `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (89라운드)
+
+- [x] 113. 퀴즈 문항의 `correct_answer` 컬럼만 `String(500)`이라, AI가 500자를
+      넘는 정답을 생성하면 Postgres INSERT 자체가 실패해 처리되지 않은
+      500이 되던 문제 수정 - 서브에이전트에게 rate_limit/cache/health/
+      scheduler/security/tokens/metrics/dependencies, export/rag 서비스
+      로직, models/chat/metrics/health 라우트 등 이번 세션에서 아직 안 본
+      영역과 "스키마 검증이 실제 DB 컬럼 제약과 안 맞는 곳"을 함께 보라고
+      지시했다. `app/db/models/quiz_question.py`를 보면 `question_text`/
+      `explanation`은 `Text`(무제한), `choices`는 `JSON`(무제한)인데
+      `correct_answer`만 `String(500)`으로 남아 있었고, `quiz_service.py`의
+      `_GeneratedQuiz`/`_generate_quiz`는 `correct_answer`가 `choices` 중
+      하나인지만 검증할 뿐 길이는 전혀 보지 않는다. 정답 문자열이
+      우연히(예: 서술형에 가까운 보기, 비영어권 긴 표현 등) 500자를 넘으면
+      `self._questions.create(...)` → `session.commit()`에서 INSERT가
+      실패한다 - `create_quiz`는 이미 세션 삭제 레이스를 위해
+      `except IntegrityError`를 두고 있지만(81/106번 라운드), 로컬 Postgres
+      클러스터를 직접 띄워 재현해보니 이 길이 초과는 asyncpg 방언이
+      `IntegrityError`가 아니라 더 일반적인 `sqlalchemy.exc.DBAPIError`
+      (`orig`는 `asyncpg.exceptions.StringDataRightTruncationError`)로
+      올라와 그 `except`에 전혀 걸리지 않고 그대로 새어나가는 것까지
+      확인했다(실제 사용자/퀴즈/문항 행을 만들어 501자 정답으로 INSERT해
+      정확히 이 예외를 관찰함). `correct_answer`는 결국 `choices` 중
+      하나와 완전히 같아야 하는 값이라 임의로 자르면 채점 로직 자체가
+      깨지므로, 잘라내거나 별도로 예외 처리를 추가하는 대신 형제
+      컬럼들과 마찬가지로 길이 제한 없는 `Text`로 컬럼 타입 자체를
+      맞췄다(alembic 마이그레이션 `089b9a2d134f` 추가, 로컬 Postgres에서
+      upgrade/downgrade/재upgrade 왕복과 실제 501자 INSERT 성공까지
+      확인). 회귀 테스트는 두 가지를 추가했다:
+      `test_quiz_question_correct_answer_column_has_no_length_limit`은
+      모델의 `correct_answer` 컬럼 타입에 길이 제한이 없는지(`.length is
+      None`) 직접 확인하는 테스트로, `git stash`로 모델 수정만 되돌리면
+      정확히 `500 is not None`으로 실패하는 것을 확인했다 - SQLite는
+      `String(500)`이어도 길이를 강제하지 않아, 이 테스트만이 백엔드와
+      무관하게 이 회귀를 실제로 잡아낸다는 점을 테스트 docstring에 그대로
+      남겼다. `test_create_quiz_persists_correct_answer_over_500_chars`는
+      600자 정답으로 퀴즈 생성부터 제출/채점까지 전체 흐름이 값 손실
+      없이 통과하는지 확인하는 통합 테스트이지만, SQLite에서는 수정 전
+      코드로도 통과해버리므로(길이 미강제) 그 사실이 이 테스트가 실제로
+      잡아내는 회귀는 아님을 정직하게 문서화했다 - 실제 크래시/수정 확인은
+      위에서 설명한 로컬 Postgres 재현으로 별도 검증했다. 전체 371개
+      테스트 통과, 전체 커버리지 99%(`quiz_question.py` 100% 유지), mypy
+      클린. `correct_answer` 컬럼 타입 변경이라 alembic 마이그레이션이
+      필요했고(위 확인 완료), API 응답 스키마(`app/schemas/quiz.py`)는
+      애초에 `correct_answer: str`로 길이 제약이 없어 변경이 필요 없었으며
+      클라이언트 관점에서 동작 변화가 없어 `FRONTEND_INTEGRATION.md`
+      갱신도 필요 없었다.
+
 
