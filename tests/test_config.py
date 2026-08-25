@@ -67,3 +67,23 @@ def test_settings_rejects_default_quiz_question_count_over_max():
         Settings(jwt_secret_key="a" * 32, default_quiz_question_count=20, max_quiz_question_count=10)
     assert "DEFAULT_QUIZ_QUESTION_COUNT" in str(exc_info.value)
     assert "MAX_QUIZ_QUESTION_COUNT" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("field", ["chat_rate_limit", "auth_rate_limit", "export_rate_limit"])
+def test_settings_accepts_well_formed_rate_limit_string(field):
+    settings = Settings(jwt_secret_key="a" * 32, **{field: "3/minute"})
+    assert getattr(settings, field) == "3/minute"
+
+
+@pytest.mark.parametrize("field", ["chat_rate_limit", "auth_rate_limit", "export_rate_limit"])
+@pytest.mark.parametrize("bad_value", ["10/min", "", "10", "bogus-rate-limit"])
+def test_settings_rejects_malformed_rate_limit_string(field, bad_value):
+    """`@limiter.limit(lambda: get_settings().xxx_rate_limit)`(HTTP)는 이 문자열
+    파싱이 실패하면 조용히 로그만 남기고 레이트리밋 자체를 건너뛰어(fail-open)
+    브루트포스/DoS 방어가 티도 안 나게 꺼져버리고, `check_rate_limit()`
+    (WebSocket, `core/rate_limit.py`)은 파싱 예외를 전혀 안 잡아서 학습챗/
+    면접복기 스트리밍이 첫 메시지마다 처리되지 않은 예외로 죽어버린다 - "10/min"
+    같은 자연스러운 오타나 빈 문자열이 두 경로 모두에서 실제로 파싱에 실패하는
+    값임을 확인하고, Settings가 이걸 시작 시점에 미리 거부하는지 확인한다."""
+    with pytest.raises(ValidationError):
+        Settings(jwt_secret_key="a" * 32, **{field: bad_value})

@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from limits.util import parse_many
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -138,6 +139,32 @@ class Settings(BaseSettings):
                 f"계속 노출될 수 있어 엄격하게 검증합니다)."
             )
         return normalized
+
+    @field_validator("chat_rate_limit", "auth_rate_limit", "export_rate_limit")
+    @classmethod
+    def _validate_rate_limit_string(cls, value: str) -> str:
+        """`limiter.limit(lambda: get_settings().xxx_rate_limit)`(HTTP)와
+        `check_rate_limit()`(WebSocket, `core/rate_limit.py`)가 이 문자열을 각각
+        요청마다 파싱하는데, 잘못된 값(예: 사람이 자연스럽게 쓰기 쉬운
+        `"10 per minute"`이 아니라 `"10/min"`처럼 지원 안 되는 축약형, 또는
+        빈 문자열)이 들어오면 두 경로가 서로 다른, 둘 다 나쁜 방식으로
+        실패한다 - HTTP 쪽(slowapi)은 파싱 실패를 조용히 로그만 남기고 그
+        요청의 레이트리밋을 그냥 건너뛰어(fail-open) 브루트포스/DoS 방어가
+        티도 안 나게 꺼져버리고, WebSocket 쪽(`check_rate_limit`)은 파싱
+        예외를 전혀 잡지 않아 학습챗/면접복기 스트리밍이 첫 메시지마다
+        처리되지 않은 예외로 죽어버린다(100번 라운드에서 확인한 대로
+        WebSocket 스코프에는 전역 예외 핸들러가 적용되지 않음). 두 경로가
+        실제로 쓰는 것과 같은 파서(`limits.util.parse_many`, slowapi 내부와
+        동일)로 시작 시점에 미리 검증해서, 이 값이 잘못됐다는 걸 요청이
+        들어올 때가 아니라 앱이 뜰 때 바로 알 수 있게 한다."""
+        try:
+            parse_many(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"레이트리밋 문자열이 올바르지 않습니다: {value!r} ({exc}). "
+                '"10/minute"처럼 <횟수>/<단위> 형식이어야 합니다.'
+            ) from exc
+        return value
 
     @model_validator(mode="after")
     def _validate_quiz_question_count_defaults(self) -> "Settings":
