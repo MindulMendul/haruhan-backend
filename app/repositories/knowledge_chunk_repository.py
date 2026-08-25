@@ -75,3 +75,17 @@ class KnowledgeChunkRepository:
                 KnowledgeChunk.source_id == source_id,
             )
         )
+
+    async def delete_for_sources(self, source_type: str, source_ids: list[uuid.UUID]) -> None:
+        """delete_for_source의 배치 버전 - 학습챗/면접연습 세션을 지울 때, 그 세션에
+        속한 메시지/턴 개수만큼 개별 DELETE(+커밋)를 반복하면 오래 쓴(메시지가
+        많이 쌓인) 세션일수록 요청이 느려진다. source_id 목록을 한 번에 IN 절로
+        지운다."""
+        if not source_ids:
+            return
+        await self._session.execute(
+            delete(KnowledgeChunk).where(
+                KnowledgeChunk.source_type == source_type,
+                KnowledgeChunk.source_id.in_(source_ids),
+            )
+        )

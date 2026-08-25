@@ -3127,3 +3127,51 @@
       클린. 순수 인덱스 추가라 `docs/FRONTEND_INTEGRATION.md` 갱신은
       필요 없었다.
 
+## 백로그 (105라운드)
+
+- [x] 129. 학습챗/면접연습 세션을 지울 때 RAG 색인을 지우는 게 메시지/턴
+      개수만큼 개별 `DELETE`+`commit`을 반복하던 N+1 쓰기 패턴 수정.
+      `StudyService.delete_session`/`InterviewPracticeService.delete_session`
+      은 (98라운드에서 "세션을 지워도 RAG 색인이 안 지워지던" 정합성
+      버그를 고치면서 생긴 구조 그대로) 세션에 속한 메시지/턴 id를 먼저
+      모은 뒤, 그 목록을 파이썬 `for` 루프로 돌며 `RagService.forget_content`
+      를 하나씩 호출했다 - `forget_content`는 호출마다 `DELETE`와
+      `session.commit()`을 각각 하나씩 실행하므로, 메시지 100개가 쌓인
+      학습챗 세션을 지우면 그것만으로 DB 왕복이 100번 생기는 구조였다.
+      `max_chat_history_messages`(AI에게 넘길 최근 히스토리 개수)는
+      세션에 저장 가능한 총 메시지 수 자체는 전혀 제한하지 않아, 오래
+      쓴 세션일수록 이 문제가 커진다. `KnowledgeChunkRepository`에
+      `delete_for_sources(source_type, source_ids: list[uuid.UUID])`
+      배치 버전(`IN` 절)을 추가하고, `RagService`에 그걸 감싸는
+      `forget_content_bulk`(빈 리스트면 DB 호출 없이 바로 반환)를
+      추가했다. 두 서비스의 `delete_session` 모두 반복 호출 대신 id
+      리스트를 모아 한 번만 호출하도록 바꿨다 - 끝 결과(색인 전부 삭제)
+      는 그대로라 순수 성능 리팩터링이고, 서비스 계약/응답 형태는
+      전혀 안 바뀌었다.
+
+      끝 결과가 그대로인 리팩터링이라, 회귀 테스트를 "결과가 같은지"로만
+      짜면 `git stash`로 되돌려도 통과해버려 아무것도 증명 못 한다는 걸
+      먼저 확인했다(실제로 시도해봄) - 92/93라운드가 N+1 SELECT를 고칠 때
+      썼던 것과 같은 기법(`before_cursor_execute` 이벤트로 실제 실행되는
+      SQL 문 개수를 직접 셈)을 DELETE 문에 적용해, `knowledge_chunks`
+      DELETE가 메시지/턴 개수와 무관하게 정확히 1번만(IN 절로 묶여서)
+      나가는지 확인하는 방식으로 바꿨다. `git stash`로 리포지토리/서비스
+      수정을 되돌리면 실제로 메시지 2개(대화 2번=청크 4개)에 DELETE가
+      1번이 아니라 4번, 턴 2개엔 3번(첫 질문 색인 포함) 나가는 것까지
+      직접 확인했다. 이 김에 `InterviewPracticeService.delete_session`
+      쪽엔 RAG 정리를 검증하는 테스트가 아예 없었다는 것도 발견해서(기존
+      `test_delete_session_with_answered_turns`는 204만 확인) 새 파일
+      `tests/test_interview_practice_session_delete_rag_cleanup.py`를
+      `test_study_session_delete_rag_cleanup.py`와 대칭으로 만들었다.
+      `delete_for_sources`에 빈 리스트를 주는 안전장치(다른 `list_for_*`
+      류와 같은 관용구)도 직접 호출해 no-op임을 확인하는 테스트를
+      추가했다(커버리지에서 그 분기가 안 걸린 걸 보고 알아챔 -
+      `forget_content_bulk`가 이미 빈 리스트를 걸러줘 리포지토리 메서드
+      자체를 빈 입력으로 직접 부르는 경로가 없었다). 전체 398개 테스트
+      통과, 전체 커버리지 99%(`repositories/knowledge_chunk_repository.py`/
+      `services/rag_service.py`/`services/study_service.py`/
+      `services/interview_practice_service.py` 모두 100%), mypy 클린.
+      응답 형태/타이밍(색인 삭제가 언제 반영되는지)이 전혀 안 바뀐 내부
+      성능 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
+      필요 없었다.
+

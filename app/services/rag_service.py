@@ -120,3 +120,11 @@ class RagService:
         """원본이 삭제될 때 색인도 함께 지운다."""
         await self._chunks.delete_for_source(source_type, source_id)
         await self._session.commit()
+
+    async def forget_content_bulk(self, source_type: str, source_ids: list[uuid.UUID]) -> None:
+        """forget_content의 배치 버전 - 세션/연습 하나를 지울 때 그 안의 메시지/턴
+        전부를 한 번의 DELETE+commit으로 처리한다(호출부마다 반복 호출하지 않도록)."""
+        if not source_ids:
+            return
+        await self._chunks.delete_for_sources(source_type, source_ids)
+        await self._session.commit()

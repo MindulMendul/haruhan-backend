@@ -170,8 +170,9 @@ class InterviewPracticeService:
         turns = await self._turns.list_for_session(session_id)
         await self._sessions.delete(practice_session)
         await self._session.commit()
-        for turn in turns:
-            await self._rag.forget_content(source_type="interview_practice_turn", source_id=turn.id)
+        await self._rag.forget_content_bulk(
+            source_type="interview_practice_turn", source_ids=[turn.id for turn in turns]
+        )
 
     async def submit_answer(
         self, session_id: uuid.UUID, user_id: uuid.UUID, answer: str

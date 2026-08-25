@@ -97,8 +97,9 @@ class StudyService:
         messages = await self._messages.list_for_session(session_id)
         await self._sessions.delete(study_session)
         await self._session.commit()
-        for message in messages:
-            await self._rag.forget_content(source_type="study_message", source_id=message.id)
+        await self._rag.forget_content_bulk(
+            source_type="study_message", source_ids=[message.id for message in messages]
+        )
 
     async def send_message(
         self, session_id: uuid.UUID, user_id: uuid.UUID, content: str
