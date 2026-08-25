@@ -2759,4 +2759,55 @@
       장애 중에도 WebSocket이 REST처럼 계속 제한된다"는 것뿐이라
       `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (97라운드)
+
+- [x] 121. 모델 목록 API(`GET /models`)에 레이트리밋이 전혀 없고, 캐시가 막
+      만료된 순간 동시에 온 요청들이 락 없이 각자 독립적으로 Ollama를
+      호출하던 문제 수정 - 8라운드 가까이 "남은 후보 중 그나마 나은 것"으로
+      계속 뒤로 밀렸던 항목인데, 이번엔 서브에이전트에게 "아직 안 읽어본
+      파일 목록에 이름만 올리지 말고 실제로 읽으라"고 지시해서
+      `core/cache.py`/`core/scheduler.py`/`core/security.py`/
+      `core/dependencies.py`/`db/session.py`/`export_service.py`/
+      `rag_backfill_service.py`/`chat.py`/면접복기 WebSocket 라우트를
+      전부 훑었지만 더 심각한 새 문제는 없었고, 결국 계속 밀려온 이
+      항목이 여전히 최선이라는 걸 재확인한 뒤 골랐다. `/models`는 민감
+      정보가 아니라 의도적으로 인증 없이 공개돼 있는데(코드 주석에
+      명시), 이 앱에서 유일하게 인증이 없는 만큼 익명 호출자를 막을
+      다른 수단이 레이트리밋뿐이었다 - 그런데 그것마저 전혀 없었다.
+      60초 `TTLCache`가 있어 대부분은 막히지만, (a) 캐시가 있어도 반복
+      호출 자체를 막지는 못하고 (b) `TTLCache.get`/`set`엔 락이 없어서
+      캐시가 막 만료된 순간 동시에 들어온 요청들은 전부 캐시 미스를
+      겪어 각자 독립적으로 `ollama_service.list_models()`를 호출한다
+      (캐시가 있는 의미가 없어지는 몰림) - 두 구멍 다 이 60초 캐시를
+      사실상 무력화할 수 있었다. 다른 레이트리밋들(`chat_rate_limit`/
+      `auth_rate_limit`/`export_rate_limit`)과 같은 패턴으로
+      `models_rate_limit`(기본 30/minute - LLM 호출이 아니라 캐시된
+      목록 조회라 `chat_rate_limit`보다 넉넉하게 잡음) 설정을 추가하고
+      기존 검증기에 함께 등록했다. 캐시 미스 몰림은 `asyncio.Lock`으로
+      막았다 - 캐시가 비어있으면 락을 잡고, 락을 얻은 뒤 다시 한번
+      캐시를 확인해(락을 기다리는 동안 다른 요청이 이미 채워놨을 수
+      있음) 그래도 비어있을 때만 실제로 Ollama를 부르고 채운다. 레이트
+      리밋 데코레이터/`Request`/`Response` 배선 없이 이 캐시/락 동작만
+      직접 테스트할 수 있도록 `_get_or_fetch_models()`로 로직을
+      분리했다(부수적으로, 라우트 안에서 `Response`(FastAPI 파라미터)와
+      이름이 겹치던 지역 변수 `response`(캐시에 넣을
+      `OllamaModelListResponse`)도 이번에 갈라놔 헷갈림을 없앴다 -
+      slowapi가 헤더 주입 시 함수 반환값이 아니라 원래 kwargs에서
+      `response`를 다시 꺼내 쓰는 구조라 실제 버그는 아니었지만
+      가독성 문제였다). 회귀 테스트는 두 가지: `test_list_models_is_
+      rate_limited`(다른 라우트들의 레이트리밋 테스트와 같은 패턴,
+      `MODELS_RATE_LIMIT=2/minute`로 세 번째 호출이 429인지 확인)와
+      `test_get_or_fetch_models_coalesces_concurrent_cache_misses`
+      (`_get_or_fetch_models`를 5개 동시에 `asyncio.gather`로 호출해도
+      실제 Ollama 호출은 정확히 1번만 일어나는지 확인, 겹칠 시간을
+      벌기 위해 가짜 Ollama 서비스에 짧은 `asyncio.sleep` 포함) - `git
+      stash`로 라우트/설정 수정만 되돌리면 첫 번째 테스트는 세 번째
+      호출도 200이 나와서, 두 번째 테스트는 `_get_or_fetch_models`가
+      없어 `ImportError`로 정확히 실패하는 것까지 확인했다. 전체 382개
+      테스트 통과, 전체 커버리지 99%(`routes/models.py`/`config.py`
+      모두 100% 유지), mypy 클린. 새 설정값(기본값 있음, `.env.example`
+      에도 추가) 추가와 순수 방어 로직이라 모델/마이그레이션은 필요
+      없었고, 정상적인 사용 패턴(캐시 안에서의 반복 조회)은 그대로라
+      `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
 

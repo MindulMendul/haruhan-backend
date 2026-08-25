@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # 부하)로 별도로 분리해둔다.
     export_rate_limit: str = "10/minute"
 
+    # 모델 목록 조회(/models)용 제한. 이 앱에서 인증 없이 공개된 유일한 엔드포인트라
+    # (민감 정보가 아니라 의도적으로 그렇게 둠) 레이트리밋이 아예 없으면 익명
+    # 호출자가 원하는 만큼 반복 호출할 수 있다 - 대부분은 60초 TTL 캐시로
+    # 막히지만, 캐시가 막 만료된 순간 동시에 들어온 요청들은 각자 Ollama를
+    # 직접 호출한다(캐시 미스 몰림). LLM 호출 자체가 아니라 목록 조회일
+    # 뿐이라 chat_rate_limit보다는 넉넉하게 잡는다.
+    models_rate_limit: str = "30/minute"
+
     # 요청 바디 최대 크기 (바이트). 기본 1MB.
     max_body_size_bytes: int = 1_048_576
 
@@ -156,7 +164,7 @@ class Settings(BaseSettings):
             )
         return normalized
 
-    @field_validator("chat_rate_limit", "auth_rate_limit", "export_rate_limit")
+    @field_validator("chat_rate_limit", "auth_rate_limit", "export_rate_limit", "models_rate_limit")
     @classmethod
     def _validate_rate_limit_string(cls, value: str) -> str:
         """`limiter.limit(lambda: get_settings().xxx_rate_limit)`(HTTP)와
