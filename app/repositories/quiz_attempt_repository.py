@@ -18,10 +18,13 @@ class QuizAttemptRepository:
         return attempt
 
     async def get_latest_for_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> QuizAttempt | None:
+        """submitted_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상
+        정의되어 있지 않다 - id를 2차 정렬 기준으로 추가해 동률을 항상 같은
+        순서로 결정론적으로 깨지도록 한다(list_for_quiz와 같은 이유)."""
         result = await self._session.execute(
             select(QuizAttempt)
             .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_id)
-            .order_by(QuizAttempt.submitted_at.desc())
+            .order_by(QuizAttempt.submitted_at.desc(), QuizAttempt.id.desc())
         )
         return result.scalars().first()
 

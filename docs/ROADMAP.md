@@ -2940,4 +2940,40 @@
       `1013`을 받을 수 있다는 점만 추가된 순수 확장 변경이라
       마이그레이션은 필요 없었다.
 
+## 백로그 (100라운드)
+
+- [x] 124. `QuizAttemptRepository.get_latest_for_quiz`(퀴즈 재제출 결과 조회
+      `GET /quizzes/{id}/result`와 재제출 중복 감지의 기준점)만 `submitted_at`
+      2차 정렬 기준 없이 `.scalars().first()`로 "최신 시도"를 고르던 문제
+      수정. 바로 아래 `list_for_quiz`는 "submitted_at만으로 정렬하면 값이
+      같은 행 사이의 순서가 SQL 표준상 정의되어 있지 않다"는 이유로 이미
+      `id.desc()`를 2차 정렬 기준으로 쓰고 있었고, `QuizAttempt` 모델의
+      `submitted_at` 필드 자체에도 "SQLite의 CURRENT_TIMESTAMP는 초 단위라
+      같은 퀴즈를 짧은 간격으로 다시 제출하면 최신 제출을 구분 못 하는
+      문제가 실제로 재현됐다"는 주석이 남아 있었다(그래서 마이크로초
+      정밀도의 파이썬 쪽 기본값으로 바뀐 이력이 있음) - 그런데 정작
+      `get_latest_for_quiz`만 이 동률 처리를 빠뜨리고 있었다. grep으로
+      확인해보니 이 코드베이스에서 유일하게 `.scalars().first()`로 "최신
+      1건"을 고르는 곳이기도 했다. 영향은 두 곳: `QuizService.get_latest_result`
+      가 보여주는 문항별 정답 여부가 목록(`list_for_quiz`)의 1등 항목과
+      다른 시도를 가리킬 수 있고, `_find_recent_duplicate_attempt`(재제출
+      중복 감지 - 22라운드에서 만든 아이덴포턴시 보장)도 엉뚱한 "최신
+      시도"와 비교하게 될 수 있었다. `list_for_quiz`와 똑같이
+      `.order_by(QuizAttempt.submitted_at.desc(), QuizAttempt.id.desc())`
+      로 맞췄다. 회귀 테스트(`test_quiz_submission_dedup.py`에
+      `test_get_latest_for_quiz_breaks_submitted_at_ties_by_id`)는
+      94라운드에서 확립한 "직접 모델 행을 구성해 동률 타임스탬프를
+      강제로 만드는" 기법을 그대로 썼다 - 리포지토리의 `create()`를
+      거치지 않고 `QuizAttempt` 두 개를 완전히 같은 `submitted_at`으로
+      직접 만들어 저장한 뒤, `get_latest_for_quiz`가 고른 시도가
+      `list_for_quiz`의 1등 항목과 항상 일치하는지(그리고 둘 다 `id`가
+      더 큰 쪽을 고르는지) 확인한다. `git stash`로 리포지토리 수정만
+      되돌리면 이 테스트가 정확히 실패하는 것까지 확인했다(SQLite가
+      명시적 정렬 없이는 삽입 순서로 반환해, 수정 전 코드는 `id`가 더
+      작은 쪽을 "최신"으로 잘못 골랐다). 전체 389개 테스트 통과, 전체
+      커버리지 99%(`quiz_attempt_repository.py` 100% 유지), mypy 클린.
+      정렬 기준만 바뀐 순수 내부 수정이라 API 응답 형태나
+      `docs/FRONTEND_INTEGRATION.md`에 영향이 없고, 마이그레이션도
+      필요 없었다.
+
 
