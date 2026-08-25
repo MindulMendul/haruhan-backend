@@ -29,7 +29,21 @@ class MaxBodySizeMiddleware:
 
         headers = dict(scope.get("headers") or [])
         content_length = headers.get(b"content-length")
-        if content_length is not None and int(content_length) > self.max_body_size:
+        parsed_content_length: int | None = None
+        if content_length is not None:
+            try:
+                parsed_content_length = int(content_length)
+            except ValueError:
+                # 헤더 자체가 숫자가 아니면(오타, 스캐너/프록시의 이상한 값 등)
+                # 크기를 알 수 없는 것으로 취급한다 - chunked 요청처럼 이
+                # 미들웨어가 애초에 못 막는 경우와 같은 취급이다. 그냥
+                # int()를 부르면 처리되지 않은 ValueError가 이 미들웨어
+                # (ASGI 계층, FastAPI 라우팅/예외 핸들러보다 바깥)를 뚫고 나가
+                # main.py의 전역 핸들러까지 올라가 방어 목적의 미들웨어 자체가
+                # 아무 malformed 헤더에나 500을 만들어내는 원인이 됐다.
+                parsed_content_length = None
+
+        if parsed_content_length is not None and parsed_content_length > self.max_body_size:
             # 이 미들웨어는 FastAPI 라우팅/예외 핸들러 바깥(ASGI 계층)에서 직접
             # 응답을 만들기 때문에, app.core.errors의 HTTPException 핸들러를
             # 거치지 않는다 - 그래서 나머지 모든 에러와 같은 {"error": {"code",

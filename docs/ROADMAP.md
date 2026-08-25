@@ -2284,4 +2284,38 @@
       변경이나 마이그레이션은 필요 없었고, 클라이언트가 보내는 요청/응답
       형태는 그대로라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (87라운드)
+
+- [x] 111. 대용량 payload를 막으려고 만든 `MaxBodySizeMiddleware`가, 숫자가
+      아닌 `Content-Length` 헤더 하나로 오히려 모든 요청을 처리되지 않은
+      예외(500)로 죽일 수 있던 문제 수정 - 84~86번 라운드가 연달아
+      `Settings` 검증만 팠던 걸 감안해, 이번엔 서브에이전트에게 완전히
+      다른 영역을 보라고 지시했다. `core/middleware.py`의
+      `MaxBodySizeMiddleware.__call__`은 `int(content_length)`를 예외
+      처리 없이 그대로 호출하는데, 이 미들웨어는 FastAPI 라우팅/예외
+      핸들러보다 바깥(ASGI 계층)에 등록돼 있어서(`app.add_middleware`로
+      전체를 감싸는 가장 바깥쪽) 앱의 `HTTPException`/`RequestValidationError`
+      핸들러를 아예 거치지 못하고, `ValueError`가 곧바로 `main.py`의 전역
+      `Exception` 핸들러까지 올라가 `500 {"code": "internal_error"}`로
+      끝난다. `Content-Length: abc`처럼 숫자가 아니거나 빈 헤더 하나만
+      보내면(스캐너, 프록시, 단순 오타 등으로 실제로 흔히 생김) *어떤
+      라우트든* 이 500을 유발할 수 있었다 - 대용량 payload로부터 방어하려는
+      미들웨어 자신이 사소한 malformed 헤더 하나에 모든 요청을 죽이는
+      더 큰 문제를 만드는 셈이었고, 클라이언트 잘못인데도 상태 코드는
+      "서버 버그"로 잘못 분류되며 에러 로그에도 "처리되지 않은 예외"로
+      잘못 잡혔다. 이 미들웨어 자신의 docstring이 이미 "Content-Length가
+      없는 chunked 요청까지는 못 막는다"고 인정하고 있어서, 파싱 실패도
+      같은 취급(크기를 알 수 없는 것으로 보고 통과시킴)으로 처리하도록
+      고쳤다 - 이 미들웨어의 목적(대용량 차단)과 무관한 요청을 새로
+      거부하는 대신, 이미 문서화된 한계를 하나 더 추가하는 선에서
+      범위를 좁게 유지했다. `Content-Length: abc`를 보내는 요청이 500
+      대신 정상 처리되는지 확인하는 테스트를 추가했고, 수정 전 코드에서
+      실제로 `ValueError: invalid literal for int()...`가 그대로 새어나와
+      500이 되는 것까지 확인한 뒤(`git stash`로 수정 부분만 되돌렸다가
+      복원) 다시 적용했다. 전체 367개 테스트 통과, 전체 커버리지 99%,
+      mypy 클린(`middleware.py` 100% 유지). 순수 미들웨어 계층 파싱 방어
+      추가라 모델/스키마 변경이나 마이그레이션은 필요 없었고, 정상
+      요청의 동작은 그대로라 `FRONTEND_INTEGRATION.md` 갱신도 필요
+      없었다.
+
 
