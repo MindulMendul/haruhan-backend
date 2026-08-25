@@ -2810,4 +2810,58 @@
       없었고, 정상적인 사용 패턴(캐시 안에서의 반복 조회)은 그대로라
       `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (98라운드)
+
+- [x] 122. 활성 세션 목록 API(`GET /auth/sessions`)에만 레이트리밋이 없고
+      페이지네이션도 없어, 반복 로그인할수록 응답이 무한정 커지던 문제
+      수정 - 서브에이전트가 처음 제시한 최우선 후보는 사실
+      `GET /study/sessions/{id}`의 메시지 히스토리 페이지네이션이었는데,
+      이건 94번 라운드가 이미 "단일 리소스 상세 조회는 하위 항목 전체를
+      반환한다"는 이 코드베이스의 일관된 설계(퀴즈 문항/면접연습 turns도
+      동일)라고 판단해 의도적으로 보류한 항목이었다 - 이번 라운드의
+      서브에이전트 프롬프트에서 그 보류 이력을 실수로 빼먹어 다시 후보로
+      나온 것이었다. 직접 `docs/FRONTEND_INTEGRATION.md`를 확인해보니
+      "GET /study/sessions/{id}로 조회되는 전체 메시지 히스토리 자체는
+      그대로 다 보존된다"는 문구로 이미 프론트에 공개 문서화된 계약이라,
+      지금 페이지네이션을 넣으면 기존 계약을 깨는 하위 호환성 문제까지
+      생긴다고 판단해 재차 보류하고, 서브에이전트의 2순위 후보였던 이
+      항목을 대신 골랐다. `app/api/v1/routes/auth.py`를 보면
+      `signup`/`login`/`guest`/`refresh`/`logout`/`revoke_session`/
+      `revoke_all_sessions` 전부 `@limiter.limit(auth_rate_limit)`이
+      걸려 있는데 `list_sessions`(`GET /auth/sessions`)만 빠져 있었다.
+      로그인은 매번 새 refresh token을 발급하고 명시적으로 로그아웃하기
+      전까지는 폐기되지 않는(여러 기기 동시 로그인 지원을 위한 설계)
+      구조라, `AUTH_RATE_LIMIT`(기본 분당 5회) 한도로 반복 로그인하면
+      `REFRESH_TOKEN_EXPIRE_DAYS`(기본 14일) 동안 활성 세션이 계속
+      쌓이는데, 그걸 페이지네이션 없이 한 번에 반환하는 이 엔드포인트
+      자체엔 반복 호출을 막을 제한도 전혀 없었다 - 이 계정 자체에만
+      영향을 주는(자해성) 문제라 QuizDetailResponse류와 달리 심각도는
+      낮지만, 92/93번 라운드가 이미 두 번 고친 것과 정확히 같은
+      "형제 목록 API만 페이지네이션이 빠짐" 패턴이라 근거가 명확했다.
+      `RefreshTokenRepository.list_active_for_user`가 `limit`/`offset`을
+      받고(다른 목록들처럼 `created_at`이 같은 행의 순서가 흔들리지
+      않도록 `id`를 2차 정렬 기준으로 추가) `count_active_for_user`를
+      새로 만들었고, `AuthService.list_active_sessions`이
+      `(sessions, total)`을 반환하도록 바꿨다. 라우트도 다른
+      `/auth/*`와 동일하게 `@limiter.limit(auth_rate_limit)`을 추가하고
+      `Query(default=20, ge=1, le=100)`/`Query(default=0, ge=0)`를 받아
+      `X-Total-Count` 헤더를 채우도록 맞췄다. 회귀 테스트는
+      `test_list_sessions_pagination`(로그인 3회로 활성 세션 4개를
+      만든 뒤 `limit`/`offset`/`X-Total-Count`가 실제로 동작하고 페이지
+      간 항목이 겹치지 않는지 확인)과 `test_list_sessions_is_rate_limited`
+      (다른 라우트들의 레이트리밋 테스트와 같은 패턴, `AUTH_RATE_LIMIT=
+      2/minute`로 세 번째 호출이 429인지 확인)를 추가했다 - `git stash`
+      로 리포지토리/서비스/라우트 수정만 되돌리면 두 테스트 모두 정확히
+      실패하는 것까지 확인했다(테스트 헬퍼에서 구식 시그니처로
+      `list_active_for_user`를 직접 호출하던 기존 동시성 테스트 하나도
+      `limit=20, offset=0`을 추가해 갱신). `docs/FRONTEND_INTEGRATION.md`
+      의 세션 관리 절에 페이지네이션/레이트리밋 설명을 추가했다(여기는
+      기존에 "전체 반환" 계약이 문서화돼 있지 않았으므로 하위 호환성
+      문제가 없다). 전체 384개 테스트 통과, 전체 커버리지 99%
+      (`refresh_token_repository.py`/`routes/auth.py` 모두 100% 유지,
+      `auth_service.py`의 유일한 미커버 라인은 이 라운드와 무관한 기존
+      방어적 분기), mypy 클린. 응답 형태가 그대로고 새 쿼리 파라미터는
+      전부 기본값이 있어 기존 호출도 그대로 동작하는 하위 호환 변경이라
+      마이그레이션은 필요 없었다.
+
 

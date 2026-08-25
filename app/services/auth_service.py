@@ -150,13 +150,17 @@ class AuthService:
             await self._refresh_tokens.revoke(stored)
         await self._session.commit()
 
-    async def list_active_sessions(self, user_id: uuid.UUID) -> list[RefreshToken]:
+    async def list_active_sessions(
+        self, user_id: uuid.UUID, limit: int, offset: int
+    ) -> tuple[list[RefreshToken], int]:
         """현재 로그인 상태인(폐기되지 않고 만료되지 않은) refresh token 목록을
         "세션"으로 노출한다. 이 API는 access token으로 인증하므로, 지금 요청을
         보내는 클라이언트 자신이 어느 세션에 해당하는지는 알 수 없다 - RefreshToken이
         발급 당시의 access token과 연결되어 있지 않기 때문이다. 그래도 활성 세션
         개수 확인과 특정/전체 세션 강제 로그아웃에는 충분히 유용하다."""
-        return await self._refresh_tokens.list_active_for_user(user_id)
+        sessions = await self._refresh_tokens.list_active_for_user(user_id, limit=limit, offset=offset)
+        total = await self._refresh_tokens.count_active_for_user(user_id)
+        return sessions, total
 
     async def revoke_session(self, user_id: uuid.UUID, session_id: uuid.UUID) -> None:
         token = await self._refresh_tokens.get_active_by_id_for_user(session_id, user_id)

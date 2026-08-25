@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -83,14 +83,20 @@ async def logout(
 
 
 @router.get("/sessions", response_model=list[SessionResponse])
+@limiter.limit(lambda: get_settings().auth_rate_limit)
 async def list_sessions(
+    request: Request,
+    response: Response,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     auth_service: AuthService = Depends(get_auth_service),
 ) -> list[SessionResponse]:
     """현재 활성화된(폐기/만료되지 않은) refresh token 목록을 "세션"으로 보여준다.
     access token으로 인증하므로 지금 이 요청 자체가 어느 세션에 해당하는지는
     알 수 없다 - 세션 개수 확인, 특정/전체 세션 강제 로그아웃 용도로 쓴다."""
-    sessions = await auth_service.list_active_sessions(current_user.id)
+    sessions, total = await auth_service.list_active_sessions(current_user.id, limit=limit, offset=offset)
+    response.headers["X-Total-Count"] = str(total)
     return [SessionResponse.model_validate(s) for s in sessions]
 
 

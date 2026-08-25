@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
@@ -22,7 +22,19 @@ class RefreshTokenRepository:
         result = await self._session.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
         return result.scalar_one_or_none()
 
-    async def list_active_for_user(self, user_id: uuid.UUID) -> list[RefreshToken]:
+    async def list_active_for_user(
+        self, user_id: uuid.UUID, limit: int, offset: int
+    ) -> list[RefreshToken]:
+        """로그인할 때마다 새 refresh token이 발급되고 명시적으로 로그아웃하지
+        않는 한 폐기되지 않는다(여러 기기 동시 로그인을 지원하기 위한 설계) -
+        같은 계정으로 반복 로그인하면(자동화된 스크립트든 잦은 재로그인이든)
+        `refresh_token_expire_days`(기본 14일) 동안은 활성 세션이 계속
+        쌓인다. list_quizzes 등 다른 목록 API와 동일하게 limit/offset을 받는다.
+
+        created_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상
+        정의돼 있지 않다 - id를 2차 정렬 기준으로 추가해 페이지 경계가
+        흔들리지 않게 한다.
+        """
         now = utcnow_naive()
         result = await self._session.execute(
             select(RefreshToken)
@@ -31,9 +43,24 @@ class RefreshTokenRepository:
                 RefreshToken.revoked_at.is_(None),
                 RefreshToken.expires_at > now,
             )
-            .order_by(RefreshToken.created_at.desc())
+            .order_by(RefreshToken.created_at.desc(), RefreshToken.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def count_active_for_user(self, user_id: uuid.UUID) -> int:
+        now = utcnow_naive()
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(RefreshToken)
+            .where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.expires_at > now,
+            )
+        )
+        return result.scalar_one()
 
     async def get_active_by_id_for_user(self, token_id: uuid.UUID, user_id: uuid.UUID) -> RefreshToken | None:
         now = utcnow_naive()

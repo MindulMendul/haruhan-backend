@@ -188,7 +188,9 @@ def test_concurrent_refresh_of_same_token_is_detected_and_revokes_all_sessions(
             except HTTPException as exc:
                 caught = exc
 
-            remaining = await RefreshTokenRepository(session).list_active_for_user(user.id)
+            remaining = await RefreshTokenRepository(session).list_active_for_user(
+                user.id, limit=20, offset=0
+            )
             return caught, remaining
 
     caught, remaining = asyncio.run(_run())
@@ -527,3 +529,50 @@ def test_signup_and_login_hash_and_verify_password_off_the_event_loop_thread(
             assert all(t is not main_thread for t in call_threads)
 
     asyncio.run(_run())
+
+
+def test_list_sessions_pagination(client):
+    """로그인할 때마다 새 refresh token이 발급되고 명시적으로 로그아웃하지
+    않는 한 폐기되지 않는다(여러 기기 동시 로그인 지원) - 같은 계정으로 반복
+    로그인하면 활성 세션이 계속 쌓인다. list_quizzes 등 다른 목록 API와
+    동일하게 limit/offset을 받고 X-Total-Count로 총 개수를 알려줘야 한다."""
+    email = "sessions-pagination@example.com"
+    password = "supersecret"
+    signup = client.post("/api/v1/auth/signup", json={"email": email, "password": password})
+    assert signup.status_code == 201
+    headers = {"Authorization": f"Bearer {signup.json()['access_token']}"}
+
+    # signup 자체가 이미 세션 1개를 만들었으니, 로그인 3번을 더해 총 4개로 만든다.
+    for _ in range(3):
+        login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+        assert login.status_code == 200
+
+    first_page = client.get("/api/v1/auth/sessions?limit=2&offset=0", headers=headers)
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert first_page.headers["X-Total-Count"] == "4"
+
+    second_page = client.get("/api/v1/auth/sessions?limit=2&offset=2", headers=headers)
+    assert len(second_page.json()) == 2
+
+    first_ids = {s["id"] for s in first_page.json()}
+    second_ids = {s["id"] for s in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_list_sessions_is_rate_limited(client, monkeypatch):
+    """다른 /auth/* 라우트(signup/login/refresh/logout/revoke_session/
+    revoke_all_sessions)는 전부 @limiter.limit()이 걸려 있는데
+    GET /sessions만 레이트리밋이 전혀 없었다."""
+    monkeypatch.setenv("AUTH_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+    tokens = _signup_and_get_tokens(client, email="sessions-ratelimit@example.com")
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    first = client.get("/api/v1/auth/sessions", headers=headers)
+    second = client.get("/api/v1/auth/sessions", headers=headers)
+    third = client.get("/api/v1/auth/sessions", headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 429
