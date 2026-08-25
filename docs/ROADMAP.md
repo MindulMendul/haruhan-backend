@@ -3093,3 +3093,37 @@
       응답 형태는 그대로고 내부 정렬/타임스탬프 정밀도만 바뀐 변경이라
       `docs/FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
 
+## 백로그 (104라운드)
+
+- [x] 128. `knowledge_chunks` 테이블에 `(user_id, embedding_model, created_at)`
+      복합 인덱스 추가. `KnowledgeChunkRepository.list_for_user`(학습챗/
+      면접연습 매 턴마다 RAG 검색 시 호출되는 핫 패스)가 정확히 이 세
+      컬럼으로 필터(`user_id`, `embedding_model`)하고 정렬(`created_at`)
+      하는데, 지금까지는 `user_id` 단일 컬럼 인덱스만 있었다. 이 테이블은
+      만료/정리 로직이 없어 계정이 오래될수록 계속 쌓이기만 한다는 걸
+      리포지토리 자체 주석도 이미 인지하고 있던 상태(95라운드에서
+      `rag_max_candidate_chunks`라는 안전장치를 넣은 이유이기도 함) - 단일
+      컬럼 인덱스만으로는 `embedding_model` 필터링과 정렬을 인덱스 스캔
+      이후에 처리해야 해서, 계정이 커질수록 이 조회부터 먼저 느려질
+      후보였다. 개인/소규모 사용 스케일에서는 지금 당장 체감될 문제는
+      아니지만, 인덱스 하나 추가하는 값싼 사전 대응이라 지금 처리했다.
+      `KnowledgeChunk` 모델에 `Index("ix_knowledge_chunks_user_id_embedding_model_created_at",
+      "user_id", "embedding_model", "created_at")`를 `__table_args__`로
+      추가하고, 로컬 Postgres 16 클러스터에 연결해 `alembic revision
+      --autogenerate`로 마이그레이션을 생성했다 - 자동 생성된 내용이
+      의도한 인덱스 추가 하나뿐인지 확인했고, `alembic upgrade head` →
+      `downgrade -1` → `upgrade head`로 업/다운그레이드 왕복이 깨끗하게
+      되는 것도 확인했다. 적용 후 다시 `--autogenerate`를 돌려 빈
+      마이그레이션(변경사항 없음)이 나오는지로 모델과 실제 스키마 사이에
+      드리프트가 없는지도 검증했다(빈 마이그레이션 파일은 확인 후 삭제).
+      인덱스만 추가하는 순수 성능 변경이라 리포지토리/서비스/라우트
+      코드는 건드리지 않았고, 응답 형태에도 전혀 영향이 없어 회귀
+      테스트는 기존 RAG 관련 테스트들이 여전히 통과하는 것으로 충분하다고
+      판단했다(쿼리 결과 자체는 안 바뀌고 실행 계획만 바뀌는 변경이라
+      SQLite 테스트 DB로는 인덱스 사용 여부 자체를 검증할 수 없다 -
+      Postgres에서 마이그레이션 적용/드리프트 없음까지 확인한 것으로
+      갈음). 전체 394개 테스트 통과, 전체 커버리지 99%(`db/models/knowledge_chunk.py`/
+      `repositories/knowledge_chunk_repository.py` 모두 100% 유지), mypy
+      클린. 순수 인덱스 추가라 `docs/FRONTEND_INTEGRATION.md` 갱신은
+      필요 없었다.
+

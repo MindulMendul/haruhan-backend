@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, Uuid, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -15,6 +15,19 @@ class KnowledgeChunk(Base):
     """
 
     __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        # KnowledgeChunkRepository.list_for_user(학습챗/면접연습 매 턴마다 RAG 검색 시
+        # 호출됨)이 정확히 이 세 컬럼으로 필터/정렬한다. 이 테이블은 만료/정리 로직이
+        # 없어 계정이 오래될수록 계속 쌓이기만 하므로, 단일 컬럼 인덱스(user_id)만으로는
+        # embedding_model 필터링과 정렬을 인덱스 스캔 이후에 처리해야 해서 계정이 커질수록
+        # 이 조회가 먼저 느려질 후보였다.
+        Index(
+            "ix_knowledge_chunks_user_id_embedding_model_created_at",
+            "user_id",
+            "embedding_model",
+            "created_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
