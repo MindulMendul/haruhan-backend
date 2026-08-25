@@ -62,12 +62,14 @@ def test_validation_error_details_do_not_leak_raw_input(client):
     assert '"input"' not in response.text
 
 
-def test_ollama_service_error_returns_internal_error_code(client):
-    """/api/v1/chat 라우트가 OllamaServiceError를 명시적으로 잡아 HTTPException(500,
+def test_ollama_service_error_returns_bad_gateway_code(client):
+    """/api/v1/chat 라우트가 OllamaServiceError를 명시적으로 잡아 HTTPException(502,
     detail=str(exc))로 바꾸는 경로 - 문자열 detail이라 상태코드 기반 기본
-    code(internal_error)로 떨어진다. app.main의 전역 catch-all
-    (@app.exception_handler(Exception))과는 다른 경로다 - 그건 아래
-    test_truly_unhandled_exception_hits_global_catch_all이 검증한다."""
+    code(bad_gateway)로 떨어진다. study_service 등 다른 Ollama 호출부와
+    동일하게 업스트림 AI 엔진 장애를 502로 통일한다(우리 서버 버그인 500과
+    구분). app.main의 전역 catch-all(@app.exception_handler(Exception))과는
+    다른 경로다 - 그건 아래 test_truly_unhandled_exception_hits_global_catch_all이
+    검증한다."""
 
     class FailingOllamaService:
         async def generate(self, prompt, model):
@@ -76,9 +78,9 @@ def test_ollama_service_error_returns_internal_error_code(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
     response = client.post("/api/v1/chat", json={"prompt": "hello"})
 
-    assert response.status_code == 500
+    assert response.status_code == 502
     body = response.json()
-    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["code"] == "bad_gateway"
 
 
 def test_truly_unhandled_exception_hits_global_catch_all():

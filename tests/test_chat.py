@@ -30,10 +30,10 @@ def test_chat_success():
     assert response.json() == {"result": "echo: hello"}
 
 
-def test_chat_upstream_failure_returns_500():
+def test_chat_upstream_failure_returns_502():
     with _client_with_fake_service(lambda: FailingOllamaService()) as client:
         response = client.post("/api/v1/chat", json={"prompt": "hello"})
-    assert response.status_code == 500
+    assert response.status_code == 502
 
 
 def test_chat_rejects_empty_prompt():

@@ -2976,4 +2976,34 @@
       `docs/FRONTEND_INTEGRATION.md`에 영향이 없고, 마이그레이션도
       필요 없었다.
 
+## 백로그 (101라운드)
+
+- [x] 125. 범용 Ollama 프록시 `POST /api/v1/chat`만 `OllamaServiceError`를
+      500(우리 서버 버그)으로 응답하던 문제 수정. `study_service.py`에는
+      "`quiz_service`/`interview_practice_service`/`interview_review_service`
+      는 전부 Ollama 호출 실패를 502(우리 서버가 아니라 업스트림 AI 엔진의
+      문제)로 응답하는데, 이 서비스만 500으로 응답하고 있었다"는 이력이
+      남긴 주석이 이미 있었다 - 그 이전 라운드가 서비스 계층의 4곳은
+      전부 502로 통일했지만, 딱 하나 `chat.py`만은 서비스 계층을 거치지
+      않고 라우트에서 직접 `OllamaServiceError`를 잡아 처리하는 구조라
+      그 스윕에서 빠져 있었다(`routes/models.py`는 이미 502로 맞게
+      돼 있는 것도 확인함). 같은 실패 원인인데 라우트마다 다른 상태
+      코드가 나가면, 상태 코드로 분기하는 프론트가 이 엔드포인트의
+      AI 엔진 장애를 "우리 서버 버그"로 잘못 분류하게 된다.
+      `HTTPException(status_code=500, ...)`을
+      `HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, ...)`로
+      바꿨다. `tests/test_chat.py::test_chat_upstream_failure_returns_500`
+      을 `test_chat_upstream_failure_returns_502`로 바꿔 새 기대값을
+      고정했고, `git stash`로 라우트 수정만 되돌리면 이 테스트가
+      정확히 실패하는 것까지 확인했다. 부수적으로
+      `tests/test_error_format.py::test_ollama_service_error_returns_internal_error_code`
+      도 status→code 매핑 검증이라 함께 걸렸는데(500→`internal_error`
+      매핑을 확인하던 테스트가 이제 502→`bad_gateway`가 맞음), 이름과
+      기대값을 `test_ollama_service_error_returns_bad_gateway_code`로
+      갱신했다 - 이 엔드포인트는 "우리 서버 프로토타입용이라 신규 연동
+      비추천"이라고만 문서화돼 있고 구체적인 실패 상태 코드는 원래
+      `docs/FRONTEND_INTEGRATION.md`에 없어서 문서 갱신은 필요 없었다.
+      전체 389개 테스트 통과, 전체 커버리지 99%(`routes/chat.py` 100%
+      유지), mypy 클린. 마이그레이션은 필요 없었다.
+
 
