@@ -45,11 +45,21 @@ def check_rate_limit(key: str, rate_limit: str) -> tuple[bool, int]:
     (허용 여부, 거부됐을 때 재시도까지 남은 초) 튜플을 반환한다. 허용된 호출은 즉시
     카운트를 소비한다(test-then-hit이 아니라 hit 자체가 원자적).
 
-    이 경로는 위 `limiter`의 `in_memory_fallback_enabled` 자동 복구 로직을 안 거치고
-    `limiter.limiter`(내부 저장소 전략 객체)를 직접 호출한다 - Redis 장애 시
-    WebSocket 메시지 하나 처리하자고 연결 전체가 처리되지 않은 예외로 끊기는 것을
-    막기 위해, 여기서는 직접 예외를 잡아 "허용"으로 안전하게 처리한다(레이트리밋
-    자체보다 서비스 가용성이 우선).
+    이 경로는 `limiter.limiter`(내부 저장소 전략 객체)를 직접 호출하는데, slowapi의
+    `in_memory_fallback_enabled` 자동 전환은 그 프로퍼티가 `_storage_dead`일 때만
+    폴백을 돌려주는 방식으로 동작하고, 그 플래그는 slowapi 내부적으로
+    `@limiter.limit()` 데코레이터 경로(`_check_request_limit`)에서만 세팅된다 -
+    이 함수는 그 경로를 거치지 않으므로 예전엔 Redis가 죽어도 이 플래그를 절대
+    세우지 못하고 그냥 "허용"만 무한정 반복했다(우연히 같은 시점에 다른 HTTP
+    요청이 이 플래그를 건드려주지 않는 한). 그 결과 REST 엔드포인트들은 Redis
+    장애 중에도 (다소 부정확하지만) 인메모리 카운터로 계속 제한되는데, 정작
+    가장 호출 비용이 큰 학습챗/면접복기 WebSocket 스트리밍만 장애 기간 내내
+    완전 무제한이 되는 비일관성이 있었다. slowapi가 스스로 하는 것과 똑같이
+    여기서도 직접 `_storage_dead`를 세워 인메모리 폴백을 실제로 작동시킨다 -
+    이제 Redis가 죽어도 완전 무제한이 아니라 (여러 워커 간 정확도는 떨어지지만)
+    이 프로세스의 인메모리 카운터로 제한이 계속된다. 폴백 자체도 실패하는
+    경우에만(사실상 있을 수 없지만 방어적으로) "허용"으로 안전하게 처리한다 -
+    레이트리밋 자체보다 서비스 가용성이 우선이라는 원래 원칙은 그대로 유지된다.
     """
     item = parse(rate_limit)
     try:
@@ -58,5 +68,12 @@ def check_rate_limit(key: str, rate_limit: str) -> tuple[bool, int]:
         stats = limiter.limiter.get_window_stats(item, key)
         return False, max(0, round(stats.reset_time - time.time()))
     except RedisError:
-        logger.exception("레이트리밋 저장소(Redis) 장애로 이번 확인은 통과 처리합니다.")
-        return True, 0
+        logger.exception("레이트리밋 저장소(Redis) 장애 감지 - 인메모리 폴백으로 전환합니다.")
+        limiter._storage_dead = True
+        try:
+            if limiter.limiter.hit(item, key):
+                return True, 0
+            stats = limiter.limiter.get_window_stats(item, key)
+            return False, max(0, round(stats.reset_time - time.time()))
+        except RedisError:
+            return True, 0

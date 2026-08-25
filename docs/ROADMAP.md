@@ -2706,4 +2706,57 @@
       순수 조회 범위 제한이라 모델/마이그레이션이나 `FRONTEND_INTEGRATION.md`
       갱신은 필요 없었다.
 
+## 백로그 (96라운드)
+
+- [x] 120. Redis 장애 중 WebSocket 스트리밍(학습챗/면접복기)의 수동 레이트리밋
+      (`check_rate_limit`)이 REST 엔드포인트와 달리 인메모리 폴백으로 전혀
+      전환되지 않고 장애 기간 내내 완전 무제한으로 허용되던 문제 수정 -
+      "아직 안 깊게 감사한 영역" 목록에 여러 라운드째 이름만 올라 있던
+      `app/core/rate_limit.py`를 서브에이전트에게 이번엔 실제로 slowapi
+      내부 구현(`.venv/.../slowapi/extension.py`)까지 직접 읽고 검증하라고
+      지시해서 나온 결과다. `check_rate_limit()`은 `limiter.limiter`(내부
+      저장소 전략 객체)를 직접 호출하는데, slowapi의 `in_memory_fallback_
+      enabled` 자동 전환은 그 프로퍼티가 `_storage_dead`일 때만 인메모리
+      폴백을 돌려주는 방식으로 동작하고, `_storage_dead`는 slowapi 안에서
+      `@limiter.limit()` 데코레이터 경로(`_check_request_limit`)에서만
+      세팅된다는 걸 실제 소스로 확인했다 - `check_rate_limit()`은 그
+      경로를 거치지 않으므로 Redis가 죽어도 이 플래그를 절대 스스로
+      세우지 못하고, `RedisError`를 잡아 그냥 "허용"만 무한정 반복했다
+      (우연히 같은 시점에 다른 HTTP 요청이 그 플래그를 건드려주지 않는
+      한). 그 결과 REST 엔드포인트들은 Redis 장애 중에도(여러 워커 간
+      정확도는 떨어져도) 인메모리 카운터로 계속 제한되는데, 정작 가장
+      호출 비용이 큰 두 WebSocket 스트리밍 경로만 장애 기간 내내 완전
+      무제한이 되는 비일관성이 있었다 - 이 함수를 처음 만든 이전 라운드도
+      "자동 복구 로직을 안 거친다"는 사실 자체는 문서화·테스트해뒀지만
+      ("레이트리밋 자체보다 서비스 가용성이 우선"이라는 의도만 확인했지),
+      그게 구체적으로 "완전 무제한"을 뜻한다는 것까지는 짚지 않았던
+      것으로 보인다 - 이미 설정하고 비용까지 지불한 인메모리 폴백
+      인프라를 WebSocket 경로에도 똑같이 적용해 REST와 일관되게 맞추는
+      게 합리적인 개선이라고 판단해 다시 열었다. `RedisError`를 잡으면
+      slowapi가 스스로 하는 것과 똑같이 `limiter._storage_dead = True`를
+      직접 세운 뒤 재시도하도록 고쳤다 - 이제 처음 감지 시점부터 실제
+      인메모리 폴백 카운터로 제한이 이어지고, 폴백 자체가 실패하는(사실상
+      있을 수 없는) 경우에만 기존처럼 "허용"으로 안전하게 처리한다. 기존
+      테스트(`test_check_rate_limit_allows_request_when_redis_unreachable`,
+      예전 동작을 문서화하던 테스트)는 "첫 호출은 폴백 전환 전이라
+      허용된다"는 의미로 다시 쓰고, Redis가 죽은 채로 한도(2/minute)를
+      실제로 넘기면 세 번째 호출부터 거부되는지 확인하는
+      `test_check_rate_limit_falls_back_to_in_memory_limiting_when_redis_dead`
+      를 새로 추가했다 - `git stash`로 수정만 되돌리면 이 새 테스트가
+      "세 호출 다 허용됨"으로 정확히 실패하는 것까지 확인했다. 이
+      테스트만으로는 재시도 블록 내부의 "이미 한도 초과" 분기와
+      "폴백 자체 실패" 분기가 커버리지에서 빠지는 걸 발견해(폴백 전환
+      후에는 바깥쪽 try가 재시도 없이 바로 성공/실패하기 때문), 폴백
+      리미터를 미리 한도까지 채워둔 뒤 Redis 장애를 처음 감지하는 순간
+      곧바로 거부가 나오는지 확인하는
+      `test_check_rate_limit_denies_immediately_when_fallback_already_at_limit`
+      와, 폴백 자체를 몽키패치로 실패시켜도 예외 없이 "허용"으로 안전하게
+      처리되는지 확인하는
+      `test_check_rate_limit_allows_when_fallback_itself_fails`를 추가로
+      더했다. 전체 380개 테스트 통과, 전체 커버리지 99%(`rate_limit.py`
+      100% 유지), mypy 클린. 순수 내부 로직 수정이라 모델/스키마 변경이나
+      마이그레이션은 필요 없었고, 클라이언트가 관측하는 변화는 "Redis
+      장애 중에도 WebSocket이 REST처럼 계속 제한된다"는 것뿐이라
+      `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
 

@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from limits import parse
+from redis.exceptions import RedisError
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -51,10 +53,14 @@ def test_limiter_falls_back_to_memory_when_redis_unreachable(caplog):
 
 def test_check_rate_limit_allows_request_when_redis_unreachable(monkeypatch, caplog):
     """check_rate_limit()은 WebSocket 경로에서 limiter.limiter(내부 저장소 전략
-    객체)를 직접 호출하므로 위 in_memory_fallback_enabled 자동 복구를 안 거친다 -
-    Redis 장애 시 이 경로도 예외를 그대로 올리지 않고 "허용"으로 안전하게
-    처리하는지 확인한다."""
-    limiter = Limiter(key_func=get_remote_address, storage_uri="redis://127.0.0.1:1/0")
+    객체)를 직접 호출한다 - Redis 장애 시 이 경로도 예외를 그대로 올리지 않고
+    "허용"으로 안전하게 처리하는지 확인한다(첫 호출은 아직 인메모리 폴백으로
+    전환하기 전이라 무조건 허용됨 - 실제로 폴백이 카운트를 추적하기 시작하는지는
+    아래 test_check_rate_limit_falls_back_to_in_memory_limiting_when_redis_dead가
+    확인한다)."""
+    limiter = Limiter(
+        key_func=get_remote_address, storage_uri="redis://127.0.0.1:1/0", in_memory_fallback_enabled=True
+    )
     monkeypatch.setattr(rate_limit_module, "limiter", limiter)
 
     with caplog.at_level("ERROR", logger="haruhan"):
@@ -63,3 +69,72 @@ def test_check_rate_limit_allows_request_when_redis_unreachable(monkeypatch, cap
     assert allowed is True
     assert retry_after == 0
     assert "레이트리밋 저장소(Redis) 장애" in caplog.text
+
+
+def test_check_rate_limit_falls_back_to_in_memory_limiting_when_redis_dead(monkeypatch):
+    """예전엔 limiter.limiter를 직접 호출하는 이 경로가 slowapi의 `_storage_dead`
+    플래그를 절대 세우지 못해(그 플래그는 @limiter.limit() 데코레이터 경로에서만
+    세팅됨), Redis 장애 중엔 이 함수가 호출 횟수와 무관하게 계속 "허용"만
+    반복했다 - 즉 REST 엔드포인트는 (다소 부정확해도) 인메모리 카운터로 계속
+    제한되는데 WebSocket 경로만 장애 기간 내내 완전 무제한이 되는 비일관성이
+    있었다. 이제 직접 `_storage_dead`를 세워 인메모리 폴백을 실제로 작동시키므로,
+    Redis가 죽은 상태에서도 설정한 한도(2/minute)를 넘기면 세 번째 호출부터는
+    거부돼야 한다 - test_manual_rate_limit.py의
+    test_check_rate_limit_allows_up_to_limit_then_blocks와 같은 모양이지만
+    Redis 장애 상황에서도 그 속성이 유지되는지가 다른 점이다."""
+    limiter = Limiter(
+        key_func=get_remote_address, storage_uri="redis://127.0.0.1:1/0", in_memory_fallback_enabled=True
+    )
+    monkeypatch.setattr(rate_limit_module, "limiter", limiter)
+
+    allowed_1, _ = rate_limit_module.check_rate_limit("fallback-key", "2/minute")
+    allowed_2, _ = rate_limit_module.check_rate_limit("fallback-key", "2/minute")
+    allowed_3, retry_after_3 = rate_limit_module.check_rate_limit("fallback-key", "2/minute")
+
+    assert (allowed_1, allowed_2, allowed_3) == (True, True, False)
+    assert retry_after_3 >= 0
+    assert limiter._storage_dead is True
+
+
+def test_check_rate_limit_denies_immediately_when_fallback_already_at_limit(monkeypatch):
+    """위 테스트는 첫 호출이 Redis 장애를 감지해 인메모리 폴백으로 전환한 뒤
+    "허용"으로 응답하고, 그 다음다음 호출에서야(_storage_dead가 이미 True라
+    바깥쪽 try에서 바로) 거부된다 - 그래서 안쪽 재시도 블록 자체의 거부 분기
+    (limiter.limiter.hit()이 재시도 시점에 곧바로 False를 돌려주는 경우)는
+    한 번도 실행되지 않는다. 폴백 리미터를 미리 한도까지 채워둔 뒤 Redis
+    장애를 처음 감지하는 바로 그 순간부터 거부가 나오는지 확인해, 그 분기를
+    직접 노린다."""
+    limiter = Limiter(
+        key_func=get_remote_address, storage_uri="redis://127.0.0.1:1/0", in_memory_fallback_enabled=True
+    )
+    monkeypatch.setattr(rate_limit_module, "limiter", limiter)
+
+    item = parse("1/minute")
+    assert limiter._fallback_limiter.hit(item, "already-full-key") is True
+
+    allowed, retry_after = rate_limit_module.check_rate_limit("already-full-key", "1/minute")
+
+    assert allowed is False
+    assert retry_after >= 0
+    assert limiter._storage_dead is True
+
+
+def test_check_rate_limit_allows_when_fallback_itself_fails(monkeypatch):
+    """인메모리 폴백 자체가 실패하는 건 사실상 있을 수 없지만(디스크 I/O나
+    네트워크가 필요 없는 프로세스 내 메모리 구조라), 방어적으로 이 경우에도
+    예외를 그대로 올리지 않고 레이트리밋 자체보다 서비스 가용성을 우선해
+    "허용"으로 안전하게 처리하는지 확인한다."""
+    limiter = Limiter(
+        key_func=get_remote_address, storage_uri="redis://127.0.0.1:1/0", in_memory_fallback_enabled=True
+    )
+    monkeypatch.setattr(rate_limit_module, "limiter", limiter)
+
+    def _always_fail(*args, **kwargs):
+        raise RedisError("시뮬레이션된 폴백 실패")
+
+    monkeypatch.setattr(limiter._fallback_limiter, "hit", _always_fail)
+
+    allowed, retry_after = rate_limit_module.check_rate_limit("test-key", "5/minute")
+
+    assert allowed is True
+    assert retry_after == 0
