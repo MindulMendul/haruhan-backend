@@ -2173,4 +2173,42 @@
       자신도 재로그인해야 하는 사용자 대상 동작 변화라
       `FRONTEND_INTEGRATION.md`의 1-6/1-8 섹션에 안내를 추가했다.
 
+## 백로그 (84라운드)
+
+- [x] 108. `DEFAULT_QUIZ_QUESTION_COUNT`가 `MAX_QUIZ_QUESTION_COUNT`보다
+      커져도 아무 검증 없이 배포될 수 있어, `question_count`를 생략한
+      (아마 대다수인) 퀴즈 생성 요청이 조용히 그 한도를 넘는 문항 수를
+      요청할 수 있던 문제 수정 - 78~83번 라운드가 파던 두 버그 계열
+      (check-then-act 경쟁, identity map 낡은 값)과 무관한 새 영역을 보라고
+      서브에이전트에게 지시했다. `QuizCreateRequest._validate_source_and_count`
+      (`schemas/quiz.py`)는 `question_count`를 클라이언트가 직접 보낸
+      경우에만 `max_quiz_question_count`와 비교해서 거부하고, 생략된
+      경우는 `default_quiz_question_count`를 그냥 채워 넣을 뿐 그 값이
+      max를 넘는지는 전혀 확인하지 않는다 - 그리고 `Settings`에는 이 두
+      설정값 사이의 관계를 검증하는 코드가 없었다. 운영자가 비용 절감을
+      위해 `MAX_QUIZ_QUESTION_COUNT`만 낮추거나(예: 20 -> 10), "더 풍성한
+      기본값"을 위해 `DEFAULT_QUIZ_QUESTION_COUNT`만 올리면, `question_count`
+      를 생략한 요청은 검증 에러 하나 없이 그 한도를 넘는 문항 수의 퀴즈를
+      계속 생성하게 되어 방금 낮춘 한도가 사실상 무의미해진다. `LOG_LEVEL`/
+      `ENVIRONMENT`(73/74번 라운드)처럼 "설정 오류는 요청 시점이 아니라
+      시작 시점에 막는다"는 이 코드베이스의 기존 방침을 그대로 따라,
+      `Settings`에 `model_validator(mode="after")`로 `default_quiz_
+      question_count <= max_quiz_question_count`를 검증하는 교차 필드
+      검증을 추가했다(기존 세 검증은 전부 단일 필드용 `field_validator`라
+      이번이 첫 교차 필드 검증이다). 이 검증을 추가하자 기존 테스트
+      (`test_create_quiz_rejects_question_count_over_max`)가 `MAX_QUIZ_
+      QUESTION_COUNT=3`만 설정하고 `DEFAULT`는 그대로 둬(=5) 이제는 유효하지
+      않은 조합이 되어 `Settings()` 생성 자체가 실패하는 걸 발견해, 그
+      테스트에 `DEFAULT_QUIZ_QUESTION_COUNT=3`도 함께 설정하도록 고쳤다 -
+      이 테스트가 우연히 우리가 막으려는 바로 그 모순된 조합을 이미
+      전제하고 있었다는 뜻이기도 하다. `test_config.py`에 값이 같을 때
+      통과하는 경우와 초과할 때 거부되는 경우를 각각 확인하는 테스트를
+      추가했고, 수정 전 코드에서 후자가 실제로 통과(=버그가 재현됨)하는
+      것까지 확인한 뒤(`git stash`로 수정 부분만 되돌렸다가 복원) 다시
+      적용했다. `.env.example`은 이미 5/20으로 유효한 조합이라 갱신할
+      필요가 없었다. 전체 349개 테스트 통과, 전체 커버리지 99%, mypy
+      클린(`config.py` 100% 유지). 순수 설정 계층 검증 추가라 모델/스키마
+      변경이나 마이그레이션은 필요 없었고, 클라이언트가 보내는 요청/응답
+      형태는 그대로라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
 

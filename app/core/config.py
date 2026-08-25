@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MIN_JWT_SECRET_KEY_LENGTH = 32
@@ -138,6 +138,25 @@ class Settings(BaseSettings):
                 f"계속 노출될 수 있어 엄격하게 검증합니다)."
             )
         return normalized
+
+    @model_validator(mode="after")
+    def _validate_quiz_question_count_defaults(self) -> "Settings":
+        """`QuizCreateRequest`는 `question_count`를 안 보낸 요청에는
+        `default_quiz_question_count`를 그대로 채워 넣을 뿐, 그 값을
+        `max_quiz_question_count`와 비교하지 않는다 - 제한 검사는 클라이언트가
+        `question_count`를 직접 보낸 경우에만 걸린다. 그래서 운영자가 둘 중
+        하나만 바꾸면(예: 비용 절감 위해 MAX만 낮추거나, "더 풍성한 기본값"을
+        위해 DEFAULT만 올리면) `question_count`를 생략한 - 아마 대다수인 -
+        요청들이 조용히 그 한도를 넘는 문항 수를 요청하게 된다. 요청 시점에
+        걸러내는 대신, 다른 검증들처럼 시작 시점에 막아 이 모순된 설정 조합
+        자체가 배포되지 못하게 한다."""
+        if self.default_quiz_question_count > self.max_quiz_question_count:
+            raise ValueError(
+                "DEFAULT_QUIZ_QUESTION_COUNT"
+                f"({self.default_quiz_question_count})는 MAX_QUIZ_QUESTION_COUNT"
+                f"({self.max_quiz_question_count})보다 클 수 없습니다."
+            )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

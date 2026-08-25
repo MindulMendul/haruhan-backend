@@ -47,3 +47,23 @@ def test_settings_rejects_invalid_environment():
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, environment="prod")
     assert "ENVIRONMENT은" in str(exc_info.value)
+
+
+def test_settings_accepts_default_quiz_question_count_equal_to_max():
+    settings = Settings(
+        jwt_secret_key="a" * 32, default_quiz_question_count=5, max_quiz_question_count=5
+    )
+    assert settings.default_quiz_question_count == 5
+
+
+def test_settings_rejects_default_quiz_question_count_over_max():
+    """QuizCreateRequest는 question_count를 안 보낸 요청에만
+    default_quiz_question_count를 그대로 채워 넣고, 그 값을
+    max_quiz_question_count와 비교하지 않는다 - 운영자가 둘 중 하나만
+    바꾸면(예: 비용 절감 위해 MAX만 낮춤) question_count를 생략한 요청들이
+    조용히 그 한도를 넘는 문항 수를 요청하게 된다. 이 모순된 조합을 요청
+    시점이 아니라 설정 로딩 시점에 막는다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, default_quiz_question_count=20, max_quiz_question_count=10)
+    assert "DEFAULT_QUIZ_QUESTION_COUNT" in str(exc_info.value)
+    assert "MAX_QUIZ_QUESTION_COUNT" in str(exc_info.value)

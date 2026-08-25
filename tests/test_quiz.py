@@ -212,7 +212,10 @@ def test_create_quiz_rejects_source_text_over_max_length(client, monkeypatch):
 
 
 def test_create_quiz_rejects_question_count_over_max(client, monkeypatch):
+    # DEFAULT_QUIZ_QUESTION_COUNT(기본 5)가 MAX보다 커지면 Settings 자체가
+    # 시작 시점에 거부하므로(84번 라운드), DEFAULT도 함께 낮춰야 한다.
     monkeypatch.setenv("MAX_QUIZ_QUESTION_COUNT", "3")
+    monkeypatch.setenv("DEFAULT_QUIZ_QUESTION_COUNT", "3")
     get_settings.cache_clear()
     token = _signup_and_get_token(client)
 
