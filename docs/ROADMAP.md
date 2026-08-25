@@ -2864,4 +2864,80 @@
       전부 기본값이 있어 기존 호출도 그대로 동작하는 하위 호환 변경이라
       마이그레이션은 필요 없었다.
 
+## 백로그 (99라운드)
+
+- [x] 123. 학습챗/면접복기 WebSocket 스트리밍이 동시 연결 수에 아무 상한이
+      없어, 클라이언트가 연결을 계속 열기만 해도(방치가 아니라 정상적으로
+      메시지를 주고받는 활성 연결이어도) DB 커넥션 풀 전체가 고갈될 수
+      있던 문제 수정. `app/db/session.py`의 `get_db()`는 FastAPI yield
+      의존성이라 `Depends(get_study_service)`/`Depends(get_interview_review_service)`
+      를 통해 WebSocket 라우트에서 쓰이면 연결이 accept된 순간부터 완전히
+      끊어질 때까지 커넥션 풀의 커넥션 하나를 계속 점유한다(메시지 하나
+      처리할 때만 잠깐 빌리는 HTTP 요청과 다르다) - `create_async_engine`에
+      하드코딩된 `pool_size=5, max_overflow=5`(합쳐서 10, `Settings`로
+      노출돼 있지도 않음)보다 많은 동시 WS 연결이 열리면 이 라우트뿐
+      아니라 앱의 다른 모든 HTTP/WebSocket 요청까지 막힌다. 기존에 있던
+      `ws_idle_timeout_seconds`는 "방치된" 연결이 풀을 계속 붙잡는 것만
+      막을 뿐, 활발히 메시지를 주고받는 정상적인 동시 연결이 풀 용량을
+      넘겨 열리는 것까지는 막지 못해 - 이번 항목은 그 보완책이다.
+      `Settings.max_concurrent_ws_connections: int = 6`(풀 용량 10보다
+      낮게 잡아 일반 HTTP 트래픽이 쓸 여유를 남김)을 추가하고,
+      `app/core/dependencies.py`에 모듈 전역 `_active_ws_connections`
+      카운터 + `asyncio.Lock`으로 지키는 `limit_ws_connections` 의존성을
+      새로 만들었다 - accept 전에 상한을 넘었으면 `get_current_user_ws`와
+      같은 방식으로 `WebSocketException(code=WS_1013_TRY_AGAIN_LATER)`을
+      던져 접속 자체를 거부하고, 정상 처리된 연결은 `finally`에서 슬롯을
+      반납한다. `study.py`/`interview_review.py` 두 스트리밍 라우트 모두
+      첫 번째 파라미터로 `_connection_slot: None = Depends(limit_ws_connections)`
+      를 추가해 같은 카운터를 공유하게 했다(라우트별로 따로 세지 않고
+      앱 전체에서 합산 - 두 라우트가 같은 DB 풀을 나눠 쓰기 때문에
+      이래야 실제 위험을 정확히 반영한다). `tests/conftest.py`의
+      `_reset_state`에 `reset_ws_connection_counter()`를 추가해 테스트
+      간 카운터를 격리했다. 회귀 테스트 4개: `test_study.py`에
+      `test_stream_message_rejects_when_at_max_concurrent_connections`
+      (상한을 1로 낮추고 연결 하나를 열어둔 채 두 번째 연결을 시도하면
+      바로 거부되는지)와 `test_stream_message_accepts_new_connection_after_previous_one_closes`
+      (첫 연결이 정상 종료되면 슬롯이 반납돼 다음 연결은 같은 상한
+      아래서도 받아들여지는지 - 카운터가 증가만 하고 줄어들지 않는
+      회귀가 없는지 확인), `test_interview_review.py`에 같은 패턴의
+      거부 테스트와 `test_max_concurrent_ws_connections_is_shared_across_study_and_review_routes`
+      (학습챗 라우트에서 연결을 하나 열어둔 상태로 면접복기 라우트의
+      새 연결을 시도하면 역시 거부되는지 - 카운터가 라우트별이 아니라
+      앱 전체 공유라는 게 이 기능의 핵심이라 이 테스트가 없으면 "그냥
+      라우트마다 따로 세는" 훨씬 얕은(그리고 틀린) 구현으로도 다른
+      테스트들은 다 통과했을 것이다). `git stash`로 의존성/설정/라우트
+      수정만 되돌리면 거부 테스트가 응답 없이 타임아웃(행)되는 것으로
+      차이를 확인했다 - 상한 로직 자체가 없으니 거부 이벤트가 영영
+      오지 않아 `pytest.raises(WebSocketDisconnect)`가 기다리는 예외가
+      발생하지 않고 무한 대기하는 게 올바른 관찰 결과였다.
+
+      이번 라운드는 검증 단계에서 실제 테스트 인프라 버그를 하나
+      더 잡았다: 전체 스위트(`--cov` 포함)가 `test_study.py`의
+      `test_stream_message_accepts_new_connection_after_previous_one_closes`
+      직후에서 실행할 때마다 멈췄는데, 정작 이 테스트 자체는 단독
+      실행/파일 단위 실행에서는 항상 통과해서 처음엔 원인을 잘못
+      짚었다(간헐적으로 느린 bcrypt 테스트와 착각해 타임아웃만 늘려
+      재시도하기도 했다). `py-spy dump`로 실제로 멈춰 있는 프로세스의
+      스택을 떠보고 나서야 정확한 위치를 확인했다 - `client` fixture의
+      teardown(`TestClient.__exit__` → anyio 블로킹 포털 스레드
+      `join()`)이 걸려 있었고, `pytest_runtestloop`의 아이템 인덱스가
+      정확히 이 테스트를 가리켰다. 원인은 이 테스트의 "두 번째" WS
+      연결이 `send_json` 후 `user_message` 이벤트 하나만 `receive_json`
+      하고 나머지 `delta`/`delta`/`done` 이벤트를 받지 않은 채 명시적
+      `close()`도 없이 `with` 블록을 빠져나갔던 것 - 세션 내내
+      확립해 온 "WS 테스트는 반드시 끝까지 주고받고 명시적으로
+      `close()`한다"는 컨벤션을 이 테스트의 첫 번째 연결(이전에 이미
+      한 번 이 문제로 재작성됨)에는 적용했지만 두 번째 연결에는 빠뜨린
+      것이었다 - 서버 쪽 핸들러가 스트리밍 도중에 멈춰 있어 포털
+      스레드가 정상 종료하지 못했다. 두 번째 연결도 `delta`/`delta`/
+      `done`을 마저 받고 `close()`하도록 고쳐서 해결했다(수정 후
+      전체 스위트를 두 번 연속 클린하게 통과시켜 확인). 전체 388개
+      테스트 통과, 전체 커버리지 99%(`app/core/dependencies.py`/
+      `app/core/config.py`/`app/api/v1/routes/study.py`/
+      `app/api/v1/routes/interview_review.py` 모두 100% - 테스트에서
+      전혀 쓰이지 않던 디버그용 헬퍼 `active_ws_connections()`는
+      죽은 코드라 제거), mypy 클린. 클라이언트가 새 에러 코드
+      `1013`을 받을 수 있다는 점만 추가된 순수 확장 변경이라
+      마이그레이션은 필요 없었다.
+
 

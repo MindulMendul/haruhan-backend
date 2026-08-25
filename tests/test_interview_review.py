@@ -421,6 +421,55 @@ def test_stream_create_review_closes_connection_after_idle_timeout(client, monke
             ws.receive_json()
 
 
+def test_stream_create_review_rejects_when_at_max_concurrent_connections(client, monkeypatch):
+    """학습챗 스트리밍과 마찬가지로 이 WebSocket 연결도 accept부터 종료까지
+    DB 커넥션 풀의 커넥션 하나를 계속 점유한다 - 풀 크기보다 많은 동시 연결이
+    열리면 풀 전체가 고갈될 수 있다. MAX_CONCURRENT_WS_CONNECTIONS를 1로
+    줄여서, 이미 연결 하나가 열려 있는 동안 두 번째 연결 시도가 거부되는지
+    확인한다."""
+    import pytest
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("MAX_CONCURRENT_WS_CONNECTIONS", "1")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client, email="stream-review-limit@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}"):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"/api/v1/interview/reviews/stream?token={token}"
+            ) as second_ws:
+                second_ws.receive_json()
+
+
+def test_max_concurrent_ws_connections_is_shared_across_study_and_review_routes(client, monkeypatch):
+    """학습챗 스트리밍과 면접복기 스트리밍은 별개 라우터지만 같은 DB 커넥션
+    풀을 공유한다 - 두 라우트 중 하나에서 연결을 열었어도 합산된 동시 연결
+    수가 상한에 걸리면 다른 라우트의 새 연결도 거부돼야 한다(라우트별로
+    따로 세는 게 아니라 앱 전체에서 공유하는 카운터라는 게 이 기능의
+    핵심이다)."""
+    import pytest
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("MAX_CONCURRENT_WS_CONNECTIONS", "1")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client, email="stream-review-shared-limit@example.com")
+
+    study_create = client.post(
+        "/api/v1/study/sessions", json={"title": "공유 상한 테스트"}, headers=_auth_headers(token)
+    )
+    study_session_id = study_create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{study_session_id}/stream?token={token}"
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"/api/v1/interview/reviews/stream?token={token}"
+            ) as review_ws:
+                review_ws.receive_json()
+
+
 def test_stream_create_review_rejects_invalid_payload(client):
     token = _signup_and_get_token(client, email="stream-review-invalid@example.com")
 

@@ -114,6 +114,19 @@ class Settings(BaseSettings):
     # 이런 방치된 연결만으로도 풀 전체가 고갈되어 다른 모든 요청이 막힐 수 있다.
     ws_idle_timeout_seconds: float = 300.0
 
+    # 동시에 열 수 있는 WebSocket 연결(학습챗/면접복기 스트리밍 합산) 수의 상한.
+    # 위 ws_idle_timeout_seconds는 "방치된" 연결이 DB 커넥션을 무한정 붙잡는
+    # 것만 막을 뿐, 클라이언트가 메시지를 계속 보내 "방치"로 안 잡히는 활성
+    # 연결을 동시에 여러 개(풀 크기보다 많이) 열어버리는 것까지는 막지 못한다 -
+    # WebSocket 연결 하나가 accept부터 종료까지 DB 커넥션 풀의 커넥션 하나를
+    # 계속 점유하므로(get_db가 연결 전체 수명 동안 열려 있는 FastAPI yield
+    # 의존성이라, 메시지 하나 처리할 때만 잠깐 빌리는 게 아님), 풀 크기(기본
+    # pool_size=5 + max_overflow=5 = 10)보다 많은 동시 연결이 열리면 풀 전체가
+    # 고갈돼 이 WebSocket 라우트뿐 아니라 앱의 다른 모든 HTTP/WebSocket 요청까지
+    # 막힌다. 기본값(6)은 풀 용량보다 낮게 잡아, 일반 HTTP 트래픽이 쓸 여유
+    # 커넥션을 남겨둔다.
+    max_concurrent_ws_connections: int = 6
+
     @field_validator("jwt_secret_key")
     @classmethod
     def _validate_jwt_secret_key_length(cls, value: str) -> str:

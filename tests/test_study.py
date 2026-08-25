@@ -705,6 +705,69 @@ def test_stream_message_closes_connection_after_idle_timeout(client, monkeypatch
             ws.receive_json()
 
 
+def test_stream_message_rejects_when_at_max_concurrent_connections(client, monkeypatch):
+    """WebSocket 연결 하나는 accept부터 종료까지 DB 커넥션 풀의 커넥션 하나를
+    계속 점유한다(get_db가 연결 전체 수명 동안 열려 있는 FastAPI yield 의존성
+    이라, 메시지 하나 처리할 때만 잠깐 빌리는 게 아님) - 풀 크기(기본
+    pool_size=5 + max_overflow=5 = 10)보다 많은 동시 연결이 열리면 풀 전체가
+    고갈돼 이 라우트뿐 아니라 앱의 다른 모든 요청까지 막힐 수 있다.
+    MAX_CONCURRENT_WS_CONNECTIONS를 1로 줄여서, 이미 연결 하나가 열려 있는
+    동안 두 번째 연결 시도가 accept 전에 거부되는지 확인한다."""
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("MAX_CONCURRENT_WS_CONNECTIONS", "1")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "동시 연결 제한 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(f"/api/v1/study/sessions/{session_id}/stream?token={token}"):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+            ) as second_ws:
+                second_ws.receive_json()
+
+
+def test_stream_message_accepts_new_connection_after_previous_one_closes(client, monkeypatch):
+    """연결이 끊기면(limit_ws_connections의 finally) 점유하던 슬롯이 반납돼,
+    바로 다음 연결은 같은 상한 아래서도 정상적으로 받아들여져야 한다 - 카운터가
+    증가만 하고 줄어들지 않는 회귀가 없는지 확인한다. 다른 WS 테스트들과 동일한
+    패턴(메시지를 실제로 주고받고 명시적으로 ws.close())으로 첫 연결을 정상
+    종료시킨 뒤 두 번째 연결을 연다."""
+    monkeypatch.setenv("MAX_CONCURRENT_WS_CONNECTIONS", "1")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "슬롯 반납 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as first_ws:
+        first_ws.send_json({"content": "첫 연결"})
+        first_ws.receive_json()  # user_message
+        first_ws.receive_json()  # delta
+        first_ws.receive_json()  # delta
+        first_ws.receive_json()  # done
+        first_ws.close()
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as second_ws:
+        second_ws.send_json({"content": "두 번째 연결"})
+        user_event = second_ws.receive_json()
+        assert user_event["type"] == "user_message"
+        second_ws.receive_json()  # delta
+        second_ws.receive_json()  # delta
+        second_ws.receive_json()  # done
+        second_ws.close()
+
+
 def test_stream_message_rejects_empty_content(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

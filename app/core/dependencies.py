@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 
@@ -64,6 +65,42 @@ async def get_current_user_ws(
     if user is None:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
     return user
+
+
+_active_ws_connections = 0
+_ws_connections_lock = asyncio.Lock()
+
+
+def reset_ws_connection_counter() -> None:
+    """테스트 간 상태를 격리하기 위한 초기화용 - 이전 테스트의 연결이 비정상
+    종료로 finally를 못 거치고 카운터를 남겼을 가능성에 대비한다."""
+    global _active_ws_connections
+    _active_ws_connections = 0
+
+
+async def limit_ws_connections(settings: Settings = Depends(get_settings)) -> AsyncIterator[None]:
+    """동시 WebSocket 연결 수를 상한(max_concurrent_ws_connections) 아래로 제한한다.
+
+    WebSocket 연결 하나는 accept부터 종료까지 get_db()가 물어다 주는 DB 커넥션
+    풀의 커넥션 하나를 계속 점유한다(메시지 하나 처리할 때만 잠깐 빌리는 게
+    아니라 study_service/rag_service를 만드는 Depends(get_db)가 연결 전체
+    수명 동안 열려 있는 yield 의존성이기 때문) - 풀 크기(기본
+    pool_size=5 + max_overflow=5 = 10)보다 많은 동시 연결이 열리면 풀 전체가
+    고갈돼 이 WebSocket 라우트뿐 아니라 앱의 다른 모든 HTTP/WebSocket 요청까지
+    막힌다. accept() 전에(다른 의존성보다 먼저 선언해서) 이 의존성이 실행되므로,
+    상한을 넘으면 연결을 아예 받지 않고 깨끗하게 거부한다 - DB 커넥션을 실제로
+    쓸 일 없이 곧바로 종료된다.
+    """
+    global _active_ws_connections
+    async with _ws_connections_lock:
+        if _active_ws_connections >= settings.max_concurrent_ws_connections:
+            raise WebSocketException(code=status.WS_1013_TRY_AGAIN_LATER)
+        _active_ws_connections += 1
+    try:
+        yield
+    finally:
+        async with _ws_connections_lock:
+            _active_ws_connections -= 1
 
 
 async def get_ollama_service(settings: Settings = Depends(get_settings)) -> AsyncIterator[OllamaService]:

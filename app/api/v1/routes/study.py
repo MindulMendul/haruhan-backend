@@ -21,6 +21,7 @@ from app.core.dependencies import (
     get_current_user_ws,
     get_ollama_service,
     get_rag_service,
+    limit_ws_connections,
 )
 from app.core.rate_limit import check_rate_limit, limiter
 from app.db.models.user import User
@@ -143,6 +144,7 @@ async def send_message(
 async def stream_message(
     websocket: WebSocket,
     session_id: uuid.UUID,
+    _connection_slot: None = Depends(limit_ws_connections),
     current_user: User = Depends(get_current_user_ws),
     study_service: StudyService = Depends(get_study_service),
 ) -> None:
@@ -163,6 +165,11 @@ async def stream_message(
     클라이언트가 ws_idle_timeout_seconds(기본 5분) 동안 메시지를 하나도 안 보내면
     연결을 끊는다 - 이 연결이 붙잡고 있는 DB 커넥션/Ollama 클라이언트를 방치된
     연결이 무한정 점유해 커넥션 풀을 고갈시키는 것을 막기 위함이다.
+
+    방치된 연결뿐 아니라 활발하게 메시지를 주고받는 연결도(면접복기 스트리밍과
+    합쳐) max_concurrent_ws_connections(기본 6)개보다 많이 동시에 열리면 같은
+    이유로 DB 커넥션 풀을 고갈시킬 수 있다 - limit_ws_connections 의존성이
+    accept() 전에 상한을 확인해, 넘으면 연결 자체를 거부한다.
     """
     await websocket.accept()
     settings = get_settings()
