@@ -76,6 +76,23 @@ def test_refresh_rejects_unknown_token(client):
     assert response.status_code == 401
 
 
+def test_refresh_rejects_token_over_max_length(client):
+    """다른 사용자 입력 필드들과 마찬가지로 refresh_token에도 명시적 상한이 있다 -
+    상한을 넘으면 (알 수 없는 토큰이라 401이 아니라) 스키마 검증에서 바로 422로
+    거부돼야 한다."""
+    response = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": "a" * 513}
+    )
+    assert response.status_code == 422
+
+
+def test_logout_rejects_token_over_max_length(client):
+    response = client.post(
+        "/api/v1/auth/logout", json={"refresh_token": "a" * 513}
+    )
+    assert response.status_code == 422
+
+
 def test_refresh_token_reuse_revokes_all_sessions(client):
     signup = client.post(
         "/api/v1/auth/signup", json={"email": "reuse@example.com", "password": "supersecret"}

@@ -3006,4 +3006,31 @@
       전체 389개 테스트 통과, 전체 커버리지 99%(`routes/chat.py` 100%
       유지), mypy 클린. 마이그레이션은 필요 없었다.
 
+## 백로그 (102라운드)
+
+- [x] 126. `RefreshRequest.refresh_token`(`POST /auth/refresh`,
+      `POST /auth/logout`가 공유 - 둘 다 로그인 없이 호출되는 인증 전
+      경로)에만 길이 상한이 전혀 없던 문제 수정. 스키마 계층의 다른
+      사용자 입력 필드는 전부 명시적 상한이 있다 - 비밀번호는
+      `max_length=72`, 학습챗/면접복기 content는 `field_validator`로
+      `max_prompt_length`/`max_review_content_length`를 검사, 제목/주제류는
+      255자 등. 실제 발급되는 토큰(`core.tokens.generate_refresh_token`이
+      `secrets.token_urlsafe(32)`로 만듦)은 43자 고정이라 실질적 위험은
+      낮다(전체 요청 바디는 이미 `MaxBodySizeMiddleware`로 1MB 상한이
+      있고, `hash_refresh_token`도 SHA-256이라 입력 크기와 무관하게
+      저렴함) - 그래도 이 코드베이스 전체가 지켜온 "사용자 입력 필드는
+      전부 명시적 상한을 둔다"는 검증 태도의 일관성이 깨진 곳이라 고쳤다.
+      `Field(..., min_length=1, max_length=512)`로 여유 있는 안전장치를
+      추가했다(95라운드의 RAG 후보 청크 상한처럼 "주 방어선이 아니라
+      최후의 안전장치"로 넉넉하게 잡음). 회귀 테스트
+      `test_refresh_rejects_token_over_max_length`/
+      `test_logout_rejects_token_over_max_length`(513자를 보내면 두
+      엔드포인트 모두 - 모르는 토큰이라 401이 아니라 - 스키마 검증에서
+      바로 422로 거부되는지)를 추가했고, `git stash`로 스키마 수정만
+      되돌리면 둘 다 정확히 실패하는 것까지 확인했다. 전체 391개 테스트
+      통과, 전체 커버리지 99%(`schemas/auth.py` 100% 유지), mypy 클린.
+      요청 바디 필드에 상한이 새로 생겼을 뿐 정상 범위의 기존 호출은
+      전혀 영향받지 않는 순수 방어적 강화라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, 마이그레이션도 필요 없었다.
+
 
