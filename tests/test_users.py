@@ -153,6 +153,29 @@ def test_update_password_success_and_old_password_stops_working(client):
     assert new_login.status_code == 200
 
 
+def test_update_password_revokes_existing_refresh_tokens(client):
+    """비밀번호 변경은 보통 "계정이 뚫린 것 같다"는 의심에서 나오는 행동이다 -
+    공격자가 refresh_token을 훔친 상태라면, 비밀번호만 바꾸고 기존
+    refresh_token을 그대로 살려두면 공격자는 최대 refresh_token_expire_days
+    (기본 14일)까지 그 토큰으로 계속 로그인 상태를 유지할 수 있어 비밀번호
+    변경의 의미가 없어진다. 비밀번호 변경 전에 발급된 refresh_token이 변경
+    후에는 (DELETE /auth/sessions 전체 로그아웃과 마찬가지로) 더 이상 쓸 수
+    없는지 확인한다."""
+    tokens = _signup_and_get_tokens(client, email="pw-revoke@example.com")
+
+    update = client.patch(
+        "/api/v1/users/me",
+        json={"password": "newsupersecret", "current_password": "supersecret"},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert update.status_code == 200
+
+    refresh = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]}
+    )
+    assert refresh.status_code == 401
+
+
 def test_update_password_rejects_password_over_byte_limit(client):
     # 스키마의 max_length=72는 "문자 수" 기준이라, 멀티바이트 문자로 72자를 채우면
     # 글자 수 검증(422)은 통과하지만 UTF-8로 인코딩하면 72바이트를 넘는다 -

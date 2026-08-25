@@ -2130,4 +2130,47 @@
       마이그레이션은 필요 없었고, 이미 문서화된 404 케이스로 수렴하는
       수정이라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (83라운드)
+
+- [x] 107. 비밀번호를 변경해도 기존에 발급된 refresh token이 전혀 폐기되지
+      않던 문제 수정 - 이번엔 78~82번 라운드가 연달아 파던 "check-then-act
+      경쟁"/"identity map 낡은 값" 두 버그 계열을 다시 찾지 말고 완전히
+      다른 영역을 보라고 서브에이전트에게 명시적으로 지시했다.
+      비밀번호 변경(`PATCH /users/me`)은 보통 "계정이 뚫린 것 같다"는
+      의심에서 나오는 행동인데, `UserService.update_profile()`은 비밀번호
+      해시만 바꾸고 커밋할 뿐 이 사용자의 refresh token은 전혀 건드리지
+      않았다 - 공격자가 refresh token을 훔친 상태라면(XSS, 로그 유출,
+      방치된 기기 등), 피해자가 비밀번호를 바꿔도 그 refresh token은
+      `refresh_token_expire_days`(기본 14일)까지 여전히 유효해서 공격자는
+      `POST /auth/refresh`로 계속 로그인 상태를 유지할 수 있다 - 비밀번호
+      변경이라는 보안 조치의 의미가 사실상 없어지는 셈이다. `docs/
+      FRONTEND_INTEGRATION.md`도 원래 "비밀번호를 변경한 다른 기기 전부
+      로그아웃시키기"를 프론트가 `PATCH /users/me` 이후 별도로 `DELETE
+      /auth/sessions`를 호출하는 2단계 워크플로로 문서화해뒀을 뿐, 서버가
+      이걸 보장하진 않았다 - 그 2단계를 프론트가 실제로 구현하지 않으면
+      (문서화된 단일 목적 엔드포인트인 `PATCH /users/me`만 호출하는 클라이언트
+      라면 특히) 공격자 세션을 포함한 다른 모든 세션이 그대로 살아있게 된다.
+      `auth_service.py`가 refresh token 재사용 탐지/전체 로그아웃에 이미
+      쓰고 있는 `RefreshTokenRepository.revoke_all_for_user()`를
+      `UserService`에도 주입해, 비밀번호가 바뀔 때 같은 커밋 안에서 이
+      계정의 모든 refresh token을 함께 폐기하도록 고쳤다 - `PATCH /users/me`
+      로 인증하는 access token만으로는 어느 refresh token이 지금 요청을
+      보낸 클라이언트 것인지 구분할 수 없어(`FRONTEND_INTEGRATION.md`가
+      이미 밝혀둔 사실), `DELETE /auth/sessions` 전체 로그아웃과 동일하게
+      요청을 보낸 클라이언트 자신의 세션도 함께 끊긴다(비밀번호 변경 직후
+      다시 로그인해야 함 - 널리 받아들여지는 보안 관행). `email`만 바꾸는
+      경우는 세션을 건드리지 않는다 - 공격자가 이미 살아있는 세션으로
+      직접 저지를 수 있는 행동에 이메일 자체는 추가 방어선이 되지 않고,
+      비밀번호 케이스만큼 뚜렷한 근거가 없어 범위를 좁게 유지했다. 서명
+      가입 → 비밀번호 변경 → 변경 전 refresh_token으로 `POST /auth/refresh`
+      시도가 `401`로 거부되는지 확인하는 테스트
+      (`test_update_password_revokes_existing_refresh_tokens`)를 추가했고,
+      수정 전 코드에서 이 refresh 호출이 그대로 `200`을 반환하는 것까지
+      확인한 뒤(`git stash`로 수정 부분만 되돌렸다가 복원) 다시 적용했다.
+      전체 347개 테스트 통과, 전체 커버리지 99%, mypy 클린(`user_service.py`
+      100% 유지). 기존 `revoke_all_for_user()`/스키마를 그대로 재사용해
+      모델 변경이나 마이그레이션은 필요 없었다. 비밀번호 변경 시 클라이언트
+      자신도 재로그인해야 하는 사용자 대상 동작 변화라
+      `FRONTEND_INTEGRATION.md`의 1-6/1-8 섹션에 안내를 추가했다.
+
 

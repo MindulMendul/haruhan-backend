@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.metrics import guest_conversions_total
 from app.core.password import PasswordTooLongError, hash_password, verify_password
 from app.db.models.user import User
+from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
 
 
@@ -12,6 +13,7 @@ class UserService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._users = UserRepository(session)
+        self._refresh_tokens = RefreshTokenRepository(session)
 
     async def update_profile(
         self,
@@ -38,6 +40,17 @@ class UserService:
                 user.hashed_password = hash_password(password)
             except PasswordTooLongError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            # 비밀번호를 바꾸는 건 보통 "계정이 뚫린 것 같다"는 의심에서 나오는
+            # 행동인데, 여기서 refresh token을 그대로 두면 공격자가 훔친 refresh
+            # token으로 최대 refresh_token_expire_days(기본 14일)까지 계속
+            # 로그인 상태를 유지할 수 있어 비밀번호 변경의 의미가 없어진다 -
+            # auth_service.py가 재사용 탐지/전체 로그아웃에 이미 쓰고 있는
+            # revoke_all_for_user()로 이 계정의 모든 refresh token을 함께
+            # 폐기한다(지금 이 요청을 보낸 클라이언트 자신의 refresh token도
+            # 포함 - access token만으로는 어느 refresh token이 이 세션 것인지
+            # 구분할 수 없어 DELETE /auth/sessions 전체 로그아웃과 똑같이
+            # 다시 로그인해야 한다).
+            await self._refresh_tokens.revoke_all_for_user(user.id)
 
         # 위 get_by_email 확인과 이 commit 사이에는(비밀번호 해싱 시간까지 포함해)
         # 시간차가 있다 - 같은 이메일로 두 프로필 변경/가입 요청이 동시에 오면 둘 다
