@@ -27,3 +27,18 @@ def test_verify_password_with_none_hash_is_consistent_across_calls():
     # 여러 번 호출해도 안정적으로 같은 결과를 내야 한다.
     for _ in range(5):
         assert verify_password("random-guess", None) is False
+
+
+def test_verify_password_rejects_password_over_byte_limit():
+    """hash_password()와 달리 verify_password()는 72바이트를 넘는 입력에 대한
+    가드가 없었다 - bcrypt.checkpw()가 조용히 자르는 대신 ValueError를 던지는데,
+    이게 로그인/current_password 검증 경로에서 처리되지 않은 500으로 새어나갔다.
+    72바이트를 넘는 입력은 어차피 실제 비밀번호와 일치할 수 없으므로, 예외 대신
+    안전하게 False를 반환해야 한다."""
+    hashed = hash_password("supersecret")
+    assert verify_password("가" * 72, hashed) is False  # 72자지만 UTF-8로는 72바이트를 넘음
+
+
+def test_verify_password_rejects_password_over_byte_limit_with_none_hash():
+    # hashed_password가 None인 경로(더미 해시 비교)에서도 같은 가드가 적용되는지 확인.
+    assert verify_password("가" * 72, None) is False

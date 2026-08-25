@@ -2318,4 +2318,55 @@
       요청의 동작은 그대로라 `FRONTEND_INTEGRATION.md` 갱신도 필요
       없었다.
 
+## 백로그 (88라운드)
+
+- [x] 112. 비밀번호 검증(`verify_password`)에 72바이트 길이 가드가 없어,
+      너무 긴 비밀번호로 로그인하거나 프로필 수정/계정 삭제를 시도하면
+      처리되지 않은 예외(500)가 나던 문제 수정 - 87번 라운드까지 이미 판
+      `Settings`/미들웨어 대신, 이번엔 서브에이전트에게 repositories,
+      `models.py` 캐싱, `ollama_service.py` 타임아웃, CORS 설정을 먼저
+      훑어 깨끗함을 확인시킨 뒤 `core/password.py`를 보게 했다.
+      `hash_password()`는 72바이트를 넘는 입력을 `PasswordTooLongError`로
+      명시적으로 거부하지만(bcrypt가 72바이트를 넘으면 조용히 잘라버리는
+      걸 막기 위함), 정작 기존 비밀번호와 "대조"하는 `verify_password()`에는
+      같은 가드가 없었다. `bcrypt.checkpw()`는 72바이트를 넘는 입력에
+      대해 자르는 대신 `ValueError`를 던지는데, 이게 그대로 라우트까지
+      새어나가 500이 됐다. 실제로 두 경로에서 재현 가능했다:
+      (1) `POST /auth/login` - `LoginRequest.password`의
+      `max_length=72`(`app/schemas/auth.py`)는 "문자 수" 기준이라, 멀티바이트
+      문자(예: 한글 72자)를 쓰면 스키마 검증은 통과하고도 UTF-8 바이트
+      수는 72를 넘을 수 있음. (2) `PATCH /users/me`, `DELETE /users/me`의
+      `current_password` 필드(`app/schemas/user.py`의
+      `UserUpdateRequest`/`AccountDeletionRequest`)는 애초에 길이 제한이
+      전혀 없어 임의로 긴 문자열을 그대로 보낼 수 있음. 실제 앱을 통해
+      재현했다 - 임시 테스트 파일(`client` fixture 사용, `get_db`가 올바르게
+      오버라이드된 상태)로 `DELETE /users/me`에 긴 `current_password`를
+      보내 `app/api/v1/routes/users.py` → `user_service.py:110` →
+      `password.py:38`까지 이어지는 전체 트레이스백에서 처리되지 않은
+      `ValueError`를 확인한 뒤 임시 파일은 삭제했다. 72바이트를 넘는
+      입력은 어차피 실제로 저장된 비밀번호와 일치할 수 없으므로(그런
+      긴 비밀번호는 애초에 해시로 저장될 수 없었다), `verify_password()`
+      맨 앞에서 바이트 길이를 확인해 넘으면 예외 대신 곧바로 `False`를
+      반환하도록 고쳤다 - 더미 해시 비교 분기보다 먼저 조기 반환하지만,
+      이 조기 반환은 제출된 비밀번호의 길이(공격자가 이미 아는 값)에만
+      의존하고 `hashed_password`/계정 존재 여부와는 무관하므로, 기존의
+      타이밍 기반 계정 존재 여부 유출 방어(존재하지 않는 사용자도 항상
+      더미 해시와 bcrypt 비교를 수행)와는 겹치지 않는다. 스키마 쪽
+      `current_password`에 `max_length=72`를 추가하는 방안도 검토했지만,
+      서비스 계층의 이 수정만으로 이미 크래시가 완전히 막히고 동작도
+      "불일치로 처리"로 일관되므로, 별도 스키마 제약을 추가하는 건
+      불필요한 범위 확장이라 판단해 하지 않았다.
+      `tests/test_password.py`에 `test_verify_password_rejects_password_over_byte_limit`
+      (`"가" * 72`로 실제 해시와 대조 - 문자 수는 72지만 바이트 수는 넘음)와
+      `test_verify_password_rejects_password_over_byte_limit_with_none_hash`
+      (더미 해시 비교 경로에서도 같은 가드 적용 확인)를 추가했다. `git
+      stash`로 `password.py` 수정만 되돌린 뒤 두 테스트가 정확히 같은
+      `ValueError: password cannot be longer than 72 bytes...`로 실패하는
+      것까지 확인하고 나서 수정을 복원했다. 전체 369개 테스트 통과,
+      전체 커버리지 99%(`password.py` 100% 유지), mypy 클린. 순수
+      서비스 계층 로직 수정이라 모델/스키마 변경이나 마이그레이션은
+      필요 없었고, 클라이언트 입장에서 기존에도 "틀린 비밀번호"였어야
+      할 케이스가 500 대신 정상적인 401/403으로 바뀌는 것뿐이라
+      `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
 
