@@ -43,12 +43,16 @@ def test_deleting_study_session_forgets_its_rag_indexed_messages(db_session_fact
             )
 
             chunks = KnowledgeChunkRepository(session)
-            before = await chunks.list_for_user(user.id, embedding_model=settings.embedding_model)
+            before = await chunks.list_for_user(
+                user.id, embedding_model=settings.embedding_model, limit=settings.rag_max_candidate_chunks
+            )
             assert len(before) == 2  # user + assistant message 각각 색인됨
 
             await study_service.delete_session(session_id=study_session.id, user_id=user.id)
 
-            after = await chunks.list_for_user(user.id, embedding_model=settings.embedding_model)
+            after = await chunks.list_for_user(
+                user.id, embedding_model=settings.embedding_model, limit=settings.rag_max_candidate_chunks
+            )
             assert after == []
 
     asyncio.run(_run())

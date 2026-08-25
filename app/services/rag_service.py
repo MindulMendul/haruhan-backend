@@ -98,7 +98,9 @@ class RagService:
         실패해도 채팅 자체는 평소대로 계속되어야 한다.
         """
         model = self._settings.embedding_model
-        candidates = await self._chunks.list_for_user(user_id, embedding_model=model)
+        candidates = await self._chunks.list_for_user(
+            user_id, embedding_model=model, limit=self._settings.rag_max_candidate_chunks
+        )
         if not candidates:
             return []
 

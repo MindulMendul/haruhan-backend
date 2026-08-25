@@ -293,3 +293,54 @@ def test_forget_content_removes_chunk(db_session_factory):
             assert results == []
 
     asyncio.run(_run())
+
+
+def test_list_for_user_limits_to_most_recent_chunks(db_session_factory):
+    """색인된 청크(학습챗 메시지/퀴즈 소스/면접복기)는 만료/정리 로직이 없어
+    계정이 오래될수록 계속 쌓이기만 한다 - retrieve_relevant()가 매 채팅/면접
+    연습 턴마다 그 전체를 DB에서 읽어와 코사인 유사도로 채점하던 것에 대한
+    안전장치로, list_for_user()의 limit이 최근 것부터 최대 limit개만
+    반환하는지 확인한다. created_at은 server_default라 짧은 시간에 여러
+    청크를 만들면 값이 동률이 되기 쉬워서(94번 라운드와 같은 함정), 순서
+    검증이 흔들리지 않도록 각 청크의 created_at을 명시적으로 서로 다른
+    값으로 지정한다."""
+    import uuid as uuid_module
+    from datetime import timedelta
+
+    from app.core.clock import utcnow_naive
+    from app.db.models.knowledge_chunk import KnowledgeChunk
+    from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            base = utcnow_naive()
+            for i in range(5):
+                session.add(
+                    KnowledgeChunk(
+                        id=uuid_module.uuid4(),
+                        user_id=user.id,
+                        source_type="study_message",
+                        source_id=uuid_module.uuid4(),
+                        content=f"청크 {i}",
+                        embedding=[1.0, 0.0, 0.0],
+                        embedding_model="nomic-embed-text",
+                        created_at=base + timedelta(seconds=i),
+                    )
+                )
+            await session.commit()
+
+            repo = KnowledgeChunkRepository(session)
+            return (
+                await repo.list_for_user(user.id, embedding_model="nomic-embed-text", limit=3),
+                await repo.list_for_user(user.id, embedding_model="nomic-embed-text", limit=100),
+            )
+
+    limited, unlimited = asyncio.run(_run())
+
+    # limit=3: 가장 최근 3개(청크 4, 3, 2)만, 최신순으로.
+    assert [c.content for c in limited] == ["청크 4", "청크 3", "청크 2"]
+    # limit이 총 개수보다 크면 전부(5개) 반환 - 역시 최신순.
+    assert [c.content for c in unlimited] == ["청크 4", "청크 3", "청크 2", "청크 1", "청크 0"]

@@ -31,14 +31,28 @@ class KnowledgeChunkRepository:
         await self._session.flush()
         return chunk
 
-    async def list_for_user(self, user_id: uuid.UUID, embedding_model: str) -> list[KnowledgeChunk]:
+    async def list_for_user(
+        self, user_id: uuid.UUID, embedding_model: str, limit: int
+    ) -> list[KnowledgeChunk]:
         """embedding_model이 일치하는 청크만 반환한다 - 모델이 다르면 임베딩 공간이 달라
-        코사인 유사도 비교 자체가 의미 없다."""
+        코사인 유사도 비교 자체가 의미 없다.
+
+        색인된 청크는 만료/정리 로직이 없어 계정이 오래될수록 계속 쌓이기만
+        한다 - limit은 그 무제한 증가에 대한 안전장치로, 최근 것부터 최대
+        이 개수만큼만 코사인 유사도 채점 후보로 가져온다(RagService.
+        rag_max_candidate_chunks 참고 - 정상적인 사용량에서는 사실상 영향이
+        없는 넉넉한 기본값이다). created_at만으로 정렬하면 값이 같은 행
+        사이의 순서가 정의돼 있지 않으므로, 잘림 경계가 매번 흔들리지 않도록
+        id를 2차 정렬 기준으로 추가한다.
+        """
         result = await self._session.execute(
-            select(KnowledgeChunk).where(
+            select(KnowledgeChunk)
+            .where(
                 KnowledgeChunk.user_id == user_id,
                 KnowledgeChunk.embedding_model == embedding_model,
             )
+            .order_by(KnowledgeChunk.created_at.desc(), KnowledgeChunk.id.desc())
+            .limit(limit)
         )
         return list(result.scalars().all())
 
