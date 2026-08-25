@@ -2595,4 +2595,64 @@
       기본값이 있어 기존 호출도 그대로 동작하는 하위 호환 변경이라
       마이그레이션은 필요 없었다.
 
+## 백로그 (94라운드)
+
+- [x] 118. 학습챗 메시지 전송/스트리밍이 매 턴마다 세션의 전체 메시지
+      히스토리를 DB에서 통째로 읽어온 뒤 파이썬에서 최근 N개만 자르고
+      있어, 대화가 길어질수록(메시지 수 제한 없음) 실제로 쓰지도 않을
+      과거 메시지까지 매번 다시 읽어오는 낭비가 계속 커지던 문제 수정 -
+      92~93번 라운드의 "리포지토리 목록 메서드 중 페이지네이션 없는
+      형제 찾기" 스윕을 서브에이전트에게 계속 시켜서 나온 결과다(모든
+      리포지토리의 `list_*`/전체 조회 메서드 18개를 전수 점검했고,
+      export처럼 "전체가 목적"인 메서드를 빼면 새로 남은 건 이 항목과
+      `KnowledgeChunkRepository.list_for_user`뿐이었는데, 후자는 90번
+      라운드가 이미 CPU 블로킹 쪽은 고쳤고 나머지는 아직 개선 여지가
+      있는 수준이라 이번엔 더 심각한 이 항목을 골랐다). `study_service.py`의
+      `send_message`/`stream_message`는 `StudyMessageRepository.
+      list_for_session()`으로 세션 전체 메시지를 가져온 뒤, `_recent_history()`
+      헬퍼로 `MAX_CHAT_HISTORY_MESSAGES`(기본 40)개만 파이썬 슬라이싱으로
+      남기고 나머지는 버렸다 - 한 세션에서 계속 대화하는 건 학습 앱에서
+      아주 흔한 사용 패턴이라, 세션이 오래될수록(메시지가 수백~수천 개로
+      쌓일수록) 채팅 한 턴을 처리할 때마다 그 전체를 DB에서 읽어오는 게
+      점점 더 낭비가 된다 - 90/91번 라운드가 고친 "매 요청마다 커지는
+      비용" 문제와 같은 성격이지만, 이번엔 CPU가 아니라 불필요한 DB
+      조회량이 문제다. `StudyMessageRepository`에 `list_recent_for_session
+      (session_id, limit)`을 새로 만들어 `ORDER BY created_at DESC LIMIT`으로
+      필요한 만큼만 가져온 뒤 시간순으로 다시 뒤집게 했고(다른
+      `list_for_user`들처럼 `id`를 2차 정렬 기준으로 추가해 같은 요청
+      안에서 몇 ms 사이에 만들어지는 메시지 쌍처럼 created_at이 같은
+      행 사이의 순서가 잘림 경계에서 흔들리지 않게 했다), `send_message`/
+      `stream_message`가 이 메서드를 직접 쓰도록 바꿔 이제 더는 세션 전체를
+      읽지 않는다. `_recent_history()` 파이썬 헬퍼는 필요 없어져 삭제했다.
+      `GET /study/sessions/{id}`가 세션 상세와 함께 메시지 전체를 페이지네이션
+      없이 반환하는 것도 같은 스윕에서 눈에 띄었지만, `QuizDetailResponse.
+      questions`/`InterviewPracticeSessionDetailResponse.turns`도 똑같이
+      "단일 리소스 상세 조회는 하위 항목 전체를 반환"하는 이 코드베이스
+      전체의 일관된 설계라(목록 API만 페이지네이션 대상), 이 라우트만
+      따로 페이지네이션을 넣으면 오히려 기존 설계 원칙과 어긋나는
+      비일관성이 생긴다고 판단해 이번 라운드에서는 손대지 않기로
+      결정했다 - 별도 항목으로 남겨둘 만한 가치는 있지만 이번엔 범위
+      밖으로 뒀다. 새 메서드에 대한 단위 테스트
+      (`test_list_recent_for_session_returns_last_n_in_chronological_order`)를
+      추가해 최근 N개/limit=0/음수/전체보다 큰 limit 경계값을 실제 DB
+      조회로 확인했다 - `created_at`이 `server_default=func.now()`라 SQLite
+      에서는 짧은 시간에 여러 메시지를 만들면 값이 쉽게 동률이 나는데,
+      순서 검증을 흔들리지 않게 하려고 각 메시지의 `created_at`을 명시적으로
+      서로 다른 값으로 지정해서 만들었다(처음엔 이 동률 때문에 실제로
+      테스트가 예상과 다른 순서를 반환하는 걸 직접 목격했고, 그걸 계기로
+      `id` 2차 정렬 기준을 추가하게 됐다 - id는 무작위 UUID라 순서 검증에는
+      못 쓰지만 동률을 결정론적으로만 깨면 되는 용도로는 충분하다). `git
+      stash`로 리포지토리/서비스 수정만 되돌리면 새 테스트가
+      `AttributeError`로 정확히 실패하는 것까지 확인했다. 기존
+      `test_send_message_truncates_history_to_configured_limit`/
+      `test_stream_message_truncates_history_to_configured_limit`(HTTP
+      레벨에서 실제로 Ollama에 전달되는 메시지 개수/내용을 확인하던 테스트)도
+      수정 없이 그대로 통과해, 관측 가능한 채팅 동작 자체는 전혀 바뀌지
+      않았음을 확인했다. 전체 376개 테스트 통과, 전체 커버리지 99%
+      (`study_service.py`/`study_message_repository.py` 모두 100% 유지 -
+      `user_service.py`의 95%는 93번 라운드에서 이미 확인한, 이 라운드와
+      무관한 기존 동시성 레이스 테스트의 커버리지 플레이키함), mypy 클린.
+      순수 리포지토리/서비스 계층 최적화라 모델/스키마 변경이나 마이그레이션,
+      `FRONTEND_INTEGRATION.md` 갱신 모두 필요 없었다.
+
 

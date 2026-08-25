@@ -38,15 +38,6 @@ def _build_grounding_message(chunks: list[str]) -> dict[str, str]:
     return {"role": "system", "content": f"{_GROUNDING_HEADER}\n\n[참고자료]\n{joined}"}
 
 
-def _recent_history(history: list[StudyMessage], limit: int) -> list[StudyMessage]:
-    """가장 최근 `limit`개의 메시지만 남긴다. 파이썬의 `history[-0:]`은 (음수 0이
-    없어서) 빈 리스트가 아니라 전체 리스트가 되어버리므로, limit이 0 이하인 경우를
-    별도로 처리해야 한다."""
-    if limit <= 0:
-        return []
-    return history[-limit:]
-
-
 class StudyService:
     def __init__(
         self,
@@ -116,13 +107,14 @@ class StudyService:
         if study_session is None:
             raise _SESSION_NOT_FOUND
 
-        history = await self._messages.list_for_session(session_id)
+        recent_history = await self._messages.list_recent_for_session(
+            session_id, self._settings.max_chat_history_messages
+        )
 
         user_message = await self._messages.create(session_id=session_id, role="user", content=content)
         # AI 호출 성패와 무관하게 사용자가 입력한 메시지는 먼저 커밋해서 보존한다.
         await self._session.commit()
 
-        recent_history = _recent_history(history, self._settings.max_chat_history_messages)
         chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
 
         relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=content)
@@ -175,13 +167,14 @@ class StudyService:
         if study_session is None:
             raise _SESSION_NOT_FOUND
 
-        history = await self._messages.list_for_session(session_id)
+        recent_history = await self._messages.list_recent_for_session(
+            session_id, self._settings.max_chat_history_messages
+        )
 
         user_message = await self._messages.create(session_id=session_id, role="user", content=content)
         await self._session.commit()
         yield "user_message", user_message
 
-        recent_history = _recent_history(history, self._settings.max_chat_history_messages)
         chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
 
         relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=content)

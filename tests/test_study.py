@@ -3,7 +3,6 @@ import pytest
 from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
 from app.services.ollama_service import OllamaServiceError
-from app.services.study_service import _recent_history
 
 
 class FakeOllamaService:
@@ -180,17 +179,68 @@ def test_send_message_rejects_content_over_max_length(client, monkeypatch):
     assert response.status_code == 422
 
 
-def test_recent_history_treats_non_positive_limit_as_empty():
-    """파이썬 슬라이싱에서 `history[-0:]`은 음수 0이 없어서 `history[0:]`, 즉
-    전체 리스트가 되어버린다 - limit=0으로 "히스토리 없이 보내라"는 의도가
-    조용히 "전체 히스토리를 다 보내라"로 뒤집히는 함정이다. 0과 음수를 둘 다
-    빈 리스트로 명시 처리하는지, 그리고 양수일 때는 정말 뒤쪽 N개만 남기는지
-    확인한다."""
-    history = ["a", "b", "c", "d"]
-    assert _recent_history(history, 0) == []
-    assert _recent_history(history, -1) == []
-    assert _recent_history(history, 2) == ["c", "d"]
-    assert _recent_history(history, 100) == ["a", "b", "c", "d"]
+def test_list_recent_for_session_returns_last_n_in_chronological_order(db_session_factory):
+    """send_message/stream_message가 채팅 프롬프트에 넣을 최근 히스토리를
+    구하던 이전 방식은 list_for_session()으로 세션 전체를 가져온 뒤 파이썬
+    슬라이싱(`history[-limit:]`)으로 뒤쪽 N개만 남겼다 - 대화가 길어질수록
+    (메시지 수 제한 없음) 매 턴마다 이미 안 쓸 앞부분까지 통째로 읽어오는
+    낭비였다. list_recent_for_session()이 SQL `ORDER BY DESC LIMIT`으로
+    필요한 만큼만 가져오면서도 순서/개수/경계값이 이전 파이썬 슬라이싱과
+    동일하게 동작하는지 실제 DB 조회로 확인한다 - 특히 limit=0/음수를
+    빈 리스트로 명시 처리하는지(파이썬의 `history[-0:]`이 빈 리스트가 아니라
+    전체 리스트가 되어버리는 것과 같은 종류의 함정이 SQL `LIMIT`에도 있다).
+
+    created_at은 server_default=func.now()라 짧은 시간에 여러 메시지를
+    만들면 SQLite에서는(초 단위 정밀도) 값이 전부 같아지기 쉬워서, 실제로는
+    id를 2차 정렬 기준으로 쓴다 - 하지만 id는 무작위 UUID라 순서 검증용으로는
+    쓸 수 없다. 그래서 각 메시지의 created_at을 명시적으로 서로 다른 값으로
+    지정해, 동률 없이 실제 시간순 정렬/자르기만 검증한다."""
+    import asyncio
+    import uuid
+    from datetime import timedelta
+
+    from app.core.clock import utcnow_naive
+    from app.db.models.study_message import StudyMessage
+    from app.repositories.study_message_repository import StudyMessageRepository
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="히스토리 테스트", model="qwen2.5:3b"
+            )
+            await session.commit()
+
+            base = utcnow_naive()
+            for i in range(4):
+                session.add(
+                    StudyMessage(
+                        id=uuid.uuid4(),
+                        session_id=study_session.id,
+                        role="user",
+                        content=f"메시지 {i}",
+                        created_at=base + timedelta(seconds=i),
+                    )
+                )
+            await session.commit()
+
+            messages = StudyMessageRepository(session)
+            return (
+                await messages.list_recent_for_session(study_session.id, 2),
+                await messages.list_recent_for_session(study_session.id, 0),
+                await messages.list_recent_for_session(study_session.id, -1),
+                await messages.list_recent_for_session(study_session.id, 100),
+            )
+
+    last_two, zero_limit, negative_limit, over_limit = asyncio.run(_run())
+
+    assert [m.content for m in last_two] == ["메시지 2", "메시지 3"]
+    assert zero_limit == []
+    assert negative_limit == []
+    assert [m.content for m in over_limit] == [f"메시지 {i}" for i in range(4)]
 
 
 class HistoryTrackingOllamaService:
