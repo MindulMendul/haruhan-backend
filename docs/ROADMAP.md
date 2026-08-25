@@ -3033,4 +3033,63 @@
       전혀 영향받지 않는 순수 방어적 강화라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (103라운드)
+
+- [x] 127. `StudyMessageRepository.list_for_session`/`list_for_sessions`가
+      `created_at`만으로 정렬해, 같은 세션에서 몇 ms 사이에 만들어지는
+      user/assistant 메시지 쌍의 순서가 SQLite(`server_default=CURRENT_TIMESTAMP`,
+      초 단위 정밀도)에서 실제로 흔들릴 수 있던 문제 수정. 같은 파일의
+      `list_recent_for_session`은 정확히 이 문제(같은 요청 안에서 근접
+      생성되는 메시지 쌍)를 주석으로 지적하며 `id`를 2차 정렬 기준으로
+      쓰고 있었는데, 형제 메서드인 `list_for_session`/`list_for_sessions`
+      는 그 수정에서 빠져 있었다 - 지금까지 완료한 id 2차 정렬 스윕은
+      "페이지네이션 있는 목록"만 대상으로 했었고, 이 두 메서드는
+      페이지네이션이 없어 그 스윕 범위 밖에 있었다. 이 순서는 실제로
+      `GET /study/sessions/{id}`가 대화를 화면에 그대로 렌더링하는
+      순서, `QuizService.create_quiz`(study_session_id 경로)가 메시지를
+      이어붙여 퀴즈 생성 프롬프트를 만드는 순서, `export_service.py`가
+      내보내는 JSON의 메시지 순서로 직접 쓰인다.
+
+      처음엔 `list_for_session`/`list_for_sessions`에 그냥 `id`를 2차
+      정렬 기준으로만 추가했는데, 훅으로 걸린 `test_stream_message_sends_deltas_then_done`
+      이 바로 실패했다 - `StudyMessage.id`는 (다른 엔티티들과 마찬가지로)
+      `uuid.uuid4()`로 만드는 완전히 무작위인 값이라, "동률을 결정론적으로
+      깬다"는 건 보장해도 "생성 순서를 보존한다"는 보장은 전혀 없다.
+      `QuizAttempt.submitted_at`처럼 "동률 중 아무거나 골라도 상관없는"
+      경우엔 무작위 id 타이브레이크로 충분하지만, 대화 메시지는 순서
+      자체가 의미(질문 다음에 답변)라 무작위 타이브레이크로는 부족했다 -
+      실제로 고쳐보니, SQLite가 명시적 정렬 없이는 삽입 순서로 반환해주던
+      "우연히 맞았던" 이전 동작보다 오히려 나빠져(assistant가 user보다
+      먼저 나올 수 있음), 진짜 근본 수정이 필요했다. `QuizAttempt.submitted_at`
+      이 겪었던 것과 똑같은 근본 원인이라, 똑같은 해법을 그대로 가져와
+      `StudyMessage.created_at`도 DB의 `server_default=func.now()` 대신
+      파이썬 쪽 마이크로초 정밀도 `default=utcnow_naive`로 바꿨다 - 이러면
+      실제 동률이 사실상 안 일어나 자연스러운 시간순이 곧 인과관계상
+      올바른 순서가 된다. 그 위에 `id` 2차(`list_for_session`) /
+      3차(`list_for_sessions`, `session_id`/`created_at` 다음) 정렬은
+      순수 결정론 보장용 안전장치로 남겨뒀다(진짜 마이크로초 동률이
+      일어나는 극히 드문 경우에만 관여하므로 더 이상 위험 요소가 아님).
+      `submitted_at`과 마찬가지로 컬럼 타입은 그대로고 파이썬 쪽 기본값만
+      바뀐 거라 마이그레이션은 필요 없었다(migrations/versions의 원본
+      CREATE TABLE에 남아있는 DB 레벨 `server_default`는 ORM이 항상 값을
+      명시적으로 채워 넣으므로 그냥 안 쓰이게 됨 - `submitted_at` 때와
+      동일).
+
+      새 테스트 파일 `tests/test_study_message_ordering.py`에 3개 추가:
+      `test_create_gives_back_to_back_messages_distinct_microsecond_timestamps`
+      (연달아 만든 두 메시지의 `created_at`이 실제로 달라지는지),
+      `test_list_for_session_preserves_creation_order_across_many_back_to_back_messages`
+      (6개를 연달아 만들어도 `list_for_session`이 생성 순서를 그대로
+      보존하는지), `test_list_for_session_breaks_genuine_created_at_ties_deterministically_by_id`
+      (94라운드 기법대로 `create()`를 거치지 않고 완전히 같은 `created_at`
+      을 강제로 만들어, id 오름차순 - `list_recent_for_session`과 같은
+      상대 순서 - 로 결정론적으로 정렬되는지). `git stash`로 리포지토리/
+      모델 수정을 모두 되돌리면 처음 두 테스트가 정확히 실패하는 것까지
+      확인했다(세 번째는 우연히 통과 - id 타이브레이크만으로도 "무작위지만
+      일관된" 순서는 나오기 때문에, 이 테스트 하나만으론 순서의 의미
+      자체가 틀렸다는 걸 못 잡는다는 걸 보여주는 사례이기도 하다).
+      전체 394개 테스트 통과, 전체 커버리지 99%(`db/models/study_message.py`/
+      `repositories/study_message_repository.py` 모두 100%), mypy 클린.
+      응답 형태는 그대로고 내부 정렬/타임스탬프 정밀도만 바뀐 변경이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
 

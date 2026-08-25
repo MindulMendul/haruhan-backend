@@ -17,10 +17,15 @@ class StudyMessageRepository:
         return message
 
     async def list_for_session(self, session_id: uuid.UUID) -> list[StudyMessage]:
+        """created_at만으로 정렬하면 값이 같은 행(같은 요청 안에서 몇 ms 사이에
+        만들어지는 user/assistant 메시지 쌍 등) 사이의 순서가 SQL 표준상 정의돼
+        있지 않다 - id를 2차 정렬 기준으로 추가해 동률을 항상 같은 순서로
+        결정론적으로 깨지도록 한다(list_recent_for_session과 같은 이유이자
+        같은 상대 순서 - id 오름차순 - 를 쓴다)."""
         result = await self._session.execute(
             select(StudyMessage)
             .where(StudyMessage.session_id == session_id)
-            .order_by(StudyMessage.created_at)
+            .order_by(StudyMessage.created_at, StudyMessage.id)
         )
         return list(result.scalars().all())
 
@@ -59,13 +64,14 @@ class StudyMessageRepository:
     async def list_for_sessions(self, session_ids: list[uuid.UUID]) -> list[StudyMessage]:
         """여러 세션의 메시지를 한 번에 가져온다 (데이터 export처럼 세션마다
         따로 조회하면 세션 개수만큼 쿼리가 느는 N+1을 피하려는 용도).
-        정렬은 session_id, created_at 순이라 호출부에서 session_id별로
-        묶기만 하면 각 그룹 내부도 시간순이 유지된다."""
+        정렬은 session_id, created_at, id 순이라 호출부에서 session_id별로
+        묶기만 하면 각 그룹 내부도 시간순(동률은 id로 결정론적으로 깨짐)이
+        유지된다."""
         if not session_ids:
             return []
         result = await self._session.execute(
             select(StudyMessage)
             .where(StudyMessage.session_id.in_(session_ids))
-            .order_by(StudyMessage.session_id, StudyMessage.created_at)
+            .order_by(StudyMessage.session_id, StudyMessage.created_at, StudyMessage.id)
         )
         return list(result.scalars().all())
