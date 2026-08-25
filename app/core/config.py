@@ -176,7 +176,22 @@ class Settings(BaseSettings):
         위해 DEFAULT만 올리면) `question_count`를 생략한 - 아마 대다수인 -
         요청들이 조용히 그 한도를 넘는 문항 수를 요청하게 된다. 요청 시점에
         걸러내는 대신, 다른 검증들처럼 시작 시점에 막아 이 모순된 설정 조합
-        자체가 배포되지 못하게 한다."""
+        자체가 배포되지 못하게 한다.
+
+        아래쪽 한계(1 이상)도 여기서 함께 검증한다 - 요청 스키마 쪽
+        `QuizCreateRequest.question_count`는 `Field(ge=1)`로 이미 막혀
+        있지만, `question_count`를 생략했을 때 그 자리를 채우는
+        `default_quiz_question_count`는 그 검증을 거치지 않는다.
+        `DEFAULT_QUIZ_QUESTION_COUNT=0`(혹은 음수)이 설정되면 매번
+        "0문항을 만들어달라"는 프롬프트가 나가고, `_GeneratedQuiz.questions`
+        가 `min_length=1`이라 항상 검증에 실패해 재시도(`_MAX_QUIZ_
+        GENERATION_ATTEMPTS`)까지 다 쓴 뒤 502로 끝난다 - `question_count`를
+        생략한 모든 퀴즈 생성 요청이 Ollama 호출만 낭비하고 항상 실패하게
+        되므로, 이 조합도 시작 시점에 막는다."""
+        if self.default_quiz_question_count < 1:
+            raise ValueError(
+                f"DEFAULT_QUIZ_QUESTION_COUNT({self.default_quiz_question_count})는 1 이상이어야 합니다."
+            )
         if self.default_quiz_question_count > self.max_quiz_question_count:
             raise ValueError(
                 "DEFAULT_QUIZ_QUESTION_COUNT"

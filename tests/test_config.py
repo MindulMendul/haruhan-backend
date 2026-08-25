@@ -69,6 +69,19 @@ def test_settings_rejects_default_quiz_question_count_over_max():
     assert "MAX_QUIZ_QUESTION_COUNT" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_default_quiz_question_count_below_one(bad_value):
+    """요청 스키마의 `QuizCreateRequest.question_count`는 `Field(ge=1)`로 이미
+    막혀 있지만, `question_count`를 생략했을 때 그 자리를 채우는
+    `default_quiz_question_count`는 그 검증을 거치지 않는다.
+    `DEFAULT_QUIZ_QUESTION_COUNT=0`(또는 음수)이면 `question_count`를 생략한
+    모든 퀴즈 생성 요청이 "0문항을 만들어달라"는 프롬프트를 보내 매번 검증
+    실패 -> 재시도 -> 502로 끝나게 된다 - 이 조합도 설정 로딩 시점에 막는다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, default_quiz_question_count=bad_value)
+    assert "DEFAULT_QUIZ_QUESTION_COUNT" in str(exc_info.value)
+
+
 @pytest.mark.parametrize("field", ["chat_rate_limit", "auth_rate_limit", "export_rate_limit"])
 def test_settings_accepts_well_formed_rate_limit_string(field):
     settings = Settings(jwt_secret_key="a" * 32, **{field: "3/minute"})

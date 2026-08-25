@@ -2252,4 +2252,36 @@
       마이그레이션은 필요 없었고, 클라이언트가 보내는 요청/응답 형태는
       그대로라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (86라운드)
+
+- [x] 110. `DEFAULT_QUIZ_QUESTION_COUNT`에 아래쪽 한계가 없어, 0이나 음수로
+      설정되면 `question_count`를 생략한 모든 퀴즈 생성 요청이 항상
+      502로 실패하던 문제 수정 - 85번 라운드 조사에서 후순위 후보로
+      남겨뒀던 걸 이번 라운드에서 마저 처리했다. 요청 스키마 쪽
+      `QuizCreateRequest.question_count`는 `Field(ge=1)`로 이미 하한이
+      걸려 있지만, `question_count`를 생략했을 때 그 자리를 그대로
+      채우는 `default_quiz_question_count`는 108번 라운드가 추가한
+      `max_quiz_question_count`와의 상한 비교만 거칠 뿐 하한은 전혀
+      검증하지 않았다. `DEFAULT_QUIZ_QUESTION_COUNT=0`(또는 음수)이
+      설정되면(상한 검증은 통과함 - 0 ≤ max) `question_count`를 생략한
+      모든 퀴즈 생성 요청이 "0문항을 만들어달라"는 프롬프트를 매번
+      내보내고, `_GeneratedQuiz.questions`가 `min_length=1`이라 항상
+      검증에 실패해 재시도(`_MAX_QUIZ_GENERATION_ATTEMPTS`)까지 Ollama
+      호출을 낭비한 뒤 502로 끝난다 - `question_count`를 생략하는
+      경로(아마 대다수) 전체가 이 설정 하나로 영구히 고장 나는 셈이었다.
+      새 검증을 따로 만들지 않고, 108번 라운드에서 추가한
+      `_validate_quiz_question_count_defaults` 안에 `default_quiz_
+      question_count >= 1` 검증을 함께 넣었다(같은 필드를 다루는 관련
+      검증이라 이 필드 하나에 여러 `model_validator`를 만들기보다 묶어
+      두는 게 자연스럽다고 판단). `Settings`의 다른 필드들처럼 `Field(ge=1)`
+      대신 검증기로 처리해 이 파일의 기존 관례(모든 제약이 `field_validator`
+      /`model_validator`를 통해 걸림, `Field(...)`는 한 번도 안 씀)를
+      그대로 따랐다. `0`과 `-1` 둘 다 거부되는지 확인하는 테스트를
+      추가했고, 수정 전 코드에서 둘 다 실제로 통과(=버그가 재현됨)하는
+      것까지 확인한 뒤(`git stash`로 수정 부분만 되돌렸다가 복원) 다시
+      적용했다. 전체 366개 테스트 통과, 전체 커버리지 99%, mypy 클린
+      (`config.py` 100% 유지). 순수 설정 계층 검증 추가라 모델/스키마
+      변경이나 마이그레이션은 필요 없었고, 클라이언트가 보내는 요청/응답
+      형태는 그대로라 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
 
