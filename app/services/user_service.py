@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +26,12 @@ class UserService:
     ) -> User:
         if current_password is not None:
             # 게스트 계정은 hashed_password가 없어 비교 자체가 불가능하다 (아직 계정 전환 기능 없음).
-            if user.hashed_password is None or not verify_password(current_password, user.hashed_password):
+            # bcrypt는 호출당 이 환경 기준 약 300ms가 걸리는 계산 비용이 큰 함수라,
+            # 이벤트 루프에서 그대로 부르면 그 시간만큼 다른 모든 동시 요청이 멈춘다 -
+            # auth_service.py의 로그인/가입과 같은 이유로 스레드 풀에 위임한다.
+            if user.hashed_password is None or not await asyncio.to_thread(
+                verify_password, current_password, user.hashed_password
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
                 )
@@ -37,7 +44,7 @@ class UserService:
 
         if password is not None:
             try:
-                user.hashed_password = hash_password(password)
+                user.hashed_password = await asyncio.to_thread(hash_password, password)
             except PasswordTooLongError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
             # 비밀번호를 바꾸는 건 보통 "계정이 뚫린 것 같다"는 의심에서 나오는
@@ -80,7 +87,7 @@ class UserService:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
         try:
-            user.hashed_password = hash_password(password)
+            user.hashed_password = await asyncio.to_thread(hash_password, password)
         except PasswordTooLongError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         user.email = email
@@ -107,7 +114,9 @@ class UserService:
         비교 자체가 불가능하므로 확인 없이 진행한다.
         """
         if user.hashed_password is not None:
-            if current_password is None or not verify_password(current_password, user.hashed_password):
+            if current_password is None or not await asyncio.to_thread(
+                verify_password, current_password, user.hashed_password
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
                 )

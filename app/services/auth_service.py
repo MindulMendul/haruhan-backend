@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from fastapi import HTTPException, status
@@ -47,7 +48,13 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
         try:
-            hashed = hash_password(password)
+            # bcrypt는 의도적으로 계산 비용이 큰(이 환경 기준 호출당 약 300ms) 함수라,
+            # 이벤트 루프에서 그대로 부르면 그 시간만큼 같은 워커의 다른 모든 동시
+            # 요청(다른 사용자의 요청, 진행 중인 WebSocket 스트림 등)이 멈춘다 -
+            # 90번 라운드에서 RAG 유사도 채점에 적용한 것과 같은 이유로, 매 로그인/
+            # 가입/비밀번호 변경마다 반드시 거치는 이 CPU 바운드 계산을 스레드
+            # 풀로 위임한다.
+            hashed = await asyncio.to_thread(hash_password, password)
         except PasswordTooLongError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -77,7 +84,7 @@ class AuthService:
         # 이메일에서 곧바로 반환해버리면, bcrypt 비교를 건너뛴 만큼 응답이 빨라져서
         # 응답 시간만으로 이메일 가입 여부를 추측할 수 있게 된다(타이밍 공격).
         hashed_password = user.hashed_password if user is not None else None
-        password_matches = verify_password(password, hashed_password)
+        password_matches = await asyncio.to_thread(verify_password, password, hashed_password)
         if user is None or hashed_password is None or not password_matches:
             raise _INVALID_CREDENTIALS
 

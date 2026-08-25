@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import threading
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -9,6 +10,7 @@ from app.core.password import hash_password
 from app.db.base import Base
 from app.repositories.user_repository import UserRepository
 from app.services.user_service import UserService
+import app.services.user_service as user_service_module
 
 
 def _signup_and_get_tokens(client, email="user@example.com", password="supersecret"):
@@ -307,3 +309,51 @@ def test_delete_guest_account_without_password(client):
 
     me = client.get("/api/v1/users/me", headers=_auth_headers(token))
     assert me.status_code == 401
+
+
+def test_update_profile_and_delete_account_hash_and_verify_password_off_the_event_loop_thread(
+    db_session_factory, monkeypatch
+):
+    """bcrypt는 이 환경 기준 호출당 약 300ms가 걸리는 계산 비용이 큰 함수라,
+    이벤트 루프에서 그대로 부르면 그 시간만큼 같은 워커의 다른 모든 동시 요청이
+    멈춘다(90번 라운드에서 RAG 유사도 채점에 적용한 것과 같은 이유) -
+    update_profile()의 verify_password(current_password 확인)/hash_password(비밀번호
+    변경), delete_account()의 verify_password 호출이 실제로 메인(이벤트 루프)
+    스레드가 아닌 스레드 풀에서 일어나는지 직접 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create(
+                email="thread-check@example.com", hashed_password=hash_password("supersecret")
+            )
+            await session.commit()
+
+            main_thread = threading.current_thread()
+            call_threads: list[threading.Thread] = []
+
+            original_hash_password = user_service_module.hash_password
+            original_verify_password = user_service_module.verify_password
+
+            def _tracking_hash_password(password):
+                call_threads.append(threading.current_thread())
+                return original_hash_password(password)
+
+            def _tracking_verify_password(password, hashed_password):
+                call_threads.append(threading.current_thread())
+                return original_verify_password(password, hashed_password)
+
+            monkeypatch.setattr(user_service_module, "hash_password", _tracking_hash_password)
+            monkeypatch.setattr(user_service_module, "verify_password", _tracking_verify_password)
+
+            service = UserService(session=session)
+            await service.update_profile(
+                user=user, email=None, password="newsecret", current_password="supersecret"
+            )
+            await service.delete_account(user=user, current_password="newsecret")
+
+            # update_profile: verify_password(current_password 확인) + hash_password(비밀번호 변경)
+            # delete_account: verify_password(current_password 확인)
+            assert len(call_threads) == 3
+            assert all(t is not main_thread for t in call_threads)
+
+    asyncio.run(_run())

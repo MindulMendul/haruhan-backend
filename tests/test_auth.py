@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import threading
 from datetime import timedelta
 
 from fastapi import HTTPException
@@ -16,6 +17,7 @@ from app.db.models.user import User
 from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
+import app.services.auth_service as auth_service_module
 
 
 def test_signup_login_refresh_logout_flow(client):
@@ -485,3 +487,43 @@ def test_logout_is_rate_limited(client, monkeypatch):
     assert first.status_code == 204
     assert second.status_code == 204
     assert third.status_code == 429
+
+
+def test_signup_and_login_hash_and_verify_password_off_the_event_loop_thread(
+    db_session_factory, monkeypatch
+):
+    """bcrypt는 이 환경 기준 호출당 약 300ms가 걸리는 계산 비용이 큰 함수라,
+    이벤트 루프에서 그대로 부르면 그 시간만큼 같은 워커의 다른 모든 동시 요청이
+    멈춘다(90번 라운드에서 RAG 유사도 채점에 적용한 것과 같은 이유) - signup()의
+    hash_password, login()의 verify_password 호출이 실제로 메인(이벤트 루프)
+    스레드가 아닌 스레드 풀에서 일어나는지 직접 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            main_thread = threading.current_thread()
+            call_threads: list[threading.Thread] = []
+
+            original_hash_password = auth_service_module.hash_password
+            original_verify_password = auth_service_module.verify_password
+
+            def _tracking_hash_password(password):
+                call_threads.append(threading.current_thread())
+                return original_hash_password(password)
+
+            def _tracking_verify_password(password, hashed_password):
+                call_threads.append(threading.current_thread())
+                return original_verify_password(password, hashed_password)
+
+            monkeypatch.setattr(auth_service_module, "hash_password", _tracking_hash_password)
+            monkeypatch.setattr(auth_service_module, "verify_password", _tracking_verify_password)
+
+            service = AuthService(session=session, settings=settings)
+            await service.signup(email="thread-check@example.com", password="supersecret")
+            await service.login(email="thread-check@example.com", password="supersecret")
+
+            # signup -> hash_password 1회, login -> verify_password 1회
+            assert len(call_threads) == 2
+            assert all(t is not main_thread for t in call_threads)
+
+    asyncio.run(_run())

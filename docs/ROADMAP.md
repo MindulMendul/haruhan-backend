@@ -2457,4 +2457,48 @@
       않는 순수 실행 위치 변경이라 모델/스키마 변경이나 마이그레이션,
       `FRONTEND_INTEGRATION.md` 갱신 모두 필요 없었다.
 
+## 백로그 (91라운드)
+
+- [x] 115. 로그인/가입/비밀번호 변경/게스트 승격/계정 삭제 때마다 bcrypt를
+      이벤트 루프에서 그대로 호출해, 그 시간만큼 같은 워커의 다른 모든
+      동시 요청(다른 사용자 요청, 진행 중인 WebSocket 스트림 포함)이
+      멈추던 문제 수정 - 서브에이전트에게 90번 라운드가 rag_service.py에
+      적용한 "이벤트 루프를 막는 CPU 바운드 작업" 패턴을 다른 곳에서도
+      찾아보라고 명시적으로 지시했고, 89~90번 라운드가 남긴 후보들
+      (모델 목록 API 인증/레이트리밋 누락, 헬스체크 타임아웃 - 이번에
+      실제로 확인해보니 `OllamaService`가 이미 60초 타임아웃을 갖고 있어
+      무한 대기는 아님을 확인하고 기각)보다 이게 더 실제적이고 심각하다고
+      판단해 골랐다. `app/core/password.py`의 `hash_password`/
+      `verify_password`는 내부적으로 `bcrypt.hashpw`/`bcrypt.checkpw`를
+      호출하는데, 이 환경에서 직접 측정해보니 호출당 약 300ms가 걸린다
+      (bcrypt는 무차별 대입 공격을 늦추기 위해 의도적으로 비용이 큰
+      함수다). `auth_service.py`의 `signup`/`login`, `user_service.py`의
+      `update_profile`/`upgrade_guest`/`delete_account` - 총 6곳의 호출부
+      전부가 이 동기 함수를 `async def` 서비스 메서드 안에서 `await` 없이
+      그대로 불러, 90번 라운드의 RAG 채점 문제와 완전히 같은 방식으로
+      이벤트 루프를 300ms씩 점유했다. 다만 이번엔 사용 기록이 쌓여야
+      나빠지는 문제가 아니라, 이 앱에서 가장 트래픽이 많은 로그인/가입
+      경로에서 매 호출마다 무조건 발생한다는 점에서 더 심각하다. 검색
+      결과(순위/정확도)를 바꾸지 않고 실행 위치만 옮긴 90번 라운드와
+      똑같은 원칙으로, `password.py`의 순수 함수들은 그대로 두고 6개
+      호출부 전부를 `await asyncio.to_thread(hash_password, ...)` /
+      `await asyncio.to_thread(verify_password, ...)`로 감쌌다(로그인의
+      "이메일 존재 여부와 무관하게 항상 bcrypt를 호출해야 하는" 타이밍
+      공격 방어 로직은 호출 위치만 스레드로 옮겼을 뿐 두 분기 모두 여전히
+      같은 방식으로 호출되므로 그대로 유지된다). 회귀 테스트는 90번
+      라운드와 같은 원칙(시간차 기반 측정은 신뢰할 수 없음)으로,
+      `hash_password`/`verify_password` 호출이 실제로 메인(이벤트 루프)
+      스레드가 아닌 스레드 풀에서 일어나는지 `threading.current_thread()`로
+      직접 확인하는 테스트 두 개를 추가했다 -
+      `test_signup_and_login_hash_and_verify_password_off_the_event_loop_thread`
+      (auth_service.py, signup+login)와
+      `test_update_profile_and_delete_account_hash_and_verify_password_off_the_event_loop_thread`
+      (user_service.py, update_profile+delete_account, 두 함수 모두 커버).
+      `git stash`로 서비스 수정만 되돌리면 두 테스트 모두 정확히 이
+      assert에서 실패하는 것까지 확인했다. 전체 374개 테스트 통과, 전체
+      커버리지 99%(`user_service.py` 100% 유지, `auth_service.py`의
+      유일한 미커버 라인은 이 라운드와 무관한 기존 방어적 분기), mypy
+      클린. 순수 실행 위치 변경이라 모델/스키마 변경이나 마이그레이션,
+      `FRONTEND_INTEGRATION.md` 갱신 모두 필요 없었다.
+
 
