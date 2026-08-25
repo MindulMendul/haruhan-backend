@@ -76,11 +76,17 @@ async def list_quizzes(
 
 @router.get("/wrong-answers", response_model=WrongAnswerNotebookResponse)
 async def get_wrong_answer_notebook(
+    response: Response,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     quiz_service: QuizService = Depends(get_quiz_service),
 ) -> WrongAnswerNotebookResponse:
     """내가 만든 모든 퀴즈에서, 퀴즈별 최근 제출 기준으로 틀린 문제만 모아 보여준다."""
-    entries = await quiz_service.get_wrong_answer_notebook(user_id=current_user.id)
+    entries, total = await quiz_service.get_wrong_answer_notebook(
+        user_id=current_user.id, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
     return WrongAnswerNotebookResponse(
         entries=[
             WrongAnswerEntry(

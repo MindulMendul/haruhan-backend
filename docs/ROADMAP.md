@@ -2501,4 +2501,50 @@
       클린. 순수 실행 위치 변경이라 모델/스키마 변경이나 마이그레이션,
       `FRONTEND_INTEGRATION.md` 갱신 모두 필요 없었다.
 
+## 백로그 (92라운드)
+
+- [x] 116. 오답노트(`GET /quizzes/wrong-answers`)에만 페이지네이션이 전혀
+      없어, 계정이 오래될수록(틀린 문제가 쌓일수록) 응답 크기가 무한정
+      늘어나던 문제 수정 - 서브에이전트에게 90~91번 라운드가 찾아낸
+      "이벤트 루프를 막는 블로킹 호출" 패턴을 계속 찾아보라고 지시했지만,
+      `time.sleep`/`requests.`/동기 파일 I/O 등을 전부 훑어봐도 더는 새
+      사례가 없음을 확인했고(그 패턴은 이번 세션에서 소진됐다고 결론),
+      대신 목록 API 전반의 일관성을 점검하다 이 항목을 새로 찾았다.
+      `list_quizzes`/`list_reviews`/`list_sessions`/`list_practice_sessions`
+      전부 `limit`(기본 20, 최대 100)/`offset` 쿼리 파라미터를 받고
+      `X-Total-Count` 응답 헤더로 총 개수를 알려주는 동일한 패턴을 쓰는데,
+      `get_wrong_answer_notebook`(`app/services/quiz_service.py`)만
+      `LIMIT` 없이 "사용자의 모든 퀴즈에서 틀린 문제 전부"를 한 번에
+      가져오고 있었다 - 이 뷰는 "가장 최근 퀴즈"가 아니라 "지금까지 틀린
+      문제 전체"라 정리/만료 로직도 없어, 계정이 오래될수록(94번
+      라운드가 다른 목록들에 페이지네이션을 넣을 때도 놓친 곳이다) 응답
+      본문과 그 근거가 되는 3중 조인(Quiz × QuizAttempt × QuizAnswer ×
+      QuizQuestion) 쿼리의 작업 집합이 함께 무한정 커진다. 다른 목록
+      API와 완전히 같은 패턴으로 맞췄다: `get_wrong_answer_notebook`이
+      `limit`/`offset`을 받고 `(entries, total)`을 반환하도록 바꿔, 기존
+      조인 쿼리를 `base_query`로 분리한 뒤 `select(func.count())
+      .select_from(base_query.subquery())`로 총 개수를 구하고, 실제
+      데이터 조회에만 `.limit()/.offset()`을 붙였다. 라우트
+      (`app/api/v1/routes/quiz.py`)도 다른 목록 엔드포인트와 동일하게
+      `Query(default=20, ge=1, le=100)`/`Query(default=0, ge=0)`를 받고
+      `response.headers["X-Total-Count"]`를 채우도록 맞췄다. 기존 회귀
+      테스트(`test_get_wrong_answer_notebook_issues_a_constant_number_of_
+      queries`, 퀴즈가 N개여도 SELECT가 고정 횟수만 나가는지 확인하던
+      테스트)는 총 개수 COUNT 쿼리가 하나 늘어난 걸 반영해 "고정 2번"으로
+      갱신했고(퀴즈 개수와 무관하게 여전히 고정 횟수라는 핵심 속성은
+      그대로 유지), `test_list_quizzes_pagination`과 동일한 형태의
+      `test_wrong_answer_notebook_pagination`을 새로 추가해 `limit`/
+      `offset`/`X-Total-Count`가 실제로 동작하고 페이지 간 항목이 겹치지
+      않는지 확인했다 - `git stash`로 서비스/라우트 수정만 되돌리면 두
+      테스트 모두(새 테스트는 `X-Total-Count` 불일치로, 기존 테스트는
+      `limit`/`offset` 키워드 인자를 모르는 `TypeError`로) 정확히
+      실패하는 것까지 확인했다. `docs/FRONTEND_INTEGRATION.md`의
+      "별도 페이지네이션은 없음(개인 학습 데이터라 규모가 크지 않을
+      거라 가정)"이라는 기존 문구가 이제 거짓이 되므로, 다른 목록
+      API들과 같은 설명으로 갱신했다. 전체 375개 테스트 통과, 전체
+      커버리지 99%(`quiz_service.py`/`routes/quiz.py` 100% 유지), mypy
+      클린. 응답 형태가 그대로고(새 쿼리 파라미터는 전부 기본값이 있어
+      기존 호출도 그대로 동작) 헤더 하나만 추가되는 하위 호환 변경이라
+      마이그레이션은 필요 없었다.
+
 

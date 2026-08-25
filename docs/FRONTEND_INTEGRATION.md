@@ -302,9 +302,9 @@ GET /api/v1/quizzes/{id}/attempts
 #### 3-2-2. 오답노트
 
 ```
-GET /api/v1/quizzes/wrong-answers
+GET /api/v1/quizzes/wrong-answers?limit=20&offset=0
 ```
-→ `200`
+→ `200` (응답 헤더에 `X-Total-Count`)
 ```json
 {
   "entries": [
@@ -316,7 +316,7 @@ GET /api/v1/quizzes/wrong-answers
   ]
 }
 ```
-내가 만든 모든 퀴즈를 통틀어, **퀴즈별 가장 최근 제출 기준**으로 틀린 문제만 모아서 보여줍니다. 같은 퀴즈를 다시 풀어서 맞히면 그 문제는 오답노트에서 바로 빠집니다. 별도 페이지네이션은 없음(개인 학습 데이터라 규모가 크지 않을 거라 가정).
+내가 만든 모든 퀴즈를 통틀어, **퀴즈별 가장 최근 제출 기준**으로 틀린 문제만 모아서 보여줍니다. 같은 퀴즈를 다시 풀어서 맞히면 그 문제는 오답노트에서 바로 빠집니다. 다른 목록 API와 동일하게 `?limit=20&offset=0` 쿼리 파라미터를 받고(`limit` 기본 20, 최대 100), 전체 개수는 `X-Total-Count` 응답 헤더로 옵니다 - 계정이 오래될수록 틀린 문제가 계속 쌓일 수 있어 페이지네이션 없이는 응답이 무한정 커질 수 있었습니다.
 
 ### 3-3. 면접 연습 (`/api/v1/interview/practice-sessions`)
 

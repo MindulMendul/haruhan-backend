@@ -921,12 +921,56 @@ def test_wrong_answer_notebook_empty_when_no_attempts(client):
     assert notebook.json()["entries"] == []
 
 
+def test_wrong_answer_notebook_pagination(client):
+    """list_quizzes 등 다른 목록 API처럼, 오답노트도 limit/offset을 받고
+    X-Total-Count로 총 개수를 알려줘야 한다 - 예전엔 "지금까지 틀린 문제 전부"를
+    한 번에 반환해, 계정이 오래될수록(틀린 문제가 쌓일수록) 응답 크기가
+    무한정 늘어났다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+
+    for i in range(5):
+        create = client.post(
+            "/api/v1/quizzes",
+            json={"title": f"오답노트 페이지네이션 {i}", "source_text": "내용"},
+            headers=_auth_headers(token),
+        )
+        quiz_id = create.json()["id"]
+        detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+        questions = detail.json()["questions"]
+        wrong_index = (questions[0]["choices"].index("B") + 1) % len(questions[0]["choices"])
+        correct_index = questions[1]["choices"].index("다")
+        client.post(
+            f"/api/v1/quizzes/{quiz_id}/submit",
+            json={
+                "answers": [
+                    {"question_id": questions[0]["id"], "selected_index": wrong_index},
+                    {"question_id": questions[1]["id"], "selected_index": correct_index},
+                ]
+            },
+            headers=_auth_headers(token),
+        )
+
+    first_page = client.get("/api/v1/quizzes/wrong-answers?limit=2&offset=0", headers=_auth_headers(token))
+    assert first_page.status_code == 200
+    assert len(first_page.json()["entries"]) == 2
+    assert first_page.headers["X-Total-Count"] == "5"
+
+    second_page = client.get("/api/v1/quizzes/wrong-answers?limit=2&offset=2", headers=_auth_headers(token))
+    assert len(second_page.json()["entries"]) == 2
+
+    first_ids = {e["question_id"] for e in first_page.json()["entries"]}
+    second_ids = {e["question_id"] for e in second_page.json()["entries"]}
+    assert first_ids.isdisjoint(second_ids)
+
+
 def test_get_wrong_answer_notebook_issues_a_constant_number_of_queries(db_session_factory):
     """이전 구현은 퀴즈 목록을 파이썬으로 순회하며 퀴즈마다 "최근 제출"/"그
     제출의 답안"/"문항 목록" 조회를 따로 날렸다 - 퀴즈가 N개면 최대 1+3N번의
     쿼리가 나가는 N+1 패턴이었다. 윈도우 함수로 한 번에 가져오도록 바꾼 뒤,
-    퀴즈가 5개 있어도 실행되는 SELECT 문이 여전히 딱 1번인지 SQLAlchemy의
-    `before_cursor_execute` 이벤트로 직접 세어서 확인한다."""
+    퀴즈가 5개 있어도 실행되는 SELECT 문이 여전히 퀴즈 개수와 무관하게 고정
+    횟수(페이지네이션 도입 후: 총 개수 COUNT 1번 + 실제 데이터 조회 1번 = 2번)인지
+    SQLAlchemy의 `before_cursor_execute` 이벤트로 직접 세어서 확인한다."""
     settings = get_settings()
 
     async def _run():
@@ -967,16 +1011,17 @@ def test_get_wrong_answer_notebook_issues_a_constant_number_of_queries(db_sessio
             engine = session.bind.sync_engine
             event.listen(engine, "before_cursor_execute", _record_select)
             try:
-                entries = await service.get_wrong_answer_notebook(user.id)
+                entries, total = await service.get_wrong_answer_notebook(user.id, limit=20, offset=0)
             finally:
                 event.remove(engine, "before_cursor_execute", _record_select)
 
-            return entries, select_statements
+            return entries, total, select_statements
 
-    entries, select_statements = asyncio.run(_run())
+    entries, total, select_statements = asyncio.run(_run())
 
     assert len(entries) == 5  # 퀴즈마다 오답 1개씩
-    assert len(select_statements) == 1  # 퀴즈 개수와 무관하게 SELECT는 딱 한 번
+    assert total == 5
+    assert len(select_statements) == 2  # 퀴즈 개수와 무관하게 SELECT는 고정 2번(총 개수 + 데이터)
 
 
 def test_list_attempts_returns_full_history_newest_first(client):

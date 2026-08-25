@@ -213,8 +213,8 @@ class QuizService:
         return quiz, questions
 
     async def get_wrong_answer_notebook(
-        self, user_id: uuid.UUID
-    ) -> list[tuple[Quiz, QuizQuestion, QuizAnswer]]:
+        self, user_id: uuid.UUID, limit: int, offset: int
+    ) -> tuple[list[tuple[Quiz, QuizQuestion, QuizAnswer]], int]:
         """사용자의 모든 퀴즈에서, 퀴즈별 가장 최근 제출 기준으로 틀린 문제만 모은다.
 
         같은 퀴즈를 다시 풀어서 맞혔다면 더 이상 오답노트에 나오지 않는다(최신 제출
@@ -225,6 +225,12 @@ class QuizService:
         쿼리가 나가는 N+1 패턴이었다. 퀴즈별 최신 제출을 윈도우 함수(`ROW_NUMBER()
         OVER (PARTITION BY quiz_id ORDER BY submitted_at DESC)`)로 한 번에 골라낸
         뒤, 그 최신 제출의 오답만 Quiz/QuizQuestion과 조인해 쿼리 하나로 가져온다.
+
+        list_quizzes/list_attempts 등 다른 목록 API는 전부 limit/offset을 받는데
+        (퀴즈/학습챗/면접연습/면접복기 목록 전부 최대 100건으로 페이지네이션됨),
+        이 오답노트는 "지금까지 틀린 문제 전부"를 한 번에 반환해 계정 나이(틀린
+        문제가 쌓인 양)에 따라 응답 크기가 무한정 늘어났다 - 같은 방식으로
+        limit/offset을 받고 총 개수를 함께 반환하도록 맞춘다.
         """
         latest_attempt_rank = (
             func.row_number()
@@ -244,15 +250,23 @@ class QuizService:
             .subquery()
         )
 
-        result = await self._session.execute(
+        base_query = (
             select(Quiz, QuizQuestion, QuizAnswer)
             .join(ranked_attempts, and_(ranked_attempts.c.quiz_id == Quiz.id, ranked_attempts.c.rank == 1))
             .join(QuizAnswer, QuizAnswer.attempt_id == ranked_attempts.c.attempt_id)
             .join(QuizQuestion, QuizQuestion.id == QuizAnswer.question_id)
             .where(Quiz.user_id == user_id, QuizAnswer.is_correct.is_(False))
-            .order_by(Quiz.created_at.desc(), QuizQuestion.order_index)
         )
-        return [(quiz, question, answer) for quiz, question, answer in result.all()]
+
+        total = await self._session.scalar(select(func.count()).select_from(base_query.subquery()))
+
+        result = await self._session.execute(
+            base_query.order_by(Quiz.created_at.desc(), QuizQuestion.order_index)
+            .limit(limit)
+            .offset(offset)
+        )
+        entries = [(quiz, question, answer) for quiz, question, answer in result.all()]
+        return entries, total or 0
 
     async def submit_answers(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID, answers: list[tuple[uuid.UUID, int]]
