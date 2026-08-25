@@ -346,14 +346,24 @@ class QuizService:
         ]
         return latest, graded
 
-    async def list_attempts(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> list[QuizAttempt]:
-        """한 퀴즈를 여러 번 다시 풀었을 때 점수 추이를 보여주기 위한 전체 제출 이력
+    async def list_attempts(
+        self, quiz_id: uuid.UUID, user_id: uuid.UUID, limit: int, offset: int
+    ) -> tuple[list[QuizAttempt], int]:
+        """한 퀴즈를 여러 번 다시 풀었을 때 점수 추이를 보여주기 위한 제출 이력
         (최신순). get_latest_result()는 가장 최근 1건만 상세(문항별 정답 여부)까지
-        주지만, 이건 재도전 목록/그래프용으로 점수 요약만 가볍게 준다."""
+        주지만, 이건 재도전 목록/그래프용으로 점수 요약만 가볍게 준다.
+
+        같은 퀴즈를 반복해서 재도전하는 건 흔한 사용 패턴이라, 계정이 오래될수록
+        재도전 횟수가 계속 쌓인다 - list_quizzes 등 다른 목록 API와 동일하게
+        limit/offset을 받고 총 개수를 함께 반환한다(116번 라운드가 오답노트에
+        적용한 것과 같은 이유).
+        """
         quiz = await self._quizzes.get_for_user(quiz_id, user_id)
         if quiz is None:
             raise _QUIZ_NOT_FOUND
-        return await self._attempts.list_for_quiz(quiz_id, user_id)
+        attempts = await self._attempts.list_for_quiz(quiz_id, user_id, limit=limit, offset=offset)
+        total = await self._attempts.count_for_quiz(quiz_id, user_id)
+        return attempts, total
 
     async def rename_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID, title: str) -> Quiz:
         quiz = await self._quizzes.get_for_user(quiz_id, user_id)

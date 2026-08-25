@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.quiz_answer import QuizAnswer
@@ -34,14 +34,34 @@ class QuizAttemptRepository:
         )
         return list(result.scalars().all())
 
-    async def list_for_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> list[QuizAttempt]:
-        """한 퀴즈에 대한 전체 재도전 이력 (최신순) - 점수 추이 확인용."""
+    async def list_for_quiz(
+        self, quiz_id: uuid.UUID, user_id: uuid.UUID, limit: int, offset: int
+    ) -> list[QuizAttempt]:
+        """한 퀴즈에 대한 재도전 이력 (최신순) - 점수 추이 확인용.
+
+        submitted_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상
+        정의되어 있지 않다 - 페이지마다 그 순서가 달라질 수 있어서, LIMIT/OFFSET
+        으로 나눠 받으면 같은 시도가 두 페이지에 다시 나오거나 어느 페이지에도
+        안 나올 수 있다. id를 2차 정렬 기준으로 추가해 동률을 항상 같은 순서로
+        결정론적으로 깨지도록 한다(InterviewPracticeSessionRepository.list_for_user
+        와 같은 이유).
+        """
         result = await self._session.execute(
             select(QuizAttempt)
             .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_id)
-            .order_by(QuizAttempt.submitted_at.desc())
+            .order_by(QuizAttempt.submitted_at.desc(), QuizAttempt.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def count_for_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(QuizAttempt)
+            .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_id)
+        )
+        return result.scalar_one()
 
 
 class QuizAnswerRepository:

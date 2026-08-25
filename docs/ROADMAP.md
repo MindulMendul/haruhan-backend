@@ -2547,4 +2547,52 @@
       기존 호출도 그대로 동작) 헤더 하나만 추가되는 하위 호환 변경이라
       마이그레이션은 필요 없었다.
 
+## 백로그 (93라운드)
+
+- [x] 117. 퀴즈 재도전 이력(`GET /quizzes/{id}/attempts`)에만 페이지네이션이
+      없어, 같은 퀴즈를 반복 재도전할수록 응답 크기가 무한정 늘어나던
+      문제 수정 - 92번 라운드가 오답노트에서 고친 것과 정확히 같은
+      부류의 문제로, 서브에이전트에게 "다른 목록형 API 중에도 페이지네이션이
+      빠진 형제가 있는지" 체계적으로 찾아보라고 지시해서 나온 결과다(같은
+      라운드에서 이벤트 루프 블로킹 패턴을 다시 훑어봤지만 90~91번
+      라운드가 이미 그 부류를 소진했음도 확인했다).
+      `QuizAttemptRepository.list_for_quiz`가 `LIMIT` 없이 한 퀴즈에 대한
+      전체 재도전 이력을 가져오고, `QuizService.list_attempts`와 라우트도
+      그걸 그대로 반환하고 있었다 - 같은 퀴즈를 여러 번 다시 풀어보는 건
+      학습 앱에서 아주 흔한 사용 패턴이라, 계정이 오래될수록(재도전
+      횟수가 쌓일수록) 응답과 그 근거 쿼리가 함께 무한정 커진다.
+      `InterviewPracticeSessionRepository.list_for_user`(이미 페이지네이션
+      돼 있던 다른 목록 API)와 완전히 같은 패턴으로 맞췄다:
+      `list_for_quiz`가 `limit`/`offset`을 받고 `submitted_at`이 같은
+      행 사이의 순서가 페이지마다 흔들리지 않도록 `id`를 2차 정렬
+      기준으로 추가했고, 별도로 `count_for_quiz`를 만들어 총 개수를
+      구했다. `QuizService.list_attempts`가 `(attempts, total)`을
+      반환하도록 바꾸고, 라우트(`app/api/v1/routes/quiz.py`)도 다른
+      목록 엔드포인트와 동일하게 `Query(default=20, ge=1, le=100)`/
+      `Query(default=0, ge=0)`를 받고 `X-Total-Count` 응답 헤더를
+      채우도록 맞췄다(데이터 export가 쓰는 `list_for_user`는 "전체가
+      목적"인 별개 메서드라 그대로 뒀다). 기존 테스트
+      (`test_list_attempts_returns_full_history_newest_first` 등)는 그대로
+      통과했고, `test_list_quizzes_pagination`/92번 라운드의
+      `test_wrong_answer_notebook_pagination`과 동일한 형태로
+      `test_list_attempts_pagination`을 새로 추가해 `limit`/`offset`/
+      `X-Total-Count`가 실제로 동작하고 페이지 간 항목이 겹치지 않는지
+      확인했다(중복 제출 방지에 걸리지 않도록 매번 다른 답안 조합으로
+      4번 재도전) - `git stash`로 리포지토리/서비스/라우트 수정만
+      되돌리면 이 새 테스트가 `X-Total-Count` 헤더 부재로 정확히
+      실패하는 것까지 확인했다. `docs/FRONTEND_INTEGRATION.md`의
+      "재도전 이력 전체"라는 문구도 다른 목록 API들과 같은 설명으로
+      갱신했다. 전체 376개 테스트 통과, 전체 커버리지 99%
+      (`quiz_attempt_repository.py`/`quiz_service.py`/`routes/quiz.py`
+      모두 100% 유지 - 참고로 이 라운드가 건드리지 않은
+      `user_service.py`가 이번 전체 실행에서 95%로 나왔는데, 확인해보니
+      이 라운드와 무관한 기존 동시성 레이스 테스트
+      (`test_concurrent_email_change_to_same_email_yields_clean_conflict_
+      not_crash`)가 진짜 `asyncio.gather` 레이스라 어느 쪽이 IntegrityError
+      분기를 타는지가 실행마다 달라지는, 이전부터 있던 커버리지 플레이키함
+      이었다 - 격리 실행으로 재현까지 확인했고 이 라운드가 만든 회귀는
+      아니다), mypy 클린. 응답 형태가 그대로고 새 쿼리 파라미터는 전부
+      기본값이 있어 기존 호출도 그대로 동작하는 하위 호환 변경이라
+      마이그레이션은 필요 없었다.
+
 

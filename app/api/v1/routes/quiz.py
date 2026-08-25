@@ -176,12 +176,18 @@ async def delete_quiz(
 
 @router.get("/{quiz_id}/attempts", response_model=list[QuizAttemptSummary])
 async def list_quiz_attempts(
+    response: Response,
     quiz_id: uuid.UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     quiz_service: QuizService = Depends(get_quiz_service),
 ) -> list[QuizAttemptSummary]:
-    """이 퀴즈를 재도전한 전체 이력을 최신순으로 보여준다 (점수 추이 확인용)."""
-    attempts = await quiz_service.list_attempts(quiz_id=quiz_id, user_id=current_user.id)
+    """이 퀴즈를 재도전한 이력을 최신순으로 보여준다 (점수 추이 확인용)."""
+    attempts, total = await quiz_service.list_attempts(
+        quiz_id=quiz_id, user_id=current_user.id, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
     return [QuizAttemptSummary.model_validate(a) for a in attempts]
 
 

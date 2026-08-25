@@ -1069,6 +1069,58 @@ def test_list_attempts_returns_full_history_newest_first(client):
     assert body[1]["score"] == 1
 
 
+def test_list_attempts_pagination(client):
+    """같은 퀴즈를 반복 재도전하는 건 흔한 사용 패턴이라, list_quizzes 등 다른
+    목록 API와 동일하게 limit/offset을 받고 X-Total-Count로 총 개수를 알려줘야
+    한다 - 예전엔 재도전 이력 전체를 한 번에 반환해, 재도전할수록 응답 크기가
+    무한정 늘어났다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "재도전 페이지네이션 테스트", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    questions = detail.json()["questions"]
+
+    attempt_ids = []
+    for selected_index in range(4):
+        # question[1]의 답은 고정해두고 question[0]만 매번 바꿔, 직전 제출과
+        # 완전히 같은 답안이 되지 않게 해서 중복 제출 방지(5초 이내 동일 답안
+        # dedup)에 걸리지 않도록 한다.
+        submit = client.post(
+            f"/api/v1/quizzes/{quiz_id}/submit",
+            json={
+                "answers": [
+                    {"question_id": questions[0]["id"], "selected_index": selected_index},
+                    {"question_id": questions[1]["id"], "selected_index": 0},
+                ]
+            },
+            headers=_auth_headers(token),
+        )
+        assert submit.status_code == 200
+        attempt_ids.append(submit.json()["attempt_id"])
+
+    first_page = client.get(
+        f"/api/v1/quizzes/{quiz_id}/attempts?limit=2&offset=0", headers=_auth_headers(token)
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert first_page.headers["X-Total-Count"] == "4"
+
+    second_page = client.get(
+        f"/api/v1/quizzes/{quiz_id}/attempts?limit=2&offset=2", headers=_auth_headers(token)
+    )
+    assert len(second_page.json()) == 2
+
+    first_ids = {a["id"] for a in first_page.json()}
+    second_ids = {a["id"] for a in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+    assert first_ids | second_ids == set(attempt_ids)
+
+
 def test_list_attempts_empty_when_never_submitted(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

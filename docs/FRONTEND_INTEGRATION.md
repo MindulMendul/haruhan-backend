@@ -249,7 +249,7 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 | PATCH | `/quizzes/{id}` | `{ "title": "새 제목" }` → 제목만 변경 |
 | POST | `/quizzes/{id}/submit` | 답안 제출 → 채점 |
 | GET | `/quizzes/{id}/result` | 마지막 제출 결과 재조회 |
-| GET | `/quizzes/{id}/attempts` | 재도전 이력 전체 (아래 참고) |
+| GET | `/quizzes/{id}/attempts` | 재도전 이력 (페이지네이션, 아래 참고) |
 | DELETE | `/quizzes/{id}` | 퀴즈 삭제 → `204` (문항/제출 이력도 함께 삭제) |
 | GET | `/quizzes/wrong-answers` | 오답노트 (아래 참고) |
 
@@ -288,16 +288,16 @@ WS /api/v1/study/sessions/{id}/stream?token=<access_token>
 #### 3-2-1. 재도전 이력
 
 ```
-GET /api/v1/quizzes/{id}/attempts
+GET /api/v1/quizzes/{id}/attempts?limit=20&offset=0
 ```
-→ `200`
+→ `200` (응답 헤더에 `X-Total-Count`)
 ```json
 [
   { "id": "uuid", "score": 4, "total": 5, "submitted_at": "2026-08-21T12:00:00Z" },
   { "id": "uuid", "score": 3, "total": 5, "submitted_at": "2026-08-20T09:00:00Z" }
 ]
 ```
-같은 퀴즈를 여러 번 다시 풀었을 때 **전체 제출 이력을 최신순**으로 돌려줍니다 (점수 추이 그래프 등에 사용). `GET /quizzes/{id}/result`는 가장 최근 1건의 문항별 정답 여부까지 상세히 주는 반면, 이건 점수 요약만 가볍게 줍니다. 아직 한 번도 제출 안 했다면 빈 배열, 존재하지 않거나 남의 퀴즈면 `404`.
+같은 퀴즈를 여러 번 다시 풀었을 때 **제출 이력을 최신순**으로 돌려줍니다 (점수 추이 그래프 등에 사용). `GET /quizzes/{id}/result`는 가장 최근 1건의 문항별 정답 여부까지 상세히 주는 반면, 이건 점수 요약만 가볍게 줍니다. 다른 목록 API와 동일하게 `?limit=20&offset=0`을 받고(`limit` 기본 20, 최대 100) `X-Total-Count`로 전체 개수를 알려줍니다 - 같은 퀴즈를 반복 재도전할수록 이력이 계속 쌓이기 때문입니다. 아직 한 번도 제출 안 했다면 빈 배열, 존재하지 않거나 남의 퀴즈면 `404`.
 
 #### 3-2-2. 오답노트
 
