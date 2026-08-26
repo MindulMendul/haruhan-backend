@@ -48,6 +48,51 @@ class FailingOllamaService:
         return [1.0, 0.0, 0.0]
 
 
+class AlwaysMalformedJsonOllamaService:
+    """generate_json()이 매번 깨진 JSON을 뱉는다 - 재시도까지 전부 소진되는
+    경로(tests/test_quiz.py의 MalformedJsonOllamaService와 같은 패턴)."""
+
+    def __init__(self):
+        self.generate_json_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        self.generate_json_call_count += 1
+        return "not valid json {{{"
+
+    async def chat(self, messages, model):
+        return "피드백 또는 총평 텍스트입니다."
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
+class RecoversOnRetryOllamaService:
+    """generate_json() 첫 호출은 깨진 JSON을 뱉고, 두 번째 호출부터는 정상
+    응답을 준다(tests/test_quiz.py의 RecoversOnRetryOllamaService와 같은
+    패턴)."""
+
+    def __init__(self):
+        self.generate_json_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        self.generate_json_call_count += 1
+        if self.generate_json_call_count == 1:
+            return "not valid json {{{"
+        return json.dumps({"feedback": "좋은 답변입니다.", "next_question": "다음 면접 질문입니다."})
+
+    async def chat(self, messages, model):
+        return "피드백 또는 총평 텍스트입니다."
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
 class GroundingFakeOllamaService:
     """마지막으로 모델에 전달된 프롬프트를 기록해두고, 태그가 포함된 텍스트만 서로 가까운
     벡터로 임베딩한다."""
@@ -483,6 +528,55 @@ def test_submit_answer_ai_failure_returns_502(client):
         headers=_auth_headers(token),
     )
     assert response.status_code == 502
+
+
+def test_submit_answer_retries_once_and_recovers_from_malformed_json(client):
+    """quiz_service._generate_quiz는 8번 라운드에서 Ollama의 구조적 JSON 출력이
+    가끔 스키마 검증에 실패하는 것에 대비해 같은 프롬프트로 한 번 더 시도하는
+    재시도를 넣었는데, generate_json()을 쓰는 또 다른 호출 지점인 이 서비스의
+    submit_answer()는 그 수정을 빠뜨리고 있었다. submit_answer()는 AI 호출을
+    답변 커밋과 한 트랜잭션으로 묶어 실패 시 답변까지 롤백시키므로, 재시도 없이는
+    일회성 파싱 실패로 사용자가 방금 입력한 답변이 통째로 날아갔다 - 첫 호출이
+    깨진 JSON을 뱉어도 재시도로 복구해 200이 나오는지 확인한다."""
+    fake = RecoversOnRetryOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 200
+    assert fake.generate_json_call_count == 2
+
+
+def test_submit_answer_returns_502_after_exhausting_retries_on_malformed_json(client):
+    """재시도(2회)까지 전부 깨진 JSON이면 결국 502로 실패 처리되는지, 그리고
+    실제로 정확히 2번만 시도하고 무한 재시도하지 않는지 확인한다."""
+    fake = AlwaysMalformedJsonOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+    assert fake.generate_json_call_count == 2
 
 
 def test_submit_answer_at_final_turn_ai_failure_returns_502(client, monkeypatch):

@@ -4009,3 +4009,45 @@
       구성)는 그대로고 순수 캐싱 계층 추가라 `docs/
       FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (126라운드)
+
+- [x] 150. 면접 연습 답변 제출(`submit_answer`)이 Ollama의 구조적 JSON
+      출력이 스키마 검증에 실패하면 재시도 없이 바로 502로 실패하던 문제
+      수정. `generate_json()`(스키마를 강제하는 게 아니라 "부탁"만 하는
+      구조적 출력 호출)을 쓰는 곳은 이 코드베이스에 딱 두 군데뿐인데,
+      `quiz_service._generate_quiz`는 8번 라운드에서 이미 "모델이 스키마에
+      안 맞는 JSON을 뱉으면 같은 프롬프트로 한 번 더 시도"하는 재시도를
+      넣었지만(`_MAX_QUIZ_GENERATION_ATTEMPTS = 2`), 나머지 한 곳인
+      `interview_practice_service.submit_answer`은 그 수정을 빠뜨리고
+      `except (OllamaServiceError, ValidationError, json.JSONDecodeError):
+      raise _GENERATION_FAILED`로 파싱 실패든 뭐든 첫 시도에 바로 포기하고
+      있었다 - REST/WS 드리프트(121/145라운드), 레이트리밋/캐시 누락
+      (121/149라운드)에 이어, "같은 메커니즘을 쓰는 형제 코드 중 하나만
+      먼저 고쳐진" 패턴을 다시 한번 발견한 것이다.
+
+      이 함수는 특히 영향이 크다 - `submit_answer`는 AI 호출을 답변
+      커밋과 한 트랜잭션으로 묶어서(주석에 명시: "AI 호출이 실패하면 답변
+      자체도 롤백되어 current_turn이 다시 미답변 상태로 남고, 그대로
+      재시도하면 된다") 실패 시 방금 쓴 답변까지 통째로 날아가게
+      설계했는데, 재시도가 없으니 일회성 파싱 글리치 하나로 사용자가 방금
+      입력한 답변이 사라지고 레이트리밋(`chat_rate_limit`)을 다시 뚫어야
+      하는 수동 재시도를 강제하고 있었다.
+
+      `generate_json` 호출과 `_FeedbackWithNextQuestion.model_validate_json`
+      파싱을 `_generate_feedback_and_next_question` 메서드로 분리하고,
+      `quiz_service._generate_quiz`와 정확히 같은 재시도 루프 패턴(최대
+      2회, `OllamaServiceError`는 즉시 실패 - 재시도해도 나아질 게 없음,
+      `ValidationError`/`json.JSONDecodeError`만 재시도)을 적용했다.
+      `tests/test_interview_practice.py`에 `tests/test_quiz.py`의
+      `RecoversOnRetryOllamaService`/`MalformedJsonOllamaService`와 같은
+      패턴으로 `RecoversOnRetryOllamaService`(첫 호출만 깨진 JSON, 재시도로
+      복구)와 `AlwaysMalformedJsonOllamaService`(매번 깨진 JSON, 재시도
+      2회 모두 소진 후 502)를 추가해 두 테스트를 작성했다. `git stash`로
+      `app/services/interview_practice_service.py` 수정만 되돌리면
+      재시도 성공 테스트가 정확히 실패(첫 호출에 바로 502)하는 것까지
+      확인했다. 전체 437개 테스트 통과, 전체 커버리지 99%
+      (`interview_practice_service.py` 100% 포함), `mypy app tests
+      scripts` 클린. 최종 성공/실패 응답 형태는 그대로고 중간에 재시도
+      횟수만 늘어난 것이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+

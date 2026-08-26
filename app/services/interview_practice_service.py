@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 
 from fastapi import HTTPException, status
@@ -14,6 +15,10 @@ from app.repositories.interview_practice_repository import (
 )
 from app.services.ollama_service import OllamaService, OllamaServiceError
 from app.services.rag_service import RagService
+
+logger = logging.getLogger(__name__)
+
+_MAX_FEEDBACK_GENERATION_ATTEMPTS = 2
 
 _NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview practice session not found")
 _ALREADY_FINISHED = HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 종료된 면접 연습입니다.")
@@ -174,6 +179,43 @@ class InterviewPracticeService:
             source_type="interview_practice_turn", source_ids=[turn.id for turn in turns]
         )
 
+    async def _generate_feedback_and_next_question(
+        self, prompt: str, model: str
+    ) -> _FeedbackWithNextQuestion:
+        """모델이 스키마에 안 맞는 JSON을 뱉으면 같은 프롬프트로 한 번 더 시도한다
+        (quiz_service._generate_quiz와 같은 이유 - generate_json()은 구조적
+        JSON 출력을 강제하는 게 아니라 "부탁"만 하는 것이라 가끔 스키마에 안
+        맞는 응답이 나온다). Ollama 호출 자체가 실패하면(OllamaServiceError)
+        재시도해도 나아질 게 없으니 바로 실패 처리한다.
+
+        submit_answer는 AI 호출을 답변 커밋과 한 트랜잭션으로 묶어(217번째 줄
+        주석 참고) 실패 시 답변까지 롤백시키므로, 일회성 파싱 실패로 사용자가
+        방금 입력한 답변이 통째로 날아가고 레이트리밋을 다시 뚫어야 하는 재시도를
+        강제하고 있었다 - quiz_service._generate_quiz는 이미 8번 라운드에서 같은
+        문제(Ollama의 구조적 출력이 가끔 스키마 검증에 실패함)를 겪고 재시도로
+        고쳤는데, generate_json()을 쓰는 두 호출 지점 중 이쪽만 그 수정을
+        빠뜨리고 있었다."""
+        last_exc: Exception = _GENERATION_FAILED
+        for attempt in range(1, _MAX_FEEDBACK_GENERATION_ATTEMPTS + 1):
+            try:
+                raw = await self._ollama.generate_json(
+                    prompt=prompt, model=model, schema=_FEEDBACK_NEXT_QUESTION_SCHEMA
+                )
+                return _FeedbackWithNextQuestion.model_validate_json(raw)
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+            except (ValidationError, json.JSONDecodeError) as exc:
+                last_exc = exc
+                logger.warning(
+                    "면접 피드백/다음 질문 생성 JSON 파싱 실패 (시도 %d/%d): %s",
+                    attempt,
+                    _MAX_FEEDBACK_GENERATION_ATTEMPTS,
+                    exc,
+                )
+                continue
+
+        raise _GENERATION_FAILED from last_exc
+
     async def submit_answer(
         self, session_id: uuid.UUID, user_id: uuid.UUID, answer: str
     ) -> tuple[InterviewPracticeTurn, InterviewPracticeTurn | None]:
@@ -229,13 +271,7 @@ class InterviewPracticeService:
             prompt = _build_feedback_and_next_question_prompt(
                 practice_session.topic, history, current_turn.question, answer, grounding
             )
-            try:
-                raw = await self._ollama.generate_json(
-                    prompt=prompt, model=practice_session.model, schema=_FEEDBACK_NEXT_QUESTION_SCHEMA
-                )
-                parsed = _FeedbackWithNextQuestion.model_validate_json(raw)
-            except (OllamaServiceError, ValidationError, json.JSONDecodeError) as exc:
-                raise _GENERATION_FAILED from exc
+            parsed = await self._generate_feedback_and_next_question(prompt, practice_session.model)
 
             # AI 응답을 계산하는 동안 같은 질문에 다른 요청이 먼저 답변을 기록했을 수
             # 있다 - compare-and-swap으로 확인하고, 이미 늦었다면(False) 이 요청의
