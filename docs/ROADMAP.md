@@ -3657,3 +3657,55 @@
       없어 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
       없었다.
 
+## 백로그 (119라운드)
+
+- [x] 143. `scripts/backfill_knowledge_chunks.py`(전체 이력을 RAG 색인
+      대상으로 재색인하는 일회성 운영 스크립트)에 테스트가 전무하고
+      실행 전 안전장치가 없던 문제 수정. 이 저장소는 커버리지 99%를
+      유지할 만큼 테스트 문화가 강한데, 정작 "사람이 손으로 실행해서
+      전체 이력을 재색인하는" - 즉 실수 시 파급력이 가장 큰 축에 속하는
+      이 스크립트만 완전히 사각지대였다. 사용법 docstring도 그냥
+      `DATABASE_URL=... python -m scripts.backfill_knowledge_chunks`
+      뿐이라, 운영자가 실수로 `.env`를 안 바꾼 로컬 셸에서 프로덕션
+      `DATABASE_URL`을 그대로 물고 있는 상태로 돌리면 전체 테이블을
+      훑으며 Ollama 임베딩 호출을 순차로 수천 번 날리는 것을 막을
+      방법이 전혀 없었다.
+
+      두 가지를 고쳤다. (1) 엔진/세션 생성과 실제 색인 로직을 분리해
+      `backfill_all_content(session, rag_service)`로 뽑아냈다(스케줄러
+      버전 `rag_backfill_service.backfill_unindexed_content`와 같은
+      분리 이유 - 테스트가 인프라 준비 없이 로직만 검증할 수 있게).
+      이 스크립트는 스케줄러 버전과 달리 "아직 색인 안 된 것만"이
+      아니라 전체 이력을 대상으로 하므로(일회성 전체 재색인이 목적)
+      그 차이도 회귀 테스트로 직접 확인했다. (2) 실행 전 대상 DB(비밀번호는
+      가리고 호스트:포트/DB이름만) 를 보여주고 `y`가 아니면 취소하는
+      `_confirm_before_running()`을 추가했다 - cron/CI 같은 비대화형
+      환경에서는 `--yes`/`-y` 플래그로 건너뛸 수 있다.
+
+      새 파일 `tests/test_backfill_knowledge_chunks.py`에 4개 테스트 추가:
+      `_redact_database_url`이 비밀번호를 실제로 가리는지, 확인 프롬프트가
+      `y`에서만 진행하고 그 외(빈 입력/`n`/`yes`처럼 정확히 `y`가 아닌
+      모든 값)에서는 취소하는지(주입한 `ask` 함수로 실제 `input()` 없이
+      테스트), 그리고 `backfill_all_content`가 이미 색인된 항목까지
+      포함해 전체 이력을 정확히 재색인하는지(스터디 세션에서 파생된
+      퀴즈는 원본이 이미 study_message 쪽에 있어 제외되는 것까지). `git
+      stash`로 스크립트 수정만 되돌리면 새 함수들이 아예 없어서 임포트
+      단계부터 정확히 실패하는 것까지 확인했다.
+
+      검증 중에 117라운드가 만든 실제 버그도 하나 잡았다 - CI는
+      `mypy app tests`를 돌리는데 그 라운드에서 나는 `mypy app`만
+      돌려 확인했었다(다른 라운드들의 관행을 그대로 따랐을 뿐 CI의
+      정확한 커맨드를 재현하지 않음). `mypy app tests`를 실제로 돌려보니
+      `test_docker_compose.py`의 `import yaml`이 "Library stubs not
+      installed"로 실패했다 - `PyYAML`은 런타임 패키지만 추가했지 mypy용
+      타입 스텁 패키지(`types-PyYAML`)는 안 넣어서, 그 라운드부터 CI의
+      mypy 스텝이 계속 깨져 있었을 것이다. `requirements-dev.txt`에
+      `types-PyYAML==6.0.12.20260815`를 추가해 바로잡았다(`pip-audit`
+      확인도 통과). 이번 라운드부터는 `mypy app tests scripts`로 CI와
+      정확히 같은 대상을 확인하는 것으로 검증 관행을 갱신했다. 전체
+      420개 테스트 통과, 전체 커버리지 99%(`scripts/`는 `--cov=app`
+      범위 밖이라 커버리지 수치엔 안 잡히지만 새 테스트로 핵심 로직은
+      검증됨), mypy 클린. 스크립트 사용법(새 `--yes` 플래그)만 추가된
+      순수 확장이라 API 응답 형태에 영향이 없어
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+
