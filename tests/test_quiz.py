@@ -1289,3 +1289,52 @@ def test_quiz_question_correct_answer_column_has_no_length_limit():
 
     column_type = QuizQuestion.__table__.c.correct_answer.type
     assert getattr(column_type, "length", None) is None
+
+
+def test_create_quiz_issues_a_single_batch_insert_for_questions(db_session_factory):
+    """예전엔 create_quiz가 AI가 생성한 문항을 하나씩 QuizQuestionRepository.create()
+    로 저장했는데, 그 메서드가 호출마다 개별 flush()(=DB 왕복)를 했다 - 문항
+    수만큼(이미 Ollama 호출을 거친 뒤에 이어지는 구간이라 사용자 체감 지연에
+    그대로 얹힘) 개별 INSERT 왕복이 생기는 구조였다. create_many로 바꾼 뒤,
+    문항이 여러 개(SAMPLE_QUIZ_JSON은 2개)여도 quiz_questions에 대한 INSERT
+    문(executemany 배치 포함, 프로세스가 실제로 실행하는 SQL 문 자체의 개수)이
+    정확히 1번만 나가는지 SQLAlchemy의 before_cursor_execute 이벤트로 직접
+    세어서 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = QuizService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            question_insert_statements = []
+
+            def _record_insert(conn, cursor, statement, parameters, context, executemany):
+                if statement.strip().upper().startswith("INSERT") and "quiz_questions" in statement:
+                    question_insert_statements.append(statement)
+
+            engine = session.bind.sync_engine
+            event.listen(engine, "before_cursor_execute", _record_insert)
+            try:
+                quiz = await service.create_quiz(
+                    user_id=user.id,
+                    title="배치 저장 테스트",
+                    study_session_id=None,
+                    source_text="소스",
+                    question_count=2,
+                    model="qwen2.5:3b",
+                )
+            finally:
+                event.remove(engine, "before_cursor_execute", _record_insert)
+
+            assert len(question_insert_statements) == 1
+
+            _, questions = await service.get_quiz_with_questions(quiz.id, user.id)
+            assert len(questions) == 2
+            assert [q.order_index for q in questions] == [0, 1]
+
+    asyncio.run(_run())

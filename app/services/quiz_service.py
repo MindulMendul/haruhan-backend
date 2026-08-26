@@ -143,15 +143,12 @@ class QuizService:
                 # (아래 RAG 색인이 실패해도 나중에 재시도할 원본으로 남겨두기 위함).
                 source_text=source_text if study_session_id is None else None,
             )
-            for index, question in enumerate(generated.questions):
-                await self._questions.create(
-                    quiz_id=quiz.id,
-                    order_index=index,
-                    question_text=question.question,
-                    choices=question.choices,
-                    correct_answer=question.correct_answer,
-                    explanation=question.explanation,
-                )
+            await self._questions.create_many(
+                quiz_id=quiz.id,
+                questions=[
+                    (q.question, q.choices, q.correct_answer, q.explanation) for q in generated.questions
+                ],
+            )
             await self._session.commit()
         except IntegrityError:
             await self._session.rollback()

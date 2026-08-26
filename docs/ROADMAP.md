@@ -3389,3 +3389,32 @@
       갱신은 필요 없었고, 컬럼/테이블 변경이 없어 마이그레이션도 필요
       없었다.
 
+## 백로그 (112라운드)
+
+- [x] 136. 퀴즈 생성 시 AI가 만든 문항을 하나씩 개별 `flush()`로 저장하던 것을
+      배치 저장으로 바꿈. `create_quiz`가 `for index, question in
+      enumerate(generated.questions): await self._questions.create(...)`로
+      루프를 돌았는데, `QuizQuestionRepository.create()`가 호출마다
+      `session.add()` 직후 `flush()`(=DB 왕복)를 했다 - 문항 수(최대
+      `max_quiz_question_count`, 기본 20)만큼 개별 INSERT 왕복이 생기는
+      구조였다. 이미 몇 초짜리 Ollama 호출을 거친 뒤에 이어지는 구간이라
+      사용자 체감 지연에 그대로 얹히는 비용이었다. `QuizQuestionRepository`
+      에 `create_many(quiz_id, questions: list[tuple[...]])` 배치 메서드를
+      추가해(`session.add_all()` + `flush()` 한 번), `create_quiz`가 이걸
+      쓰도록 바꿨다 - 저장된 문항 객체를 이후에 안 쓰는 이 호출부에서만
+      안전하게 쓸 수 있는 형태라 반환값은 없앴다(기존 반환값도 안
+      쓰이고 있었음). 129라운드(세션 삭제 시 RAG 정리 배치화)와 같은
+      종류의 순수 성능 리팩터링이라 끝 결과(저장되는 문항/내용은 동일)가
+      그대로라, 회귀 테스트도 같은 기법(`before_cursor_execute` 이벤트로
+      실제 실행되는 SQL 문 개수를 직접 셈)을 썼다.
+      `test_create_quiz_issues_a_single_batch_insert_for_questions`이
+      문항 2개(`SAMPLE_QUIZ_JSON`)로 퀴즈를 만들어도 `quiz_questions`
+      INSERT 문이 정확히 1번만(executemany 배치 포함) 나가는지, 그리고
+      `order_index`가 리스트 순서 그대로 0, 1로 정확히 부여되는지 확인한다.
+      `git stash`로 리포지토리/서비스 수정만 되돌리면 실제로 INSERT가
+      2번(문항 개수만큼) 나가는 것까지 확인했다. 전체 410개 테스트
+      통과, 전체 커버리지 99%(`repositories/quiz_repository.py`/
+      `services/quiz_service.py` 모두 100%), mypy 클린. 저장되는
+      데이터/응답 형태는 전혀 안 바뀐 순수 내부 성능 개선이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+

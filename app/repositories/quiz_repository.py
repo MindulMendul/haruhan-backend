@@ -117,6 +117,34 @@ class QuizQuestionRepository:
         await self._session.flush()
         return question
 
+    async def create_many(
+        self, quiz_id: uuid.UUID, questions: list[tuple[str, list[str], str, str]]
+    ) -> None:
+        """create()의 배치 버전 - AI가 만든 문항을 하나씩 저장할 때마다 개별
+        flush()(=DB 왕복)하는 대신 add_all() + flush() 한 번으로 처리한다.
+        문항 수만큼(최대 max_quiz_question_count) 반복되는 개별 왕복은 이미
+        Ollama 호출을 거친 뒤에 이어지는 구간이라 사용자 체감 지연에 그대로
+        얹힌다. order_index는 questions 리스트 순서 그대로(0부터) 부여된다 -
+        저장된 QuizQuestion 객체가 이후에 필요 없는 호출부(반환값 없음)에서만
+        쓸 수 있다.
+
+        questions의 각 항목은 (question_text, choices, correct_answer, explanation)
+        4개 튜플이다.
+        """
+        session_questions = [
+            QuizQuestion(
+                quiz_id=quiz_id,
+                order_index=index,
+                question_text=question_text,
+                choices=choices,
+                correct_answer=correct_answer,
+                explanation=explanation,
+            )
+            for index, (question_text, choices, correct_answer, explanation) in enumerate(questions)
+        ]
+        self._session.add_all(session_questions)
+        await self._session.flush()
+
     async def list_for_quiz(self, quiz_id: uuid.UUID) -> list[QuizQuestion]:
         result = await self._session.execute(
             select(QuizQuestion)
