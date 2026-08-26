@@ -66,7 +66,7 @@ def test_backfill_unindexed_content_only_indexes_missing_chunks(db_session_facto
                 user_id=user.id, source_type="study_message", source_id=message1.id, content=message1.content
             )
 
-            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag, settings)
             assert message_count == 1
             assert review_count == 1
             assert quiz_count == 0
@@ -105,10 +105,49 @@ def test_backfill_unindexed_content_is_idempotent(db_session_factory):
 
             rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
 
-            first = await backfill_unindexed_content(session, rag)
-            second = await backfill_unindexed_content(session, rag)
+            first = await backfill_unindexed_content(session, rag, settings)
+            second = await backfill_unindexed_content(session, rag, settings)
             assert first == (1, 1, 0, 0)
             assert second == (0, 0, 0, 0)
+
+    asyncio.run(_run())
+
+
+def test_backfill_unindexed_content_caps_at_batch_size_and_warns(db_session_factory, monkeypatch, caplog):
+    """Ollama 임베딩 엔드포인트가 며칠 연속 다운되면 그 기간 쌓인 미색인 행 전체가
+    복구 후 첫 실행에 한꺼번에 몰릴 수 있다 - rag_backfill_batch_size로 한 번의
+    실행이 재시도하는 건수에 상한을 둬서, 순차 임베딩 호출을 도는 동안 DB
+    커넥션을 비정상적으로 오래 점유하지 않도록 한다. 상한보다 미색인 건이 많으면
+    딱 상한만큼만 처리하고(나머지는 다음 실행에서 자동으로 다시 잡힘), 운영자가
+    눈치챌 수 있도록 경고 로그를 남기는지 확인한다."""
+    monkeypatch.setenv("RAG_BACKFILL_BATCH_SIZE", "2")
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen"
+            )
+            for i in range(3):
+                await StudyMessageRepository(session).create(
+                    session_id=study_session.id, role="user", content=f"내용 {i}"
+                )
+            await session.commit()
+
+            rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
+
+            with caplog.at_level("WARNING", logger="app.services.rag_backfill_service"):
+                message_count, *_ = await backfill_unindexed_content(session, rag, settings)
+
+            assert message_count == 2  # 상한(2)만큼만 처리 - 미색인 3건 중 1건은 다음 실행으로 미룸
+            assert "study_message" in caplog.text
+            assert "상한" in caplog.text
+
+            chunks = KnowledgeChunkRepository(session)
+            indexed_messages = await chunks.get_indexed_source_ids("study_message")
+            assert len(indexed_messages) == 2  # 3건 전부가 아니라 상한만큼만 실제로 색인됨
 
     asyncio.run(_run())
 
@@ -132,7 +171,7 @@ def test_backfill_unindexed_content_retries_previously_failed_embedding(db_sessi
             )
             # 임베딩 호출이 실패하면 knowledge_chunks에 행이 안 남으므로, 다음 백필에서
             # 다시 대상이 되어야 한다.
-            failed_count, *_ = await backfill_unindexed_content(session, failing_rag)
+            failed_count, *_ = await backfill_unindexed_content(session, failing_rag, settings)
             assert failed_count == 1
 
             chunks = KnowledgeChunkRepository(session)
@@ -141,7 +180,7 @@ def test_backfill_unindexed_content_retries_previously_failed_embedding(db_sessi
             working_rag = RagService(
                 session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings
             )
-            retried_count, *_ = await backfill_unindexed_content(session, working_rag)
+            retried_count, *_ = await backfill_unindexed_content(session, working_rag, settings)
             assert retried_count == 1
             assert message.id in await chunks.get_indexed_source_ids("study_message")
 
@@ -184,7 +223,7 @@ def test_backfill_unindexed_content_scales_with_unindexed_count_not_total_count(
             )
             await session.commit()
 
-            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag, settings)
             assert message_count == 1
             assert review_count == 0
             assert quiz_count == 0
@@ -227,7 +266,7 @@ def test_backfill_unindexed_content_recovers_pasted_quiz_source_after_failed_emb
             await session.commit()
 
             rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
-            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag, settings)
             assert (message_count, review_count, turn_count) == (0, 0, 0)
             assert quiz_count == 1
 
@@ -267,7 +306,7 @@ def test_backfill_unindexed_content_recovers_interview_practice_turn_after_faile
             await session.commit()
 
             rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
-            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag)
+            message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(session, rag, settings)
             assert (message_count, review_count, quiz_count) == (0, 0, 0)
             assert turn_count == 1
 

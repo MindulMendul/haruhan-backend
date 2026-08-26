@@ -83,6 +83,15 @@ class Settings(BaseSettings):
     # 강제되지 않으므로, 응답 payload 비대화/DB 행 폭증을 막는 최후의 안전장치다.
     max_quiz_choice_count: int = 8
 
+    # RAG 백필 cron(run_scheduled_rag_backfill)이 한 번의 실행에서 재시도하는
+    # "미색인" 행의 최대 개수(카테고리당). 평상시엔 임베딩 API 일시 실패 같은
+    # 극소수만 걸려 무해하지만, Ollama 임베딩 엔드포인트가 며칠 연속 다운되면
+    # 그 기간 쌓인 미색인 행 전체가 복구 후 첫 실행에 한꺼번에 몰려, 순차
+    # 임베딩 호출을 도는 동안 DB 커넥션 풀 커넥션 하나를 비정상적으로 오래
+    # 점유할 수 있다. 여유 있게 잡은 안전장치이고, 상한에 걸려 못 처리한
+    # 나머지는 멱등적인 LEFT JOIN 쿼리라 다음날 자동으로 다시 잡힌다.
+    rag_backfill_batch_size: int = 500
+
     # 면접 연습 세션 하나당 최대 질문 수. 도달하면 다음 질문을 생성하지 않고
     # 클라이언트가 /complete를 호출해 종합 피드백을 받도록 유도한다.
     max_interview_questions: int = 5
