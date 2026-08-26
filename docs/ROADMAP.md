@@ -3616,3 +3616,44 @@
       애플리케이션 코드/API 응답 형태에 영향이 없어
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (118라운드)
+
+- [x] 142. `docker-compose.yml`의 5개 서비스 어디에도 CPU/메모리 리소스
+      상한이 없던 문제 수정. `redis`만 `--maxmemory 64mb`로 자체 상한이
+      있고 나머지 4개(haruhan-backend/prometheus/grafana/caddy)는
+      무제한이었다 - `haruhan-backend`는 `mindul-net`이라는 외부 공유
+      네트워크에도 물려 있다는 주석("Ollama 등 다른 스택과 같은 네트워크")
+      으로 보아 이 호스트는 다른 스택과 리소스를 공유하는 것으로 보이는데,
+      FastAPI 프로세스의 메모리 누수나 Prometheus의 라벨 카디널리티
+      폭증(예: 실수로 사용자별 값이 라벨에 섞이는 버그) 한 번이면 호스트
+      전체 메모리를 잠식해 같은 호스트의 다른 스택(Ollama 포함)까지 함께
+      죽일 수 있었다.
+
+      다른 인프라 수정들(로그 로테이션, 배치 상한 등)과 달리 이 항목은
+      순수하게 방어적이기만 한 변경이 아니라는 점을 판단 과정에서 먼저
+      짚었다 - 상한을 너무 낮게 잡으면 정상적인 요청도 OOM으로 죽는
+      새로운 장애를 만들 수 있어, "안 하는 것보다 나은가"가 자명하지
+      않은 유일한 인프라 항목이었다. 이 세션은 이 시스템의 실제 운영
+      트래픽/메모리 사용량에 대한 가시성이 전혀 없으므로, 타이트하게
+      튜닝된 값 대신 95/99/131라운드와 같은 "넉넉한 안전장치, 주 방어선
+      아님" 철학을 그대로 적용했다 - 개인/소규모 트래픽의 FastAPI
+      프로세스가 정상적으로는 절대 안 닿을 만큼 넉넉하게(`haruhan-backend`
+      1GB/2 CPU, `prometheus` 512MB/1 CPU, `grafana`/`caddy` 각 256MB/1 CPU,
+      `redis`는 자체 `--maxmemory 64mb` 위에 여유를 둔 128MB/1 CPU) 잡아서,
+      평소엔 절대 안 걸리고 진짜 폭주할 때만(예: 수 GB 이상 새는 심각한
+      버그) 막는 서킷 브레이커로 설계했다 - 실사용 데이터가 쌓이면
+      운영자가 더 타이트하게 조정하면 된다는 것을 주석에 명시했다.
+      `deploy.resources.limits`(Compose Specification - `version:` 필드가
+      없는 이 파일에선 스웜 모드가 아니어도 `docker compose up`에 그대로
+      적용됨)로 5개 서비스 전부에 추가했다.
+
+      `docker compose config`로 다섯 값이 정확한 바이트 수(1GB→1073741824,
+      512MB→536870912, 256MB→268435456, 128MB→134217728)로 해석되는지
+      직접 확인했다. `tests/test_docker_compose.py`에
+      `test_every_service_has_a_memory_limit`을 추가했고, `git stash`로
+      `docker-compose.yml` 수정만 되돌리면 정확히 실패하는 것까지
+      확인했다. 전체 416개 테스트 통과, 전체 커버리지 99%, mypy 클린.
+      순수 배포 설정 수정이라 애플리케이션 코드/API 응답 형태에 영향이
+      없어 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
+      없었다.
+

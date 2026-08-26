@@ -17,6 +17,18 @@ services:
     container_name: haruhan-backend
     restart: unless-stopped
     logging: *default-logging
+    # 이 호스트는 mindul-net으로 다른 스택(Ollama 포함)과 리소스를 공유한다 - 이
+    # 서비스 중 하나가 메모리 누수나 버그로 폭주하면 호스트 전체 메모리를 잠식해
+    # 같은 호스트의 다른 스택까지 함께 죽일 수 있다. 튜닝된 상한이 아니라, 정상
+    # 사용량(개인/소규모 트래픽의 FastAPI 프로세스는 보통 수백MB 안쪽)보다 훨씬
+    # 넉넉하게 잡아 평소엔 절대 안 걸리고 진짜 폭주할 때만 막는 안전장치다(95/99/
+    # 131라운드의 "넉넉한 안전장치, 주 방어선 아님" 패턴과 동일) - 실사용 데이터로
+    # 운영자가 더 타이트하게 조정해도 된다.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
     # 외부 접근은 caddy가 대신 받으므로 호스트 포트를 열어두지 않는다
     # (필요하면 디버깅용으로 "18000:8000"을 임시로 되살려도 됨).
     environment:
@@ -66,6 +78,14 @@ services:
     # 축출 정책만 걸어서 무한정 커지는 것을 막는다. 외부 포트는 열지 않는다
     # (haruhan-backend에서만 내부 네트워크로 접근).
     command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    # --maxmemory는 redis 프로세스 내부의 데이터 상한일 뿐 프로세스 자체의 메모리
+    # 사용량(연결 버퍼 등 부가 오버헤드 포함) 상한이 아니다 - 컨테이너 레벨에서
+    # 그 위에 여유를 두고 상한을 걸어 이중으로 방어한다.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -81,6 +101,13 @@ services:
     logging: *default-logging
     # haruhan-backend의 /metrics를 스크레이프한다. 대시보드 UI는 아직 아무도 안 쓰므로
     # 외부 포트는 열지 않는다 (필요하면 SSH 터널로 접근).
+    # 라벨 카디널리티가(예: 실수로 사용자별 값이 라벨에 섞이는 버그) 갑자기 폭증하면
+    # 시계열 저장 메모리가 빠르게 커질 수 있다 - 넉넉한 안전장치.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -102,6 +129,11 @@ services:
     container_name: haruhan-grafana
     restart: unless-stopped
     logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256m
     # Prometheus 데이터소스는 자동 프로비저닝되지만, 대시보드 패널 구성은 사람이
     # 직접 만든다 (이번 자동화 범위 밖). 사람이 실제로 들여다볼 UI라 호스트 포트를 연다.
     ports:
@@ -128,6 +160,11 @@ services:
     container_name: haruhan-caddy
     restart: unless-stopped
     logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256m
     ports:
       - "80:80"
       - "443:443"

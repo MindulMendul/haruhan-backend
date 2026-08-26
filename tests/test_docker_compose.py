@@ -45,3 +45,17 @@ def test_every_service_has_log_rotation_configured():
         assert logging_config["driver"] == "json-file"
         assert "max-size" in logging_config["options"]
         assert "max-file" in logging_config["options"]
+
+
+def test_every_service_has_a_memory_limit():
+    """이 호스트는 mindul-net으로 다른 스택(Ollama 포함)과 리소스를 공유한다 -
+    서비스 하나가 메모리 누수/버그로 폭주하면 호스트 전체 메모리를 잠식해 같은
+    호스트의 다른 스택까지 함께 죽일 수 있다. 튜닝된 상한이 아니라 정상
+    사용량보다 훨씬 넉넉한 안전장치(95/99/131라운드와 같은 패턴)라도, 서비스
+    하나라도 이 상한이 조용히 빠지는 회귀는 막는다."""
+    compose = _parse_docker_compose()
+    services = compose["services"]
+    assert services
+    for name, service in services.items():
+        limits = service.get("deploy", {}).get("resources", {}).get("limits", {})
+        assert limits.get("memory"), f"{name}에 메모리 상한이 없음"
