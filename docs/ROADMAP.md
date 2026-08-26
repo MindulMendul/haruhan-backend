@@ -3842,3 +3842,73 @@
       에러 케이스만 늘어남)라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (123라운드)
+
+- [x] 147. 레이트리밋 저장소(Redis) 응답이 느려지는 상황(연결 자체가
+      거부되는 완전 장애가 아니라 패킷 유실 등으로 응답만 지연되는 경우)에서
+      이벤트 루프 전체가 최대 5초씩 멈출 수 있던 문제 완화.
+      `app/core/rate_limit.py`가 쓰는 `slowapi.Limiter`는 내부적으로
+      `limits` 라이브러리의 `RedisStorage`를 쓰는데, 이 스토리지는 동기
+      `redis-py` 클라이언트를 그대로 감싸고 있고, `slowapi`는
+      `@limiter.limit()` 데코레이터 안에서 그 `hit()` 호출을 `await` 없이
+      동기로 실행한다(`slowapi/extension.py`의 `__evaluate_limits`가 일반
+      `def`이고, 이걸 호출하는 `async_wrapper`는 그 호출 결과를 기다리는
+      동안 이벤트 루프에 제어권을 넘기지 않음 - 직접 소스를 읽어 확인).
+      `Dockerfile`이 `uvicorn`을 워커 1개로 띄우므로(`--workers` 플래그
+      없음), 이 블로킹 호출이 그 프로세스의 유일한 이벤트 루프 스레드를
+      그대로 막는다. 이 앱은 auth/chat/study/quiz/interview/export 등
+      거의 모든 쓰기 엔드포인트에 `@limiter.limit()`이 걸려 있어서,
+      영향 범위가 사실상 전체 API다.
+
+      `redis-py==8.0.1`의 `socket_timeout`/`socket_connect_timeout` 기본값이
+      5초라는 걸 직접 확인했다(`redis/_defaults.py`의
+      `DEFAULT_SOCKET_TIMEOUT = 5`) - `ConnectionError`로 즉시 잡히는
+      완전 장애(포트가 닫혀 연결 자체가 거부되는 경우, 기존
+      `test_limiter_falls_back_to_memory_when_redis_unreachable` 등이
+      이미 다루는 시나리오)는 이 문제와 무관하다. 문제는 Redis가 응답만
+      느려지는 경우(네트워크 혼잡, GC 일시정지 등) - 명시적으로 타임아웃을
+      설정하지 않으면 요청 하나가 실제로 응답을 받거나 소켓 타임아웃이 날
+      때까지(최대 5초) 프로세스 전체가 멈춘다.
+
+      `Limiter(...)` 생성 시 `storage_options`로
+      `socket_connect_timeout`/`socket_timeout`을 1초로 명시했다(다른
+      안전장치들과 같은 "정상 사용량보다 훨씬 넉넉하지만 무한정은 아닌"
+      상한 철학, 95/99/118/131라운드 - 로컬 Redis 왕복은 보통 1ms 미만이라
+      1초는 압도적으로 넉넉하면서도 최악의 경우 정지 시간을 5초에서 1초로
+      줄인다). `MemoryStorage`(REDIS_URL 미설정 시 기본 경로)는 여분의
+      키워드 인자를 그냥 무시하므로(`**_: str`), 이 옵션을 항상 전달해도
+      Redis를 안 쓰는 배포에는 영향이 없는 것까지 직접 확인했다. slowapi의
+      `storage_options` 타입 힌트가 `Dict[str, str]`이라 정수를 넣으면
+      mypy가 거부하는데, 실제로는 그대로 `redis.from_url(...)`에
+      `**kwargs`로 전달될 뿐이라 런타임에는 문제없다는 것도 직접 Limiter를
+      만들어 커넥션 풀의 `connection_kwargs`까지 확인한 뒤, 업스트림 타입
+      힌트 오류로 판단해 `# type: ignore[dict-item]`로 좁게 처리했다
+      (`app/repositories/*_repository.py`의 `result.rowcount` 등 기존
+      코드베이스에도 있는 패턴).
+
+      WebSocket 경로(`check_rate_limit()`)가 직접 호출하는
+      `limiter.limiter.hit()`도 같은 `Limiter` 인스턴스의 저장소를 쓰므로
+      별도 수정 없이 같은 타임아웃 상한을 그대로 적용받는다 - 소켓 타임아웃은
+      호출 지점이 아니라 연결 객체 레벨에서 적용되기 때문이다.
+
+      `tests/test_rate_limit_redis.py`에
+      `test_redis_storage_has_bounded_socket_timeouts`(프로덕션 코드와 같은
+      `storage_options`로 만든 `Limiter`의 redis 커넥션 풀에 타임아웃 값이
+      실제로 전달되는지, 서버 연결 없이 확인 - `limits`는 스토리지 생성
+      시점엔 연결하지 않고 지연 연결하므로 Redis 서버가 없어도 통과)와
+      `test_app_rate_limiter_has_bounded_socket_timeouts_configured`(앱
+      전체가 공유하는 실제 `rate_limit_module.limiter` 인스턴스가 이
+      옵션을 들고 있는지)를 추가했다. `git stash`로
+      `app/core/rate_limit.py` 수정만 되돌리면 두 테스트 모두 정확히
+      실패(`REDIS_SOCKET_TIMEOUT_SECONDS` 상수 자체가 없어
+      `AttributeError`)하는 것까지 확인했다. 네트워크를 실제로 블랙홀
+      상태로 만들어 5초 대 1초 정지 시간을 직접 재는 테스트는 샌드박스
+      환경에서 안정적으로 재현하기 어려워 작성하지 않았다 - 대신 실제로
+      적용되는 타임아웃 값 자체가 설정돼 있는지를 검증한다.
+
+      전체 432개 테스트 통과, 전체 커버리지 99%(`app/core/rate_limit.py`
+      포함 변경 파일 전부 커버리지 저하 없음), `mypy app tests scripts`
+      클린. 레이트리밋 동작 자체(허용/거부 판정)는 그대로라 API 응답
+      형태에 영향이 없어 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+

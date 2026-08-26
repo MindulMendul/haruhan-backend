@@ -10,6 +10,11 @@ from app.core.config import get_settings
 
 logger = logging.getLogger("haruhan")
 
+# redis-py의 socket_timeout/socket_connect_timeout 기본값(5초)보다 훨씬 넉넉하지만
+# 무한정은 아닌 상한 - 아래 Limiter 생성자 주석 참고. 테스트에서도 그대로 참조해
+# 실제로 적용되는 값과 어긋나지 않게 한다.
+REDIS_SOCKET_TIMEOUT_SECONDS = 1
+
 # 앱 전체에서 공유하는 단일 Limiter 인스턴스.
 # 라우트에서는 @limiter.limit(...) 데코레이터로 사용하고,
 # main.py에서 app.state.limiter로 등록해 예외 핸들러와 연결한다.
@@ -34,6 +39,25 @@ limiter = Limiter(
     # 완전히 무방비인 것보다 낫다), 백그라운드에서 Redis가 살아나면 자동으로
     # 다시 Redis 기반으로 복귀한다.
     in_memory_fallback_enabled=True,
+    # limits 라이브러리의 RedisStorage는 동기 redis-py 클라이언트를 그대로 쓰고,
+    # slowapi는 그 hit() 호출을 @limiter.limit() 데코레이터 안에서 await 없이
+    # 동기로 실행한다 - 이 앱은 uvicorn을 워커 1개로 띄우므로, 그 호출이 이벤트
+    # 루프를 그대로 막는다. redis-py의 socket_timeout/socket_connect_timeout
+    # 기본값은 5초라 Redis가 완전히 죽은 게 아니라 응답만 느려지는 상황(패킷
+    # 유실 등, ConnectionError로 즉시 잡히는 완전 장애와는 다름)에서는 요청
+    # 하나당 최대 5초씩 프로세스 전체가 멈출 수 있다 - 다른 안전장치들과 같은
+    # "정상 사용량보다 훨씬 넉넉하지만 무한정은 아닌" 상한 철학(95/99/118/131
+    # 라운드)으로, 로컬 Redis 왕복(보통 1ms 미만)보다 압도적으로 넉넉하면서도
+    # 최악의 경우 이벤트 루프 정지 시간을 5초에서 1초로 줄인다.
+    # slowapi의 storage_options 타입 힌트는 Dict[str, str]이지만, 실제로는 그대로
+    # storage 생성자(RedisStorage -> redis.from_url)에 **kwargs로 전달될 뿐이라
+    # socket_timeout처럼 int/float를 받는 옵션도 런타임에는 문제없이 동작한다 -
+    # 실제로 Limiter를 만들어 redis 커넥션 풀에 정수 그대로 전달되는 것까지
+    # tests/test_rate_limit_redis.py에서 확인했다.
+    storage_options={
+        "socket_connect_timeout": REDIS_SOCKET_TIMEOUT_SECONDS,  # type: ignore[dict-item]
+        "socket_timeout": REDIS_SOCKET_TIMEOUT_SECONDS,  # type: ignore[dict-item]
+    },
 )
 
 

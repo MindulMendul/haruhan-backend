@@ -23,6 +23,40 @@ def test_limiter_uses_memory_storage_when_no_redis_url():
     assert type(limiter._storage).__name__ == "MemoryStorage"
 
 
+def test_redis_storage_has_bounded_socket_timeouts():
+    """limits의 RedisStorage는 동기 redis-py 클라이언트를 그대로 쓰고, slowapi는
+    @limiter.limit() 안에서 그 hit() 호출을 await 없이 동기로 실행한다 - uvicorn을
+    워커 1개로 띄우는 이 앱에서는 그 호출이 이벤트 루프를 그대로 막는다.
+    socket_timeout/socket_connect_timeout을 명시하지 않으면 redis-py 기본값(5초)이
+    그대로 적용돼, Redis가 완전히 죽은 게 아니라 응답만 느려지는 상황(패킷 유실
+    등)에서 요청 하나당 최대 5초씩 프로세스 전체가 멈출 수 있다. app.core.rate_limit
+    이 실제로 생성하는 것과 같은 storage_options로 Limiter를 만들어, 내부 redis
+    커넥션 풀에 그 값이 전달되는지 확인한다(서버에 연결하지는 않음 - limits는
+    스토리지 생성 시점에는 연결하지 않고 지연 연결한다)."""
+    limiter = Limiter(
+        key_func=get_remote_address,
+        storage_uri="redis://localhost:6399/0",
+        storage_options={
+            "socket_connect_timeout": rate_limit_module.REDIS_SOCKET_TIMEOUT_SECONDS,
+            "socket_timeout": rate_limit_module.REDIS_SOCKET_TIMEOUT_SECONDS,
+        },
+    )
+    connection_kwargs = limiter._storage.storage.connection_pool.connection_kwargs
+    assert connection_kwargs["socket_timeout"] == rate_limit_module.REDIS_SOCKET_TIMEOUT_SECONDS
+    assert connection_kwargs["socket_connect_timeout"] == rate_limit_module.REDIS_SOCKET_TIMEOUT_SECONDS
+
+
+def test_app_rate_limiter_has_bounded_socket_timeouts_configured():
+    """app.core.rate_limit.limiter(실제로 앱 전체가 공유하는 인스턴스)가 위
+    타임아웃 상한을 실제로 storage_options로 들고 있는지 확인한다 - 이 인스턴스는
+    보통 memory:// 스토리지라 connection_pool이 없으므로, RedisStorage 생성 시점에
+    전달되는 storage_options 자체를 확인한다."""
+    assert rate_limit_module.limiter._storage_options == {
+        "socket_connect_timeout": rate_limit_module.REDIS_SOCKET_TIMEOUT_SECONDS,
+        "socket_timeout": rate_limit_module.REDIS_SOCKET_TIMEOUT_SECONDS,
+    }
+
+
 def test_limiter_falls_back_to_memory_when_redis_unreachable(caplog):
     """이 앱은 auth/chat/quiz 등 거의 모든 쓰기 엔드포인트에 @limiter.limit()이
     걸려 있다 - in_memory_fallback_enabled 없이는 Redis가 잠깐 끊겨도(재시작,
