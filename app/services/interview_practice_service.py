@@ -201,7 +201,7 @@ class InterviewPracticeService:
                 raw = await self._ollama.generate_json(
                     prompt=prompt, model=model, schema=_FEEDBACK_NEXT_QUESTION_SCHEMA
                 )
-                return _FeedbackWithNextQuestion.model_validate_json(raw)
+                parsed = _FeedbackWithNextQuestion.model_validate_json(raw)
             except OllamaServiceError as exc:
                 raise _GENERATION_FAILED from exc
             except (ValidationError, json.JSONDecodeError) as exc:
@@ -213,6 +213,20 @@ class InterviewPracticeService:
                     exc,
                 )
                 continue
+
+            # 스키마는 str 타입만 보장할 뿐 non-blank는 강제하지 않는다 - 특히
+            # next_question이 공백이면 그대로 새 InterviewPracticeTurn.question으로
+            # 저장돼, 사용자가 답할 내용이 아예 없는 빈 질문으로 세션이 조용히
+            # 멈춰버린다(퀴즈 쪽의 같은 증상을 quiz_service._generate_quiz가 같은
+            # 라운드에서 함께 고침).
+            if parsed.feedback.strip() and parsed.next_question.strip():
+                return parsed
+            logger.warning(
+                "면접 피드백/다음 질문 생성 검증 실패 (시도 %d/%d): feedback 또는 "
+                "next_question이 공백뿐임",
+                attempt,
+                _MAX_FEEDBACK_GENERATION_ATTEMPTS,
+            )
 
         raise _GENERATION_FAILED from last_exc
 

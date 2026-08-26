@@ -103,6 +103,29 @@ class DuplicateChoicesOllamaService:
         )
 
 
+class BlankChoiceOllamaService:
+    """보기 중 하나가 공백뿐인 상황을 흉내낸다 - 스키마는 str 타입만 보장할 뿐
+    non-blank는 강제하지 않아, 모델이 가끔 뱉는 빈 문자열이 걸러지지 않고 그대로
+    퀴즈 화면에 빈 줄처럼 보이는 보기로 저장될 수 있었다."""
+
+    async def generate_json(self, prompt, model, schema):
+        return json.dumps(
+            {
+                "questions": [
+                    {
+                        "question": "정상적인 질문",
+                        "choices": ["정답", "   "],
+                        "correct_answer": "정답",
+                        "explanation": "설명",
+                    }
+                ]
+            }
+        )
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
 class FailingOllamaService:
     async def generate_json(self, prompt, model, schema):
         raise OllamaServiceError("boom")
@@ -431,6 +454,17 @@ def test_create_quiz_duplicate_choices_returns_502(client):
     response = client.post(
         "/api/v1/quizzes",
         json={"title": "중복 보기", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+
+
+def test_create_quiz_blank_choice_returns_502(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: BlankChoiceOllamaService()
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "공백 보기", "source_text": "내용"},
         headers=_auth_headers(token),
     )
     assert response.status_code == 502

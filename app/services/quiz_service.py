@@ -191,16 +191,28 @@ class QuizService:
             # 훨씬 많은 문항/보기를 뱉거나(응답 비대화/DB 행 폭증) 같은 보기를 중복
             # 생성(정답 인덱스가 아닌 값으로 채점하므로, 정답 문자열이 중복되면 오답을
             # 골라도 정답 처리되는 채점 정합성 문제)해도 지금까지는 걸러지지 않았다.
-            if len(generated.questions) <= self._settings.max_quiz_question_count and all(
-                q.correct_answer in q.choices
-                and len(q.choices) <= self._settings.max_quiz_choice_count
-                and len(set(q.choices)) == len(q.choices)
-                for q in generated.questions
+            # question/choices/correct_answer/explanation이 공백뿐인 경우도 마찬가지로
+            # 안 걸러졌다 - 스키마는 str 타입만 보장할 뿐 non-blank는 강제하지 않아서,
+            # 모델이 가끔 뱉는 빈 문자열이 그대로 DB에 저장돼 퀴즈 화면에 빈 줄처럼
+            # 보이는 문항으로 나타났다(122/146라운드가 사용자 입력 라벨 필드에서
+            # 고친 것과 같은 증상이 AI 출력에서도 재현됨).
+            if (
+                len(generated.questions) <= self._settings.max_quiz_question_count
+                and all(
+                    q.correct_answer in q.choices
+                    and len(q.choices) <= self._settings.max_quiz_choice_count
+                    and len(set(q.choices)) == len(q.choices)
+                    and q.question.strip()
+                    and q.explanation.strip()
+                    and all(choice.strip() for choice in q.choices)
+                    for q in generated.questions
+                )
             ):
                 return generated
             logger.warning(
                 "퀴즈 생성 검증 실패 (시도 %d/%d): 문항 수=%d(상한 %d) 또는 correct_answer가 "
-                "choices에 없거나 choices 개수/중복이 비정상",
+                "choices에 없거나 choices 개수/중복이 비정상이거나 question/choices/"
+                "explanation에 공백뿐인 값이 있음",
                 attempt,
                 _MAX_QUIZ_GENERATION_ATTEMPTS,
                 len(generated.questions),

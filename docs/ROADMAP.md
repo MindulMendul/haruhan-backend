@@ -4084,3 +4084,48 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
       없었다.
 
+## 백로그 (128라운드)
+
+- [x] 152. Ollama의 구조적 JSON 출력(`generate_json()`)에 공백뿐인
+      문자열이 걸러지지 않고 그대로 저장되던 문제 수정 - 이 코드베이스에서
+      `generate_json()`을 쓰는 두 곳(퀴즈 생성/면접 연습 답변 제출) 모두
+      스키마는 `str` 타입만 보장할 뿐 non-blank는 강제하지 않는데, 문항
+      수/보기 수 상한(108/132라운드)·정답이 보기에 있는지·보기 중복
+      여부만 검증하고 각 문자열이 공백뿐인지는 지금까지 한 번도 걸러진
+      적이 없었다. 148~151라운드에 걸쳐 4번 연속으로 후보로 떠올랐다가
+      매번 더 시급한 다른 항목에 밀려 미뤄져 온 항목을, 이번 라운드에서
+      이 항목보다 더 나은 후보가 없어 드디어 구현했다.
+
+      `app/services/quiz_service.py`의 `_generate_quiz` 검증 게이트(`all
+      (...)`)에 `q.question.strip()`/`q.explanation.strip()`/`all(choice.
+      strip() for choice in q.choices)`를 추가했다 - 공백뿐인 문항/보기/
+      해설이 있으면 기존 재시도 경로(최대 2회)를 그대로 타고, 재시도까지
+      전부 실패하면 502로 끝난다.
+
+      `app/services/interview_practice_service.py`의
+      `_generate_feedback_and_next_question`(150라운드에서 quiz_service와
+      같은 재시도 패턴을 이식한 메서드)에도 같은 이유로 파싱 성공 직후
+      `parsed.feedback.strip()`/`parsed.next_question.strip()` 검증을
+      추가했다 - 특히 `next_question`이 공백이면 그대로
+      `InterviewPracticeTurn.question`으로 저장돼, 사용자가 답할 내용이
+      아예 없는 빈 질문으로 진행 중인 면접 연습 세션이 조용히 멈춰버릴 수
+      있었다(퀴즈 쪽보다 오히려 체감 임팩트가 더 크다고 판단해 같은
+      라운드에 함께 고쳤다 - 121/145·122/146라운드처럼 "같은 원인이 여러
+      곳에 있으면 한 라운드에 같이 정리"하는 기존 관례를 따름).
+
+      `tests/test_quiz.py`에 `BlankChoiceOllamaService`(보기 중 하나가
+      공백)와 `test_create_quiz_blank_choice_returns_502`를,
+      `tests/test_interview_practice.py`에
+      `AlwaysBlankNextQuestionOllamaService`와
+      `test_submit_answer_returns_502_when_next_question_is_blank`를
+      추가했다(둘 다 기존 `TooManyQuestionsOllamaService`/
+      `AlwaysMalformedJsonOllamaService`와 같은 패턴). `git stash`로
+      `quiz_service.py`/`interview_practice_service.py` 수정만
+      되돌리면 두 테스트 모두 정확히 실패(퀴즈 쪽은 공백 보기가 그대로
+      201로 생성됨, 면접 연습 쪽은 공백 질문이 그대로 200으로 저장됨)
+      하는 것까지 확인했다. 전체 445개 테스트 통과, 전체 커버리지
+      99%(`quiz_service.py`/`interview_practice_service.py` 둘 다 100%
+      포함), `mypy app tests scripts` 클린. 최종 성공/실패 응답 형태는
+      그대로고 검증 조건만 늘어난 것이라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, 마이그레이션도 필요 없었다.
+

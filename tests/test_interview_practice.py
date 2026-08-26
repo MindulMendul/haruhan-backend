@@ -69,6 +69,29 @@ class AlwaysMalformedJsonOllamaService:
         return [1.0, 0.0, 0.0]
 
 
+class AlwaysBlankNextQuestionOllamaService:
+    """generate_json()이 매번 next_question이 공백인 응답을 뱉는다 - 스키마는
+    str 타입만 보장할 뿐 non-blank는 강제하지 않아, 그대로 저장되면 사용자가
+    답할 내용이 아예 없는 빈 질문으로 세션이 조용히 멈춰버릴 수 있었다
+    (tests/test_quiz.py의 BlankChoiceOllamaService와 같은 패턴)."""
+
+    def __init__(self):
+        self.generate_json_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        self.generate_json_call_count += 1
+        return json.dumps({"feedback": "좋은 답변입니다.", "next_question": "   "})
+
+    async def chat(self, messages, model):
+        return "피드백 또는 총평 텍스트입니다."
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
 class RecoversOnRetryOllamaService:
     """generate_json() 첫 호출은 깨진 JSON을 뱉고, 두 번째 호출부터는 정상
     응답을 준다(tests/test_quiz.py의 RecoversOnRetryOllamaService와 같은
@@ -561,6 +584,28 @@ def test_submit_answer_returns_502_after_exhausting_retries_on_malformed_json(cl
     """재시도(2회)까지 전부 깨진 JSON이면 결국 502로 실패 처리되는지, 그리고
     실제로 정확히 2번만 시도하고 무한 재시도하지 않는지 확인한다."""
     fake = AlwaysMalformedJsonOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+    assert fake.generate_json_call_count == 2
+
+
+def test_submit_answer_returns_502_when_next_question_is_blank(client):
+    """공백뿐인 next_question이 그대로 새 턴으로 저장되지 않고, 재시도(2회)까지
+    소진한 뒤 502로 실패 처리되는지 확인한다."""
+    fake = AlwaysBlankNextQuestionOllamaService()
     client.app.dependency_overrides[get_ollama_service] = lambda: fake
     token = _signup_and_get_token(client)
     create = client.post(
