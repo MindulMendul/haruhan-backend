@@ -90,6 +90,38 @@ jobs:
       - name: Check for model/migration drift
         run: alembic check
 
+  deploy-config:
+    # 113/114라운드가 docker-compose.yml/Caddyfile에서 실제 배포 사고(ENVIRONMENT가
+    # 컨테이너에 전달되지 않아 프로덕션에서도 /docs가 공개로 열려 있던 문제,
+    # Caddy가 /metrics를 경로 제한 없이 공개로 프록시하던 문제)를 찾아 고쳤는데,
+    # 정작 CI는 test/migrations job 둘 다 app/과 migrations/만 다루고 이 배포
+    # 파일들은 사람이 리뷰할 때만 걸러지고 있었다. docker compose config는 YAML/
+    # 스키마 구조 자체가 깨졌는지, `${VAR:?...}`로 필수 처리된 변수가 실제로
+    # 채워졌는지를 검증한다(변수가 아예 environment: 목록에서 빠진 채로 조용히
+    # 통과하는 것까지는 못 잡는다 - 그건 tests/test_docker_compose.py가 텍스트
+    # 검증으로 이미 잡고 있음). caddy validate는 Caddyfile 문법 자체가 유효한지
+    # 검증한다(경로 차단 로직 존재 여부는 tests/test_caddyfile.py가 이미 검증).
+    # 두 검증 모두 "파일이 문법적으로 유효한가"를 보는 것이라, Python 텍스트
+    # 검증 테스트들과 서로 다른 종류의 회귀를 잡는 상호 보완 관계다.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        run: docker compose config
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/haruhan
+          JWT_SECRET_KEY: ci-only-dummy-secret-key-not-for-production-use
+          ENVIRONMENT: production
+          DOMAIN: ci.example.com
+          GRAFANA_ADMIN_PASSWORD: ci-only-dummy-password
+
+      - name: Validate Caddyfile
+        run: |
+          docker run --rm --entrypoint caddy -e DOMAIN=ci.example.com \
+            -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
   secret-scan:
     runs-on: ubuntu-latest
     steps:

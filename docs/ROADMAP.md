@@ -3542,3 +3542,42 @@
       없는 순수 마이그레이션 실행 방식 개선이라
       `docs/FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
 
+## 백로그 (116라운드)
+
+- [x] 140. CI(`.github/workflows/ci.yml`)에 배포 설정 파일(`docker-compose.yml`/
+      `Caddyfile`) 검증이 전혀 없던 문제 수정. 113/114라운드가 바로 이 두
+      파일에서 실제 배포 사고(`ENVIRONMENT`가 컨테이너에 전달되지 않아
+      프로덕션에서도 `/docs`가 공개로 열려 있던 문제, Caddy가 `/metrics`를
+      경로 제한 없이 공개로 프록시하던 문제)를 찾아 고쳤는데, 정작 CI의
+      `test`/`migrations` job은 `app/`과 `migrations/`만 다루고 이 배포
+      파일들은 사람이 리뷰할 때만 걸러지는 사각지대였다 - 같은 유형의
+      실수가 재발해도 CI가 못 잡는 구조였다. `test`/`migrations` job과
+      나란히 새 `deploy-config` job을 추가해 `docker compose config`
+      (YAML/스키마 구조가 깨졌는지, `${VAR:?...}`로 필수 처리된 변수가
+      실제로 채워졌는지)와 `caddy validate`(Caddyfile 문법 자체의 유효성)
+      두 스텝을 돌리게 했다 - 이 둘은 113/114라운드에서 만든
+      `tests/test_docker_compose.py`/`tests/test_caddyfile.py`(특정 문구가
+      파일에 있는지만 보는 텍스트 검증)와는 서로 다른 종류의 회귀를
+      잡는 상호 보완 관계다(예: `docker compose config`는 변수가
+      `environment:` 목록에서 통째로 빠지는 것까지는 못 잡지만 YAML
+      들여쓰기가 깨지는 것은 잡고, 텍스트 검증은 그 반대).
+
+      실제로 검증해봤다 - `docker compose config`는 로컬에서 daemon 없이도
+      동작해서(순수 클라이언트 사이드 YAML 처리) 직접 실행, 필수 변수가
+      빠지면 정확히 종료 코드 1로 실패하는 것과 정상 실행 시 성공하는 것
+      둘 다 확인했다. `docker run`은 이 세션 환경에 docker daemon이 없어
+      직접 실행은 못 했지만, `caddy validate` 자체는 115라운드에서 이미
+      실제 Caddy 2.6.2 바이너리(.deb에서 추출)로 검증해뒀다 - CI job의
+      `docker run --entrypoint caddy caddy:2-alpine validate ...` 커맨드는
+      이미지의 기본 ENTRYPOINT/CMD가 뭐든 상관없이 정확히 `caddy validate
+      ...`가 실행되도록 `--entrypoint`로 명시했다(공식 이미지 관례를 그대로
+      믿는 대신 모호함 자체를 없앰). `.github/workflows/ci.yml` 자체의
+      YAML 문법도 `python3 -c "import yaml; yaml.safe_load(...)"`로 직접
+      확인했다. `tests/test_ci_workflow.py`를 새로 만들어
+      `test_ci_validates_docker_compose_and_caddyfile`(두 검증 스텝이
+      워크플로 파일에 그대로 있는지)을 추가했고, `git stash`로 워크플로
+      수정만 되돌리면 정확히 실패하는 것까지 확인했다. 전체 414개 테스트
+      통과, 전체 커버리지 99%, mypy 클린. CI 파이프라인 구성만 바뀐
+      변경이라 애플리케이션 코드/API 응답 형태에 영향이 없어
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+
