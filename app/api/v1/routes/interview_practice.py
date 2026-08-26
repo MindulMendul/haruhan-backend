@@ -15,6 +15,7 @@ from app.schemas.interview_practice import (
     InterviewPracticeSessionDetailResponse,
     InterviewPracticeSessionResponse,
     InterviewPracticeTurnResponse,
+    InterviewPracticeUpdateRequest,
 )
 from app.services.interview_practice_service import InterviewPracticeService
 from app.services.ollama_service import OllamaService
@@ -90,6 +91,19 @@ async def get_session(
         updated_at=practice_session.updated_at,
         turns=[InterviewPracticeTurnResponse.model_validate(t) for t in turns],
     )
+
+
+@router.patch("/{session_id}", response_model=InterviewPracticeSessionResponse)
+async def rename_session(
+    session_id: uuid.UUID,
+    payload: InterviewPracticeUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    service: InterviewPracticeService = Depends(get_interview_practice_service),
+) -> InterviewPracticeSessionResponse:
+    practice_session = await service.rename_session(
+        session_id=session_id, user_id=current_user.id, topic=payload.topic
+    )
+    return InterviewPracticeSessionResponse.model_validate(practice_session)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -13,6 +13,10 @@ class InterviewPracticeCreateRequest(BaseModel):
     model: str = Field(default="qwen2.5:3b", max_length=100)
 
 
+class InterviewPracticeUpdateRequest(BaseModel):
+    topic: NonBlankStr = Field(..., min_length=1, max_length=255)
+
+
 class InterviewPracticeTurnResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

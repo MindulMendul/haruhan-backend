@@ -818,6 +818,77 @@ def test_other_user_cannot_access_session(client):
     assert response.status_code == 404
 
 
+def test_rename_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="rename-practice@example.com")
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "원래 주제"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    rename = client.patch(
+        f"/api/v1/interview/practice-sessions/{session_id}",
+        json={"topic": "새 주제"},
+        headers=_auth_headers(token),
+    )
+    assert rename.status_code == 200
+    assert rename.json()["topic"] == "새 주제"
+
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert detail.json()["topic"] == "새 주제"
+
+
+def test_rename_session_rejects_empty_topic(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="rename-practice-empty@example.com")
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "원래 주제"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/interview/practice-sessions/{session_id}",
+        json={"topic": ""},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_rename_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client, email="rename-practice-404@example.com")
+    response = client.patch(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000",
+        json={"topic": "새 주제"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_session_404_for_other_users_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token_a = _signup_and_get_token(client, email="rename-practice-a@example.com")
+    token_b = _signup_and_get_token(client, email="rename-practice-b@example.com")
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "A의 면접"},
+        headers=_auth_headers(token_a),
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/interview/practice-sessions/{session_id}",
+        json={"topic": "가로채기 시도"},
+        headers=_auth_headers(token_b),
+    )
+    assert response.status_code == 404
+
+
 def test_delete_session(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client, email="delete-practice@example.com")

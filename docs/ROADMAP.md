@@ -4129,3 +4129,42 @@
       그대로고 검증 조건만 늘어난 것이라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (129라운드)
+
+- [x] 153. 면접 연습 세션에 이름 변경(`PATCH`) 엔드포인트가 없던 CRUD
+      비대칭 해소. 학습챗 세션(`PATCH /study/sessions/{id}`)/퀴즈
+      (`PATCH /quizzes/{id}`)/면접복기(`PATCH /interview/reviews/{id}`)
+      는 전부 생성 후 제목/내용을 수정할 수 있는데, 면접 연습 세션
+      (`topic`)만 유일하게 그 방법이 없어 오타를 고치거나 주제를
+      재정리하려면 세션을 통째로 지우고 다시 만드는 수밖에 없었다 -
+      150~152라운드에 걸쳐 3번 연속으로 후보로 떠올랐다가 매번 더 작은
+      항목에 밀려 미뤄져 온 항목을, 이번 라운드에서 더 나은 후보가 없어
+      드디어 구현했다.
+
+      `StudySessionRepository.update_title`/`StudyService.rename_session`
+      과 정확히 같은 패턴을 그대로 이식했다:
+      `InterviewPracticeSessionRepository.update_topic`(속성만 바꾸고
+      flush - `updated_at`은 모델의 `onupdate=func.now()`가 자동 갱신),
+      `InterviewPracticeService.rename_session`(세션이 없거나 다른
+      사용자 소유면 404), 새 `InterviewPracticeUpdateRequest` 스키마
+      (122/146라운드가 추가한 `NonBlankStr`로 공백뿐인 주제를 이미
+      막음), `PATCH /interview/practice-sessions/{session_id}` 라우트를
+      `GET /{id}`와 `DELETE /{id}` 사이에 추가했다(`study.py`의 라우트
+      순서와 동일). 이름 변경 자체는 AI 호출이 아니라서 다른 세
+      PATCH들과 마찬가지로 레이트리밋을 걸지 않았다.
+
+      `tests/test_interview_practice.py`에 `tests/test_study.py`의
+      `test_rename_session`/`test_rename_session_rejects_empty_title`/
+      `test_rename_session_404_for_nonexistent_session`/
+      `test_rename_session_404_for_other_users_session`과 같은 패턴으로
+      4개 테스트를 추가했다. `git stash`로 라우트/서비스/리포지토리/
+      스키마 수정을 전부 되돌리면 4개 전부 정확히 실패
+      (`405 Method Not Allowed` - 라우트 자체가 없었으므로)하는 것까지
+      확인했다. `docs/FRONTEND_INTEGRATION.md`의 3-3(면접 연습) 표에
+      새 PATCH 행을 추가했다 - 이번 라운드는 실제로 새 엔드포인트가
+      생기는 경우라 갱신이 필요했다. 전체 449개 테스트 통과, 전체
+      커버리지 99%(`interview_practice.py` 스키마/서비스/라우트 전부
+      100% 포함), `mypy app tests scripts` 클린. 스키마/모델 변경 없이
+      기존 컬럼(`topic`)을 수정하는 새 API 경로 추가라 마이그레이션은
+      필요 없었다.
+

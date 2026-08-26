@@ -100,6 +100,10 @@ class InterviewPracticeSessionRepository:
         )
         return result.scalar_one_or_none()
 
+    async def update_topic(self, practice_session: InterviewPracticeSession, topic: str) -> None:
+        practice_session.topic = topic
+        await self._session.flush()
+
     async def touch(self, practice_session: InterviewPracticeSession) -> None:
         practice_session.updated_at = utcnow_naive()
         await self._session.flush()

@@ -165,6 +165,16 @@ class InterviewPracticeService:
         turns = await self._turns.list_for_session(session_id)
         return practice_session, turns
 
+    async def rename_session(
+        self, session_id: uuid.UUID, user_id: uuid.UUID, topic: str
+    ) -> InterviewPracticeSession:
+        practice_session = await self._sessions.get_for_user(session_id, user_id)
+        if practice_session is None:
+            raise _NOT_FOUND
+        await self._sessions.update_topic(practice_session, topic)
+        await self._session.commit()
+        return practice_session
+
     async def delete_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> None:
         practice_session = await self._sessions.get_for_user(session_id, user_id)
         if practice_session is None:
