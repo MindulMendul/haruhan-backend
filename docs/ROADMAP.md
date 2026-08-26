@@ -3418,3 +3418,44 @@
       데이터/응답 형태는 전혀 안 바뀐 순수 내부 성능 개선이라
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (113라운드)
+
+- [x] 137. `docker-compose.yml`이 `ENVIRONMENT`를 컨테이너에 전달하지 않아,
+      실제 배포에서 `.env`에 `ENVIRONMENT=production`을 정확히 적어도
+      Swagger/ReDoc/OpenAPI가 계속 공개로 열려 있던 문제 수정(73/74라운드가
+      막으려던 것과 같은 결과를 인프라 경로로 재현하고 있었음). `app/main.py`
+      는 `settings.environment == "production"`일 때만 `/docs`/`/redoc`/
+      `/openapi.json`을 끄는데, `.dockerignore`가 `.env`/`.env.*`를 빌드
+      컨텍스트에서 명시적으로 제외해(이미지 안에 `.env` 파일 자체가 없음)
+      컨테이너는 오직 `docker-compose.yml`의 `environment:` 목록에 있는
+      변수만 볼 수 있다 - 그런데 그 목록(`DATABASE_URL`부터 `REDIS_URL`까지
+      11개)에 `ENVIRONMENT`가 아예 빠져 있어서, 운영자가 `.env`를 아무리
+      정확히 채워도 실제 컨테이너에는 전달되지 않고 `Settings`의 기본값
+      ("development")으로 조용히 fallback됐다 - 진짜 공개 도메인(Let's
+      Encrypt 인증서까지 발급된)으로 서빙되는 배포에서 문서 엔드포인트가
+      인터넷에 그대로 노출되는 상태였던 것. `JWT_SECRET_KEY`/`DOMAIN`/
+      `GRAFANA_ADMIN_PASSWORD`와 같은 방식으로 `ENVIRONMENT=${ENVIRONMENT:?ENVIRONMENT
+      must be set (development or production)}`(필수값 - 안 채워졌으면
+      시작 시 바로 실패)를 추가했다. 같은 구조로(문서화는 됐지만 실제
+      전달은 안 되는) 누락돼 있던 `LOG_LEVEL`도 `${LOG_LEVEL:-INFO}`로
+      같이 채워 넣었다(이쪽은 보안 이슈가 아니라 운영 편의성 문제라
+      기본값 방식으로 처리 - 안 채워져도 안전한 기본값이 이미 있음).
+      `Dockerfile`의 uvicorn 플래그 회귀를 텍스트로 직접 검증하는
+      `tests/test_dockerfile.py`와 같은 패턴으로 새 파일
+      `tests/test_docker_compose.py`를 만들어
+      `test_haruhan_backend_receives_environment_variable`/
+      `test_haruhan_backend_receives_log_level_variable`을 추가했다 -
+      `git stash`로 `docker-compose.yml` 수정만 되돌리면 둘 다 정확히
+      실패하는 것까지 확인했다. 겸사겸사 `AuthService.create_guest_session`
+      의 "이후 실제 계정으로 전환하는 기능은 아직 없다"는 오래전에
+      틀려진 주석(2라운드에서 `UserService.upgrade_guest()`/
+      `POST /users/me/upgrade`가 이미 구현됨)도 같이 고쳤다 - 이 자동화
+      루프 자체가 코드베이스의 주석/문서를 근거로 다음 라운드를 판단하는
+      구조라, stale 주석이 향후 라운드의 판단을 잘못된 방향으로 이끌
+      위험이 있다고 판단해 별도 라운드로 쪼개지 않고 함께 처리했다.
+      전체 412개 테스트 통과, 전체 커버리지 99%(`docker-compose.yml`은
+      애플리케이션 커버리지 대상이 아니라 텍스트 검증 테스트로 별도
+      확인), mypy 클린. 애플리케이션 코드/API 응답 형태는 전혀 안
+      바뀐 순수 배포 설정 수정이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+

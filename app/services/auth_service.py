@@ -135,8 +135,9 @@ class AuthService:
         """로그인 폼 없이 방문자마다 자동으로 익명 계정을 만들고 토큰을 발급한다.
 
         이 토큰/refresh_token을 클라이언트가 잃어버리면(로그아웃, 스토리지 삭제 등)
-        해당 게스트 계정의 데이터는 다시 접근할 방법이 없다 - 별도의 이메일/비밀번호가
-        없기 때문이다. 이후 실제 계정으로 전환하는 기능은 아직 없다.
+        해당 게스트 계정의 데이터는 다시 접근할 방법이 없다 - 전환 전까지는 별도의
+        이메일/비밀번호가 없기 때문이다. 실제 계정으로 전환하려면
+        UserService.upgrade_guest()(POST /users/me/upgrade)를 쓰면 된다.
         """
         user = await self._users.create_guest()
         tokens = await self._issue_tokens(user)
