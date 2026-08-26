@@ -3498,3 +3498,47 @@
       배포 설정 수정이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (115라운드)
+
+- [x] 139. 104라운드가 추가한 `knowledge_chunks` 복합 인덱스 마이그레이션
+      (`f8c776ddf837`)이 `CREATE INDEX`(비-concurrent)를 써서, 실제
+      배포 시 이 테이블에 대한 쓰기를 인덱스 빌드가 끝날 때까지 막는
+      락을 잡던 문제 수정. `knowledge_chunks`는 학습챗 메시지/면접
+      복기/퀴즈 소스/면접연습 답변마다 계속 쌓이는 RAG 색인 테이블이라
+      서비스가 커질수록 테이블도 커지는데, `migrations/env.py`는 모든
+      마이그레이션을 트랜잭션 안에서 실행하고(`context.begin_transaction()`),
+      비-concurrent `CREATE INDEX`는 그 트랜잭션이 인덱스 빌드가 끝날
+      때까지 테이블 쓰기(INSERT/UPDATE/DELETE)를 막는 락을 들고 있는다 -
+      이 마이그레이션을 그대로 프로덕션에 적용하면 배포 순간
+      `RagService.index_content()`가 하는 쓰기가 전부 멈추는 다운타임으로
+      직결된다. `CREATE INDEX CONCURRENTLY`는 이 락 없이(대신 테이블을
+      두 번 스캔하는 비용으로) 인덱스를 빌드할 수 있지만, Postgres가
+      트랜잭션 블록 안에서 `CONCURRENTLY`를 실행하는 것 자체를 허용하지
+      않는다 - alembic이 정확히 이런 경우를 위해 제공하는
+      `op.get_context().autocommit_block()`으로 `create_index`/`drop_index`
+      호출만 트랜잭션 밖에서 실행되도록 감쌌다(둘 다
+      `postgresql_concurrently=True`). 이 브랜치는 아직 병합 전(기존
+      PR #5)이라 이 마이그레이션이 실제 프로덕션 DB에 적용된 적이 없다는
+      판단 하에, 되돌리기용 후속 마이그레이션을 새로 만드는 대신 이미
+      존재하는 리비전 파일 자체를 수정했다(alembic은 리비전 ID만
+      `alembic_version` 테이블에서 추적하고 파일 내용을 체크섬으로
+      검증하지 않으므로, 아직 이 리비전을 적용한 적 없는 환경에서는
+      안전하게 반영됨).
+
+      로컬 Postgres 16 클러스터에 연결해 실제로 검증했다 - `alembic
+      downgrade -1`로 `DROP INDEX CONCURRENTLY`가 성공하는지,
+      `alembic upgrade head`로 `CREATE INDEX CONCURRENTLY`가 성공하는지
+      확인했고(둘 다 트랜잭션 밖에서 정상 실행됨), `psql \d
+      knowledge_chunks`로 인덱스가 정확한 컬럼 순서(`user_id`,
+      `embedding_model`, `created_at`)로 실제로 만들어졌는지 확인했다.
+      `alembic revision --autogenerate`로 드리프트가 없는지(빈 마이그레이션
+      생성 후 삭제), `alembic check`로도 추가 검증했다. 이 변경은 오직
+      Postgres 실행 경로에만 영향을 주고(SQLite 기반 테스트는
+      `Base.metadata.create_all()`을 직접 써서 alembic을 아예 안 거침)
+      스키마 결과 자체는 이전과 동일해 애플리케이션 테스트 회귀는
+      필요 없다고 판단했다 - 전체 413개 테스트 통과(변경 없음),
+      전체 커버리지 99%, mypy 클린(`migrations/` 디렉터리도 별도로
+      `mypy migrations` 확인). API 응답 형태/스키마 결과에 영향이
+      없는 순수 마이그레이션 실행 방식 개선이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
+
