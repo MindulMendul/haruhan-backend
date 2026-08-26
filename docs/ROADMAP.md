@@ -4051,3 +4051,36 @@
       횟수만 늘어난 것이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (127라운드)
+
+- [x] 151. `ACCESS_TOKEN_EXPIRE_MINUTES`/`REFRESH_TOKEN_EXPIRE_DAYS`에 양수
+      검증이 없어, 0이나 음수로 설정하면 발급되는 토큰이 태어날 때부터
+      이미 만료된 상태가 되던 문제 수정. `core/tokens.py`의
+      `create_access_token()`은 `exp = now_ts + settings.
+      access_token_expire_minutes * 60`을, `refresh_token_expiry()`는
+      `utcnow_naive() + timedelta(days=settings.refresh_token_expire_days)`
+      를 그대로 계산에 쓴다 - 둘 중 하나가 0이나 음수면(오타, 단위 착각
+      등) 그 즉시 과거 시각이 `exp`로 박히거나 이미 지난 만료 시각이
+      계산된다. `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로,
+      로그인/회원가입 요청은 겉보기엔 멀쩡히 200을 반환하면서 발급한
+      토큰만 곧바로 무효가 되는, 시작 시점에는 전혀 티가 안 나는 전면적인
+      인증 장애로 이어진다 - `JWT_SECRET_KEY` 길이(1번대 라운드)/
+      `LOG_LEVEL`/`ENVIRONMENT`(73/74라운드)/레이트리밋 문자열
+      (100라운드)/퀴즈 문항 수 기본값(108라운드)처럼 이미 여러 라운드가
+      막아온 "Settings 필드 하나가 시작 시점 검증 없이 조용히 앱을 망가진
+      상태로 띄우는" 클래스의 남은 인스턴스였다.
+
+      `app/core/config.py`에 `access_token_expire_minutes`/
+      `refresh_token_expire_days` 두 필드를 함께 검증하는
+      `field_validator`를 추가했다 - `<= 0`이면 어느 필드가 문제인지
+      필드명을 포함한 메시지로 거부한다. `tests/test_config.py`에
+      `test_settings_accepts_positive_token_expiry`/
+      `test_settings_rejects_non_positive_token_expiry`(0/-1
+      parametrize)를 추가했다. `git stash`로 `app/core/config.py`
+      수정만 되돌리면 음수/0 케이스 4개 전부 정확히 실패
+      (`ValidationError`가 안 남)하는 것까지 확인했다. 전체 443개 테스트
+      통과, 전체 커버리지 99%(`app/core/config.py` 100% 포함), `mypy
+      app tests scripts` 클린. 정상 범위(양수) 설정의 동작은 그대로라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
+      없었다.
+

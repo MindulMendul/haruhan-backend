@@ -1,7 +1,7 @@
 from functools import lru_cache
 
 from limits.util import parse_many
-from pydantic import field_validator, model_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MIN_JWT_SECRET_KEY_LENGTH = 32
@@ -70,6 +70,22 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
+
+    @field_validator("access_token_expire_minutes", "refresh_token_expire_days")
+    @classmethod
+    def _validate_token_expiry_is_positive(cls, value: int, info: ValidationInfo) -> int:
+        """core/tokens.py의 create_access_token()/refresh_token_expiry()는 이
+        값을 그대로 `now + value * 단위`로 만료 시각을 계산한다 - 0이나 음수가
+        들어오면(오타, 단위 착각 등) 발급되는 토큰이 태어날 때부터 이미 만료된
+        상태가 된다. Settings() 생성 자체는 성공하고 앱도 정상적으로 뜨기 때문에,
+        로그인/회원가입은 겉보기엔 멀쩡히 200을 반환하면서 발급한 토큰만 곧바로
+        무효가 되는, 시작 시점에는 전혀 티가 안 나는 전면적인 인증 장애로
+        이어진다. 다른 숫자 설정들(예: DEFAULT_QUIZ_QUESTION_COUNT)과 같은
+        이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            field_name = info.field_name or "value"
+            raise ValueError(f"{field_name.upper()}({value})는 0보다 커야 합니다.")
+        return value
 
     # 퀴즈 생성 소스 텍스트 최대 길이 (문자 수). 학습 세션 전체를 소스로 쓸 수 있어
     # 일반 프롬프트(max_prompt_length)보다 넉넉하게 둔다.

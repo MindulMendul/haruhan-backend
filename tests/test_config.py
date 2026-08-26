@@ -100,3 +100,23 @@ def test_settings_rejects_malformed_rate_limit_string(field, bad_value):
     값임을 확인하고, Settings가 이걸 시작 시점에 미리 거부하는지 확인한다."""
     with pytest.raises(ValidationError):
         Settings(jwt_secret_key="a" * 32, **{field: bad_value})
+
+
+@pytest.mark.parametrize("field", ["access_token_expire_minutes", "refresh_token_expire_days"])
+def test_settings_accepts_positive_token_expiry(field):
+    settings = Settings(jwt_secret_key="a" * 32, **{field: 1})
+    assert getattr(settings, field) == 1
+
+
+@pytest.mark.parametrize("field", ["access_token_expire_minutes", "refresh_token_expire_days"])
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_token_expiry(field, bad_value):
+    """core/tokens.py의 create_access_token()/refresh_token_expiry()는 이 값을
+    그대로 `now + value * 단위`로 만료 시각 계산에 쓴다 - 0이나 음수가 들어오면
+    발급되는 토큰이 태어날 때부터 이미 만료된 상태가 된다. Settings() 생성
+    자체는 성공해 앱도 정상적으로 뜨므로, 로그인/회원가입은 겉보기엔 멀쩡히
+    200을 반환하면서 발급한 토큰만 곧바로 무효가 되는, 시작 시점에는 전혀 티가
+    안 나는 전면적인 인증 장애로 이어진다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, **{field: bad_value})
+    assert field.upper() in str(exc_info.value)
