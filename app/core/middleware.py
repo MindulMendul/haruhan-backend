@@ -75,6 +75,14 @@ class SecurityHeadersMiddleware:
         # 안전하다. 운영은 Caddy 뒤에서 HTTPS로만 서빙되므로(0. 준비 사항 참고)
         # 프로토콜 다운그레이드/쿠키 가로채기류 공격에 대한 표준 방어선이 된다.
         (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
+        # Bearer 토큰 인증이라 브라우저 기본 캐시 정책이 어느 정도 안전망 역할을
+        # 하지만, /export/me처럼 계정 전체 이력(학습챗 내용, 퀴즈 정답, 면접 복기
+        # 원문)을 한 번에 반환하는 엔드포인트를 포함해 모든 응답에 명시적인
+        # no-store가 없으면 공유 컴퓨터의 브라우저 디스크 캐시나 back-forward
+        # cache, 향후 캐싱 프록시가 앞단에 추가될 경우의 사고 가능성이 남는다.
+        # 정적 자산을 서빙하지 않는 순수 API 서버라 모든 응답에 일괄 적용해도
+        # 안전하다.
+        (b"cache-control", b"no-store"),
     )
 
     def __init__(self, app: ASGIApp) -> None:

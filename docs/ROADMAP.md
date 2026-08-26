@@ -3290,3 +3290,26 @@
       통과) 순수 방어적 강화라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (109라운드)
+
+- [x] 133. 모든 응답에 `Cache-Control: no-store` 헤더 추가
+      (`SecurityHeadersMiddleware`). `X-Content-Type-Options`/`X-Frame-Options`/
+      `Referrer-Policy`/`Strict-Transport-Security`는 이미 챙기고 있었는데
+      `Cache-Control`은 코드베이스 전체에 한 번도 등장하지 않았다. 이 API는
+      Bearer 토큰 인증이라 브라우저 기본 캐시 정책이 어느 정도 안전망 역할을
+      하지만, `GET /export/me`처럼 계정 전체 이력(학습챗 내용, 퀴즈 정답,
+      면접 복기 원문)을 한 번에 반환하는 엔드포인트를 포함해 모든 GET
+      응답에 명시적인 `no-store`가 없다는 건, 공유 컴퓨터의 브라우저 디스크
+      캐시나 back-forward cache, 혹은 향후 Caddy 앞단에 캐싱 프록시/CDN이
+      추가될 경우의 사고 가능성을 열어둔다 - 심층 방어(defense-in-depth)
+      성격의 공백이었다. 정적 자산을 서빙하지 않는 순수 API 서버라 모든
+      응답에 일괄 적용해도 부작용이 없고(`/docs`/`/redoc`/`/openapi.json`도
+      이미 프로덕션에서 비활성화돼 있어 예외 처리가 따로 필요 없음),
+      `SecurityHeadersMiddleware._HEADERS` 튜플에 한 줄 추가하는 것으로
+      끝나는 값싼 수정이었다. `test_security_headers_present`에 헤더
+      확인 한 줄을 추가했고, `git stash`로 미들웨어 수정만 되돌리면
+      정확히 실패하는 것까지 확인했다. 전체 404개 테스트 통과, 전체
+      커버리지 99%(`core/middleware.py` 100% 유지), mypy 클린. 응답
+      헤더 하나가 늘었을 뿐 바디/상태 코드는 전혀 안 바뀌는 변경이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+
