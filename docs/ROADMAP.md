@@ -3963,3 +3963,49 @@
       각 미들웨어의 동작/응답 바디 형태는 그대로라 `docs/
       FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (125라운드)
+
+- [x] 149. `GET /health/ready`가 인증도 레이트리밋도 캐시도 없이, 호출될
+      때마다 Ollama에 실제 HTTP 요청을 보내던 문제 수정. 이 엔드포인트는
+      "트래픽 라우팅 판단용"이라 로그인 절차를 둘 수 없어 애초에 인증이
+      없는데(`app/api/v1/routes/health.py` 자신의 docstring이 이미 그렇게
+      설명함), `Caddyfile`은 `/metrics`만 막고 나머지는 전부 공개
+      도메인으로 그대로 프록시하며(138라운드), `docker-compose.yml`의
+      `healthcheck`도 `/health`(생존 확인만)만 찌르지 `/health/ready`는
+      건드리지 않는다는 것까지 직접 확인했다 - 즉 이 엔드포인트는 익명
+      호출자가 원하는 만큼 반복 호출할 수 있는 상태였고, 매 호출마다
+      `check_ollama_health()`가 실제 Ollama 서버에 모델 목록 조회 요청을
+      보내고 `REDIS_URL`이 설정된 경우 Redis 커넥션까지 새로 열었다
+      닫았다. 121라운드가 `/models`("이 앱에서 유일하게 인증 없이 공개된
+      엔드포인트")에서 고친 것과 정확히 같은 모양의 문제를, 그 라운드의
+      스윕이 놓쳤던 형제 엔드포인트에서 뒤늦게 발견한 것이다.
+
+      다만 `/models`와 달리 이 엔드포인트는 오케스트레이터/업타임
+      모니터가 몇 초 간격으로 폴링하는 게 정상적인 사용 패턴이라,
+      `/models`처럼 레이트리밋(`@limiter.limit`)을 걸면 정상적인 헬스체크
+      폴링 자체가 429로 거부돼 멀쩡한 인스턴스가 "unready"로 잘못
+      판정되는 새로운 위험이 생긴다고 판단했다 - 그래서 레이트리밋 대신
+      `/models`가 쓰는 것과 같은 `TTLCache` + `asyncio.Lock` 패턴(캐시가
+      막 만료된 순간 동시에 들어온 요청들이 각자 상류 서비스를 호출하는
+      것까지 막음)을 그대로 재사용해 5초간 결과를 캐싱했다 - 호출
+      빈도와 무관하게 실제 DB/Redis/Ollama 확인은 이 주기당 한 번만
+      일어나면서도, 트래픽 라우팅 판단에 쓰기에 충분히 신선한 값을
+      유지한다.
+
+      `tests/conftest.py`의 전역 `_reset_state` autouse 픽스처에도
+      `_models_cache.clear()`와 같은 자리에 `_readiness_cache.clear()`를
+      추가해 테스트 간 캐시가 새지 않게 했다(안 했으면 한 테스트가 채운
+      캐시를 다른 테스트가 그대로 받아가는 오염이 실제로 재현됐다).
+      `tests/test_health.py`에 `test_readiness_caches_result_within_ttl`
+      (반복 호출해도 Ollama 호출이 정확히 1번만 일어나는지)과
+      `test_get_or_check_readiness_coalesces_concurrent_cache_misses`
+      (`/models`의 같은 이름 테스트와 동일한 이유로, 캐시가 비어있는
+      상태에서 동시에 5개 호출이 들어와도 실제 확인은 1번만 일어나는지)
+      를 추가했다. `git stash`로 `app/api/v1/routes/health.py`와
+      `tests/conftest.py` 수정만 되돌리면 캐싱 테스트가 정확히
+      실패(`call_count == 2`)하는 것까지 확인했다. 전체 435개 테스트
+      통과, 전체 커버리지 99%(`app/api/v1/routes/health.py` 100% 포함),
+      `mypy app tests scripts` 클린. 응답 바디 형태(정상/장애 시 필드
+      구성)는 그대로고 순수 캐싱 계층 추가라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+
