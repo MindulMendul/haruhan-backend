@@ -187,13 +187,27 @@ class QuizService:
                 )
                 continue
 
-            # 스키마는 구조만 보장한다 - 정답이 실제로 보기 중 하나인지는 별도로 검증해야 한다.
-            if all(q.correct_answer in q.choices for q in generated.questions):
+            # 스키마는 구조만 보장한다 - 문항/보기 수가 정상 범위인지, 정답이 실제로
+            # 보기 중 하나(정확히 한 번만)인지는 별도로 검증해야 한다. question_count는
+            # 사용자 요청 시점에만 max_quiz_question_count로 제한되고, 모델에게는
+            # 프롬프트로 "부탁"만 할 뿐 구조적으로 강제되지 않으므로, 모델이 요청보다
+            # 훨씬 많은 문항/보기를 뱉거나(응답 비대화/DB 행 폭증) 같은 보기를 중복
+            # 생성(정답 인덱스가 아닌 값으로 채점하므로, 정답 문자열이 중복되면 오답을
+            # 골라도 정답 처리되는 채점 정합성 문제)해도 지금까지는 걸러지지 않았다.
+            if len(generated.questions) <= self._settings.max_quiz_question_count and all(
+                q.correct_answer in q.choices
+                and len(q.choices) <= self._settings.max_quiz_choice_count
+                and len(set(q.choices)) == len(q.choices)
+                for q in generated.questions
+            ):
                 return generated
             logger.warning(
-                "퀴즈 생성 검증 실패 (시도 %d/%d): correct_answer가 choices에 없음",
+                "퀴즈 생성 검증 실패 (시도 %d/%d): 문항 수=%d(상한 %d) 또는 correct_answer가 "
+                "choices에 없거나 choices 개수/중복이 비정상",
                 attempt,
                 _MAX_QUIZ_GENERATION_ATTEMPTS,
+                len(generated.questions),
+                self._settings.max_quiz_question_count,
             )
 
         raise _GENERATION_FAILED from last_exc

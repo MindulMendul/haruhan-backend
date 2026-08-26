@@ -62,6 +62,47 @@ class BadAnswerOllamaService:
         )
 
 
+class TooManyQuestionsOllamaService:
+    """max_quiz_question_count(기본 20)보다 훨씬 많은 문항을 뱉는 상황을 흉내낸다 -
+    question_count는 사용자 요청 시점에만 이 상한으로 제한되고, 모델 출력에는
+    프롬프트로 "부탁"만 할 뿐 구조적으로 강제되지 않는다."""
+
+    async def generate_json(self, prompt, model, schema):
+        return json.dumps(
+            {
+                "questions": [
+                    {
+                        "question": f"질문 {i}",
+                        "choices": ["A", "B"],
+                        "correct_answer": "A",
+                        "explanation": "설명",
+                    }
+                    for i in range(25)
+                ]
+            }
+        )
+
+
+class DuplicateChoicesOllamaService:
+    """같은 보기 문자열이 중복 생성된 상황을 흉내낸다 - 채점이 인덱스가 아니라
+    값으로 정답을 비교하므로, 정답 문자열이 중복되면 실제로 오답인 인덱스를
+    골라도 정답으로 채점되는 정합성 문제로 이어질 수 있다."""
+
+    async def generate_json(self, prompt, model, schema):
+        return json.dumps(
+            {
+                "questions": [
+                    {
+                        "question": "중복 보기 문제",
+                        "choices": ["파리", "런던", "파리", "베를린"],
+                        "correct_answer": "파리",
+                        "explanation": "설명",
+                    }
+                ]
+            }
+        )
+
+
 class FailingOllamaService:
     async def generate_json(self, prompt, model, schema):
         raise OllamaServiceError("boom")
@@ -368,6 +409,28 @@ def test_create_quiz_answer_not_in_choices_returns_502(client):
     response = client.post(
         "/api/v1/quizzes",
         json={"title": "잘못된 정답", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+
+
+def test_create_quiz_too_many_generated_questions_returns_502(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: TooManyQuestionsOllamaService()
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "문항 폭주", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+
+
+def test_create_quiz_duplicate_choices_returns_502(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: DuplicateChoicesOllamaService()
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "중복 보기", "source_text": "내용"},
         headers=_auth_headers(token),
     )
     assert response.status_code == 502

@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     max_quiz_source_length: int = 20_000
     default_quiz_question_count: int = 5
     max_quiz_question_count: int = 20
+    # 문항 하나당 보기(choices) 개수 상한 - AI가 생성한 퀴즈 검증용 안전장치.
+    # max_quiz_question_count와 마찬가지로 사용자 요청 시점(question_count)에만
+    # 걸리던 상한이 AI 출력(모델이 실제로 몇 문항/몇 보기를 뱉는지)에는 전혀
+    # 적용되지 않던 신뢰 경계 공백을 메운다 - 프롬프트로 "부탁"할 뿐 구조적으로
+    # 강제되지 않으므로, 응답 payload 비대화/DB 행 폭증을 막는 최후의 안전장치다.
+    max_quiz_choice_count: int = 8
 
     # 면접 연습 세션 하나당 최대 질문 수. 도달하면 다음 질문을 생성하지 않고
     # 클라이언트가 /complete를 호출해 종합 피드백을 받도록 유도한다.

@@ -3255,3 +3255,38 @@
       동작/응답 형태는 전혀 안 바뀐 변경이라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (108라운드)
+
+- [x] 132. AI가 생성한 퀴즈 데이터에 대한 신뢰 경계 검증 공백 두 가지 수정
+      (`QuizService._generate_quiz`). `question_count`는 사용자 요청 시점에만
+      `max_quiz_question_count`(기본 20)로 제한되고, 모델에게는 프롬프트로
+      "이 개수만큼 만들어달라"고 부탁만 할 뿐 구조적으로 강제되지 않는다 -
+      실제로 모델이 요청보다 훨씬 많은 문항을 뱉어도 지금까지는 전혀 걸러지지
+      않고 그대로 개별 INSERT로 전부 저장됐다(응답 payload 비대화, DB 행
+      폭증, 순차 INSERT 지연으로 이어질 수 있음). 더 심각한 건 채점
+      로직(`submit_answers`)이 보기 인덱스가 아니라 **문자열 값**으로 정답을
+      비교한다는 점이다 - `_generate_quiz`는 `correct_answer in choices`만
+      확인할 뿐 "정확히 한 번만 나타나는지"는 검증하지 않아서, 모델이 같은
+      보기 문자열을 중복 생성하면(예: `["파리", "런던", "파리", "베를린"]`,
+      correct_answer="파리") 실제로는 오답인 인덱스를 골라도 값 비교상
+      정답으로 채점되는 정합성 문제로 이어질 수 있었다. `Settings`에
+      `max_quiz_choice_count: int = 8`(문항당 보기 개수 상한 - 기존
+      `max_quiz_question_count`와 같은 신뢰 경계 안전장치 성격)을 새로
+      추가하고, `_generate_quiz`의 검증 단계(기존 `correct_answer in choices`
+      체크 자리)에 "문항 수가 상한 이하", "보기 개수가 상한 이하",
+      "보기에 중복이 없음"(중복이 없고 `correct_answer`가 `choices` 안에
+      있다는 기존 체크가 함께 있으면, 정답 문자열이 정확히 한 번만 나타난다는
+      것도 자동으로 보장됨) 세 조건을 추가했다 - 실패하면 기존 재시도 경로
+      (`_MAX_QUIZ_GENERATION_ATTEMPTS`)를 그대로 타고, 재시도까지 실패하면
+      기존과 동일하게 502로 끝난다. `tests/test_quiz.py`에 두 가짜 Ollama
+      서비스(`TooManyQuestionsOllamaService`: 25문항 생성,
+      `DuplicateChoicesOllamaService`: 같은 보기 문자열 중복 생성)와 그걸
+      쓰는 회귀 테스트 2개를 추가했고, `git stash`로 서비스/설정 수정만
+      되돌리면 둘 다 (검증을 통과해 실제로 퀴즈 생성이 진행되면서 이 코드
+      경로와 무관한 다른 예외로) 정확히 실패하는 것까지 확인했다. 전체
+      404개 테스트 통과, 전체 커버리지 99%(`services/quiz_service.py`/
+      `core/config.py` 모두 100%), mypy 클린. AI가 실제로 상한을 넘겨
+      생성하는 극히 드문 경우에만 영향을 주는(정상 범위 응답은 그대로
+      통과) 순수 방어적 강화라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+
