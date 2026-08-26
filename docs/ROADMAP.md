@@ -3213,3 +3213,45 @@
       남음) 프로토콜/스키마는 그대로라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (107라운드)
+
+- [x] 131. `RagService.index_content`/`forget_content`/`forget_content_bulk`
+      가 `OllamaServiceError`(임베딩 API 실패)만 잡아서 조용히 넘어가도록
+      돼 있어, 그 범위 밖의 예상 못한 예외(예: `_chunks.create()`의
+      `flush()`나 `session.commit()`에서 나는 DB 레벨 오류 - 커넥션 드롭,
+      제약 위반 등)는 그대로 위로 전파되던 문제 수정. 이 세 메서드는
+      전부 "본 리소스(학습챗 메시지/퀴즈/면접복기/면접연습 턴)가 이미
+      커밋(생성 시엔 색인, 삭제 시엔 색인 정리)된 뒤" 마지막 단계로만
+      호출된다 - `study_service.py`/`quiz_service.py`/
+      `interview_review_service.py`/`interview_practice_service.py`의
+      모든 호출부를 확인해, 이 뒤에 이어지는 코드가 세션에 의존하지
+      않는다는 것도 확인했다(전부 `return` 직전 마지막 호출). 그런데
+      정작 각 서비스 docstring엔 "색인은 부가 기능이라 본 기능 흐름을
+      막으면 안 된다"고 명시돼 있으면서, 좁은 예외 타입(`OllamaServiceError`)
+      만 잡아 그 의도가 실제로는 지켜지지 않는 구멍이 있었다 - 이 좁은
+      틈에서 DB 오류가 나면, 이미 성공한 요청(리소스는 실제로
+      생성/삭제됨)이 클라이언트에는 500으로 보여, 특히 멱등성 가드가
+      없는 `create_quiz`/`create_review` 같은 엔드포인트는 재시도 시
+      중복 리소스가 쌓일 위험까지 있었다. 세 메서드 모두 바깥쪽에
+      `try/except Exception`을 씌워(임베딩 호출용 안쪽 `except
+      OllamaServiceError`는 그대로 남기고, 그 바깥의 `_chunks` 조작+
+      `commit()` 구간 전체를 감쌈) `logger.exception`으로 남긴 뒤
+      `session.rollback()`으로 세션을 깨끗한 상태로 되돌린다(이 시점
+      이후로 세션을 계속 쓰는 곳이 없다는 걸 위에서 이미 확인했지만,
+      FastAPI의 `get_db()` yield 의존성이 요청 끝에서 세션을 재사용할
+      가능성에 대비한 안전장치).
+
+      새 파일 `tests/test_rag_service_best_effort.py`에 회귀 테스트 3개
+      추가 - `_BrokenChunkRepository`(모든 메서드가 `OllamaServiceError`가
+      아닌 `RuntimeError`를 던지도록 흉내낸 가짜 리포지토리)를
+      `RagService._chunks`에 직접 주입해, `index_content`/`forget_content`/
+      `forget_content_bulk` 호출이 예외를 밖으로 새어나가게 하지 않는지,
+      그리고 그 뒤 같은 세션으로 다른 작업(새 게스트 유저 생성+커밋)을
+      해도 정상 동작하는지(rollback이 실제로 세션을 깨끗한 상태로
+      되돌렸는지) 확인한다. `git stash`로 서비스 수정만 되돌리면 세
+      테스트 모두 `RuntimeError`가 그대로 전파되며 정확히 실패하는 것까지
+      확인했다. 전체 402개 테스트 통과, 전체 커버리지 99%(`services/rag_service.py`
+      100% 유지), mypy 클린. 예외 처리 범위만 넓어졌을 뿐 정상 경로의
+      동작/응답 형태는 전혀 안 바뀐 변경이라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, 마이그레이션도 필요 없었다.
+

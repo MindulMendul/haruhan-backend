@@ -51,45 +51,56 @@ class RagService:
     ) -> None:
         """레거시 데이터를 검색 대상으로 색인한다. 같은 source에 대한 기존 색인은 먼저 지운다.
 
-        임베딩 호출이 실패해도 색인은 부가 기능이므로 조용히 건너뛴다 - 본 기능(채팅/복기
-        저장)의 흐름을 막으면 안 된다.
+        색인은 부가 기능이라 어떤 이유로든(임베딩 호출 실패뿐 아니라 DB 오류까지) 실패해도
+        조용히 건너뛴다 - 이 메서드는 항상 본 기능(채팅/복기 저장 등)이 이미 커밋된 "뒤"
+        마지막 단계로 호출되므로, 여기서 잡지 못한 예외가 그대로 위로 전파되면 실제로는
+        성공한 요청이 500으로 보여 클라이언트가 재시도하다 중복 리소스를 만들 위험이 있다.
         """
-        await self._chunks.delete_for_source(source_type, source_id)
-
-        if not content.strip():
-            await self._session.commit()
-            return
-
-        model = self._settings.embedding_model
         try:
-            embedding = await self._ollama.embed(text=content, model=model)
-        except OllamaServiceError:
-            logger.error(
-                "RAG 색인 실패 (임베딩 호출 에러): user_id=%s source_type=%s source_id=%s",
-                user_id,
-                source_type,
-                source_id,
-            )
-            await self._session.commit()
-            return
+            await self._chunks.delete_for_source(source_type, source_id)
 
-        if embedding:
-            await self._chunks.create(
-                user_id=user_id,
-                source_type=source_type,
-                source_id=source_id,
-                content=content,
-                embedding=embedding,
-                embedding_model=model,
-            )
-        else:
-            logger.warning(
-                "RAG 색인 건너뜀 (빈 임베딩 반환): user_id=%s source_type=%s source_id=%s",
+            if not content.strip():
+                await self._session.commit()
+                return
+
+            model = self._settings.embedding_model
+            try:
+                embedding = await self._ollama.embed(text=content, model=model)
+            except OllamaServiceError:
+                logger.error(
+                    "RAG 색인 실패 (임베딩 호출 에러): user_id=%s source_type=%s source_id=%s",
+                    user_id,
+                    source_type,
+                    source_id,
+                )
+                await self._session.commit()
+                return
+
+            if embedding:
+                await self._chunks.create(
+                    user_id=user_id,
+                    source_type=source_type,
+                    source_id=source_id,
+                    content=content,
+                    embedding=embedding,
+                    embedding_model=model,
+                )
+            else:
+                logger.warning(
+                    "RAG 색인 건너뜀 (빈 임베딩 반환): user_id=%s source_type=%s source_id=%s",
+                    user_id,
+                    source_type,
+                    source_id,
+                )
+            await self._session.commit()
+        except Exception:
+            logger.exception(
+                "RAG 색인 실패 (예상 못한 오류): user_id=%s source_type=%s source_id=%s",
                 user_id,
                 source_type,
                 source_id,
             )
-        await self._session.commit()
+            await self._session.rollback()
 
     async def retrieve_relevant(self, user_id: uuid.UUID, query: str) -> list[str]:
         """query와 의미적으로 가까운 사용자 본인의 기존 기록 상위 K개를 반환한다.
@@ -117,14 +128,34 @@ class RagService:
         return await asyncio.to_thread(_rank_top_k, query_embedding, pairs, self._settings.rag_top_k)
 
     async def forget_content(self, source_type: str, source_id: uuid.UUID) -> None:
-        """원본이 삭제될 때 색인도 함께 지운다."""
-        await self._chunks.delete_for_source(source_type, source_id)
-        await self._session.commit()
+        """원본이 삭제될 때 색인도 함께 지운다.
+
+        index_content와 같은 이유로 여기도 항상 원본(세션/복기 등)이 이미 커밋으로
+        삭제된 "뒤" 호출되므로, 이 정리 단계에서 나는 예상 못한 DB 오류를 그대로
+        전파하면 실제로는 성공한 삭제 요청이 500으로 보인다 - 조용히 삼키고 로그만
+        남긴다."""
+        try:
+            await self._chunks.delete_for_source(source_type, source_id)
+            await self._session.commit()
+        except Exception:
+            logger.exception(
+                "RAG 색인 정리 실패 (예상 못한 오류): source_type=%s source_id=%s", source_type, source_id
+            )
+            await self._session.rollback()
 
     async def forget_content_bulk(self, source_type: str, source_ids: list[uuid.UUID]) -> None:
         """forget_content의 배치 버전 - 세션/연습 하나를 지울 때 그 안의 메시지/턴
-        전부를 한 번의 DELETE+commit으로 처리한다(호출부마다 반복 호출하지 않도록)."""
+        전부를 한 번의 DELETE+commit으로 처리한다(호출부마다 반복 호출하지 않도록).
+        예외 처리 이유는 forget_content와 동일."""
         if not source_ids:
             return
-        await self._chunks.delete_for_sources(source_type, source_ids)
-        await self._session.commit()
+        try:
+            await self._chunks.delete_for_sources(source_type, source_ids)
+            await self._session.commit()
+        except Exception:
+            logger.exception(
+                "RAG 색인 일괄 정리 실패 (예상 못한 오류): source_type=%s source_id_count=%d",
+                source_type,
+                len(source_ids),
+            )
+            await self._session.rollback()
