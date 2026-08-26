@@ -2,6 +2,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.auth import LoginRequest, SignupRequest
+from app.schemas.interview_practice import InterviewPracticeCreateRequest
+from app.schemas.interview_review import InterviewReviewCreateRequest, InterviewReviewUpdateRequest
+from app.schemas.quiz import QuizCreateRequest, QuizUpdateRequest
+from app.schemas.study import StudySessionCreateRequest, StudySessionUpdateRequest
 from app.schemas.user import GuestUpgradeRequest, UserUpdateRequest
 
 
@@ -29,3 +33,48 @@ def test_user_update_without_email_is_unaffected():
 def test_invalid_email_still_rejected():
     with pytest.raises(ValidationError):
         SignupRequest(email="not-an-email", password="supersecret")
+
+
+# min_length=1은 ""만 막을 뿐 "   " 같은 공백-only 값은 그대로 통과시킨다. 학습챗/
+# 퀴즈/면접연습/면접복기 목록에서 사용자에게 그대로 노출되는 라벨 필드(제목/주제/
+# 회사명/직무명)에 공백-only 값이 들어가면 목록에서 다른 항목과 구별할 수 없는
+# 빈 줄처럼 보이는 항목이 생긴다.
+@pytest.mark.parametrize(
+    ("model_cls", "kwargs"),
+    [
+        (StudySessionCreateRequest, {"title": "   "}),
+        (StudySessionUpdateRequest, {"title": "   "}),
+        (QuizCreateRequest, {"title": "   ", "source_text": "테스트 소스"}),
+        (QuizUpdateRequest, {"title": "   "}),
+        (InterviewPracticeCreateRequest, {"topic": "   "}),
+        (
+            InterviewReviewCreateRequest,
+            {
+                "company": "   ",
+                "position": "백엔드",
+                "interview_date": "2026-01-01",
+                "content": "면접 내용",
+            },
+        ),
+        (
+            InterviewReviewCreateRequest,
+            {
+                "company": "회사명",
+                "position": "   ",
+                "interview_date": "2026-01-01",
+                "content": "면접 내용",
+            },
+        ),
+    ],
+)
+def test_whitespace_only_label_field_is_rejected(model_cls, kwargs):
+    with pytest.raises(ValidationError):
+        model_cls(**kwargs)
+
+
+def test_interview_review_update_allows_omitted_but_rejects_whitespace_only_company():
+    with pytest.raises(ValidationError):
+        InterviewReviewUpdateRequest(company="   ")
+
+    request = InterviewReviewUpdateRequest(company="회사명")
+    assert request.company == "회사명"

@@ -3787,3 +3787,58 @@
       추가) `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
       없었다.
 
+## 백로그 (122라운드)
+
+- [x] 146. 학습챗/퀴즈/면접연습/면접복기의 목록에 그대로 노출되는 라벨
+      필드(제목/주제/회사명/직무명)가 공백-only 값을 그대로 통과시키던
+      문제 수정. `title`/`topic`/`company`/`position`은 전부
+      `Field(..., min_length=1, max_length=255)`만 쓰고 있었는데,
+      `min_length=1`은 빈 문자열(`""`)만 막을 뿐 `"   "`처럼 공백만 있는
+      값은 그대로 통과시켰다 - 이 필드들은 121라운드에서 고친 학습챗
+      `content`와 달리 LLM에 보내는 프롬프트가 아니라 세션/퀴즈/면접연습
+      세션/면접복기 **목록 화면에 그대로 노출되는 제목/식별 라벨**이라,
+      공백-only 값이 저장되면 목록에서 다른 항목과 전혀 구별할 수 없는
+      빈 줄처럼 보이는 항목이 생겨 사용자가 원하는 항목을 찾을 방법이
+      없어진다.
+
+      영향받은 필드 7개: `StudySessionCreateRequest.title`/
+      `StudySessionUpdateRequest.title`(`app/schemas/study.py`),
+      `QuizCreateRequest.title`/`QuizUpdateRequest.title`
+      (`app/schemas/quiz.py`), `InterviewPracticeCreateRequest.topic`
+      (`app/schemas/interview_practice.py`),
+      `InterviewReviewCreateRequest.company`/`.position`/
+      `InterviewReviewUpdateRequest.company`/`.position`
+      (`app/schemas/interview_review.py`, Update 쪽은 선택 필드라
+      `None`은 그대로 허용).
+
+      기존 `app/schemas/validators.py`의 `NormalizedEmail` 패턴(공용
+      `AfterValidator` + `Annotated` 타입)을 그대로 따라 `NonBlankStr`
+      타입을 추가했다 - `value.strip()`이 빈 문자열이면 거부하고, 통과 시
+      원본 값은 그대로 반환한다(앞뒤 공백을 트리밍하지는 않음, 121라운드의
+      `content` 수정과 동일한 최소 범위). 7개 필드 전부
+      `NonBlankStr = Annotated[str, AfterValidator(_reject_blank)]`로
+      타입을 바꾸고 기존 `Field(min_length=1, max_length=255)` 제약은
+      그대로 유지했다 - `Annotated` 위에 `Field`를 얹으면 길이 제약이
+      먼저 적용되고 그 결과에 `AfterValidator`가 이어서 적용되는 것을
+      직접 확인했다(`Optional[NonBlankStr]`도 `None`은 그대로 통과,
+      문자열이면 검증기가 적용되는 것까지 확인).
+
+      `interview_practice.answer`/`interview_review.content`/
+      `quiz.source_text`처럼 프롬프트로 쓰이는 필드는 이번 라운드에서도
+      건드리지 않았다 - 120/121라운드가 이미 "대응하는 WS 구현이 없어
+      드리프트가 없다"는 이유로 범위 밖으로 명시했고, 이번 라운드가 고친
+      건 완전히 다른 사유(목록 UX)라 별개다.
+
+      `tests/test_schemas_validators.py`에
+      `test_whitespace_only_label_field_is_rejected`(7개 필드
+      전부 parametrize)와
+      `test_interview_review_update_allows_omitted_but_rejects_whitespace_only_company`
+      를 추가했다. `git stash`로 `app/schemas/validators.py`와 7개 필드
+      수정만 되돌리면 8개 테스트 케이스 전부가 정확히 실패(공백-only
+      값이 그대로 통과)하는 것까지 확인했다. 전체 430개 테스트 통과,
+      전체 커버리지 99%(`app/schemas/validators.py`/`study.py`/
+      `quiz.py`/`interview_practice.py`는 100%), `mypy app tests
+      scripts` 클린. 순수 검증 강화(성공 시 응답 형태는 그대로, 422
+      에러 케이스만 늘어남)라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+

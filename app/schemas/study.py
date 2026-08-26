@@ -5,15 +5,16 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import get_settings
+from app.schemas.validators import NonBlankStr
 
 
 class StudySessionCreateRequest(BaseModel):
-    title: str = Field(..., min_length=1, max_length=255)
+    title: NonBlankStr = Field(..., min_length=1, max_length=255)
     model: str = Field(default="qwen2.5:3b", max_length=100)
 
 
 class StudySessionUpdateRequest(BaseModel):
-    title: str = Field(..., min_length=1, max_length=255)
+    title: NonBlankStr = Field(..., min_length=1, max_length=255)
 
 
 class StudySessionResponse(BaseModel):

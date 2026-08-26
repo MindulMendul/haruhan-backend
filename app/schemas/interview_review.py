@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.clock import utcnow_naive
 from app.core.config import get_settings
+from app.schemas.validators import NonBlankStr
 
 
 def _validate_interview_date_not_in_future(value: date) -> date:
@@ -20,8 +21,8 @@ def _validate_interview_date_not_in_future(value: date) -> date:
 
 
 class InterviewReviewCreateRequest(BaseModel):
-    company: str = Field(..., min_length=1, max_length=255)
-    position: str = Field(..., min_length=1, max_length=255)
+    company: NonBlankStr = Field(..., min_length=1, max_length=255)
+    position: NonBlankStr = Field(..., min_length=1, max_length=255)
     interview_date: date
     content: str = Field(..., min_length=1)
     model: str = Field(default="qwen2.5:3b", max_length=100)
@@ -41,8 +42,8 @@ class InterviewReviewCreateRequest(BaseModel):
 
 
 class InterviewReviewUpdateRequest(BaseModel):
-    company: str | None = Field(default=None, min_length=1, max_length=255)
-    position: str | None = Field(default=None, min_length=1, max_length=255)
+    company: NonBlankStr | None = Field(default=None, min_length=1, max_length=255)
+    position: NonBlankStr | None = Field(default=None, min_length=1, max_length=255)
     interview_date: date | None = None
     content: str | None = Field(default=None, min_length=1)
 

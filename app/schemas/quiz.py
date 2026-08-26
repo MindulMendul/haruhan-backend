@@ -4,10 +4,11 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import get_settings
+from app.schemas.validators import NonBlankStr
 
 
 class QuizCreateRequest(BaseModel):
-    title: str = Field(..., min_length=1, max_length=255)
+    title: NonBlankStr = Field(..., min_length=1, max_length=255)
     study_session_id: uuid.UUID | None = None
     source_text: str | None = Field(default=None, min_length=1)
     question_count: int | None = Field(default=None, ge=1)
@@ -33,7 +34,7 @@ class QuizCreateRequest(BaseModel):
 
 
 class QuizUpdateRequest(BaseModel):
-    title: str = Field(..., min_length=1, max_length=255)
+    title: NonBlankStr = Field(..., min_length=1, max_length=255)
 
 
 class QuizResponse(BaseModel):
