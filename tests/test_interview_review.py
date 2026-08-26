@@ -1,3 +1,6 @@
+from datetime import timedelta
+
+from app.core.clock import utcnow_naive
 from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
 from app.services.ollama_service import OllamaServiceError
@@ -65,6 +68,35 @@ def test_create_review_generates_feedback(client):
     assert body["ai_feedback"] == "feedback-1"
     assert body["company"] == "하루한"
     assert fake.call_count == 1
+
+
+def test_create_review_rejects_future_interview_date(client):
+    """면접 복기는 이미 치른 면접을 되짚는 기능이라, 아직 안 일어난 미래 날짜는
+    의미가 없다 - 스키마 검증에서 바로 422로 거부돼야 한다."""
+    token = _signup_and_get_token(client, email="future-interview-date@example.com")
+    tomorrow = (utcnow_naive().date() + timedelta(days=1)).isoformat()
+
+    response = client.post(
+        "/api/v1/interview/reviews",
+        json=_create_payload(interview_date=tomorrow),
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_create_review_accepts_todays_interview_date(client):
+    """오늘 치른 면접을 당일 바로 복기하는 것도 정상 케이스라, 오늘 날짜 자체는
+    거부되면 안 된다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="today-interview-date@example.com")
+    today = utcnow_naive().date().isoformat()
+
+    response = client.post(
+        "/api/v1/interview/reviews",
+        json=_create_payload(interview_date=today),
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 201
 
 
 def test_create_review_ai_failure_returns_502(client):
@@ -293,6 +325,46 @@ def test_update_interview_date_only(client):
     body = update.json()
     assert body["interview_date"] == "2026-08-01"
     assert fake.call_count == 1
+
+
+def test_update_review_rejects_future_interview_date(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="update-future-interview-date@example.com")
+
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+    tomorrow = (utcnow_naive().date() + timedelta(days=1)).isoformat()
+
+    update = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"interview_date": tomorrow},
+        headers=_auth_headers(token),
+    )
+    assert update.status_code == 422
+
+
+def test_update_review_with_explicit_null_interview_date_leaves_it_unchanged(client):
+    """일부 클라이언트는 "안 바꾼 필드"도 null로 명시해서 보낼 수 있다 - 필드
+    자체를 아예 안 보내는 것과 동작이 같아야 한다(둘 다 interview_date는
+    그대로 유지). 검증기가 None을 미래 날짜로 오인해 거부하면 안 된다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="update-null-interview-date@example.com")
+
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+    original_interview_date = create.json()["interview_date"]
+
+    update = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"interview_date": None, "position": "프론트엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    assert update.status_code == 200
+    assert update.json()["interview_date"] == original_interview_date
 
 
 def test_update_review_rejects_content_over_max_length(client, monkeypatch):

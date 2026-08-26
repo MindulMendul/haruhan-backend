@@ -3313,3 +3313,40 @@
       헤더 하나가 늘었을 뿐 바디/상태 코드는 전혀 안 바뀌는 변경이라
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (110라운드)
+
+- [x] 134. 면접 복기 `interview_date`에 도메인 상 말이 안 되는 미래 날짜가
+      그대로 허용되던 문제 수정. `company`/`position`/`content`는 전부
+      길이 상한이 있는데(93~97라운드 스윕 대상) `interview_date`만 순수
+      `date` 타입 검증뿐 아무 도메인 검증이 없었다 - "면접 복기"는 이미
+      치른 면접을 되짚는 기능인데도 100년 후 미래 날짜가 그대로 저장될 수
+      있었고, 정렬 기준으로도 쓰이는 값이라(107라운드 근처에서 이미
+      `interview_date` DESC 정렬의 동률 처리를 다룬 적 있음) 터무니없는
+      값이 섞이면 정렬 UX가 깨지고 export/통계에도 이상치로 나타날 수
+      있었다. "얼마나 먼 과거까지 허용할지"는 제품 판단이 필요해 하한은
+      일부러 두지 않고(오래된 면접을 뒤늦게 기록하는 경우가 실제로 있을
+      수 있음), 명백히 모순인 미래 날짜만 막는 최소선으로 골랐다.
+      `InterviewReviewCreateRequest`/`InterviewReviewUpdateRequest` 둘 다에
+      `field_validator`를 추가해 `interview_date`가 `utcnow_naive().date()`
+      (오늘)보다 미래면 거부하고, 오늘 날짜 자체는 허용한다(당일 면접을
+      바로 복기하는 것도 정상 케이스라). 회귀 테스트
+      `test_create_review_rejects_future_interview_date`/
+      `test_update_review_rejects_future_interview_date`(내일 날짜로
+      422 확인)와 `test_create_review_accepts_todays_interview_date`(오늘
+      날짜는 거부되면 안 됨)를 추가했고, `git stash`로 스키마 수정만
+      되돌리면 미래 날짜 거부 테스트 둘 다 정확히 실패하는 것까지
+      확인했다. 검증 과정에서 새로 추가한 `InterviewReviewUpdateRequest`
+      쪽 None 분기(값을 아예 안 보내거나 명시적으로 `null`을 보낸 경우)가
+      커버리지에서 안 걸린 걸 보고, 일부 클라이언트는 "안 바꾼 필드"도
+      명시적으로 `null`로 보낼 수 있다는 걸 확인해
+      `test_update_review_with_explicit_null_interview_date_leaves_it_unchanged`
+      (명시적 `null`이 필드 생략과 동일하게 기존 값을 그대로 유지하는지)
+      를 추가로 채워 넣었다. `docs/FRONTEND_INTEGRATION.md`의 면접 복기
+      절에 이 새 검증 규칙을 문서화했다(생성/수정 응답 코드에 영향을 주는
+      새 제약이라 92라운드 이후 확립된 "사용자 관찰 가능한 계약 변경은
+      문서화한다" 관례를 따름). 전체 408개 테스트 통과, 전체 커버리지
+      99%(`schemas/interview_review.py`의 유일한 미커버 라인은 106라운드
+      부터 있던 이 라운드와 무관한 기존 분기), mypy 클린. 기존 정상
+      범위(과거/오늘 날짜) 요청은 전혀 영향받지 않는 순수 방어적 강화라
+      마이그레이션은 필요 없었다.
+

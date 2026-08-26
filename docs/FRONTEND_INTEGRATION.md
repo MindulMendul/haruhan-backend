@@ -359,6 +359,9 @@ GET /api/v1/quizzes/wrong-answers?limit=20&offset=0
 | PATCH | `/interview/reviews/{id}` | 부분 수정. **`content`를 실제로 바꿀 때만 피드백 재생성** (company/position/date만 바꾸면 기존 피드백 유지) |
 | DELETE | `/interview/reviews/{id}` | 삭제 → `204` |
 
+- `interview_date`는 미래 날짜를 보내면 생성/수정 둘 다 `422`로 거부됩니다(면접 복기는
+  이미 치른 면접을 되짚는 기능이라). 오늘 날짜는 허용됩니다.
+
 #### 3-4-1. 생성 스트리밍 응답 (WebSocket)
 
 면접복기 AI 피드백은 복기 내용 전체를 분석해서 만들기 때문에 이 앱에서 가장 오래
