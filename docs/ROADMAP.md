@@ -3709,3 +3709,47 @@
       순수 확장이라 API 응답 형태에 영향이 없어
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (120라운드)
+
+- [x] 144. `docker-compose.yml`의 `haruhan-backend` `environment:` 목록이
+      `Settings` 필드 대부분을 컨테이너에 전달하지 않던 문제 수정. 113라운드가
+      `ENVIRONMENT`/`LOG_LEVEL` 두 개가 이 목록에서 빠져 있던 걸 고쳤는데,
+      `Settings` 필드를 하나하나 대조해보니 그 뒤로도 17개가 더 같은
+      이유로 빠져 있었다 - `.env`에 값을 채워도 이 목록에 없는 변수는
+      컨테이너에 전혀 전달되지 않고 코드 기본값으로 조용히 fallback되는
+      상태였다. 특히 `AUTH_RATE_LIMIT`(브루트포스 방어), `MAX_BODY_SIZE_BYTES`
+      (요청 바디 크기 DoS 방어), `WS_IDLE_TIMEOUT_SECONDS`/
+      `MAX_CONCURRENT_WS_CONNECTIONS`(WS DB 커넥션 풀 고갈 방지, 99라운드에서
+      집중 설계) 같은 여러 라운드에 걸쳐 만든 안전장치들이 실제 배포
+      경로에서는 운영자가 조정할 방법이 없는 죽은 설정이었다. 나머지
+      13개(`AUTH_RATE_LIMIT`/`EXPORT_RATE_LIMIT`/`MODELS_RATE_LIMIT`/
+      `MAX_CHAT_HISTORY_MESSAGES`/`MAX_QUIZ_SOURCE_LENGTH`/
+      `DEFAULT_QUIZ_QUESTION_COUNT`/`MAX_QUIZ_QUESTION_COUNT`/
+      `MAX_QUIZ_CHOICE_COUNT`/`RAG_BACKFILL_BATCH_SIZE`/
+      `MAX_INTERVIEW_QUESTIONS`/`MAX_REVIEW_CONTENT_LENGTH`/`EMBEDDING_MODEL`/
+      `RAG_TOP_K`/`RAG_MAX_CANDIDATE_CHUNKS`/`WS_IDLE_TIMEOUT_SECONDS`/
+      `MAX_CONCURRENT_WS_CONNECTIONS`/`MAX_BODY_SIZE_BYTES`)를 기존
+      패턴(`${VAR:-default}`, `.env.example`과 같은 기본값)대로 추가했다.
+      곁들여 `.env.example`에서도 `export_rate_limit` 필드만 유일하게
+      문서화가 빠져 있던 걸 발견해(`EXPORT_RATE_LIMIT=10/minute`) 같이
+      채웠다.
+
+      `docker compose config`로 haruhan-backend의 최종 `environment` 맵을
+      파이썬으로 직접 파싱해, 30개 변수 전부가 정확한 기본값으로 해석되는지
+      확인했다. 이번엔 이 17개만 텍스트로 하나하나 확인하는 대신,
+      `tests/test_docker_compose.py`에
+      `test_every_env_example_setting_reaches_haruhan_backend_container`를
+      추가해 "`.env.example`에 문서화된 모든 설정(`DOMAIN`/
+      `GRAFANA_ADMIN_PASSWORD`처럼 compose 자체에서만 쓰고 앱은 안 읽는
+      것 제외)이 `docker-compose.yml`의 `environment:` 목록에도 전부
+      있는지"를 일반화해서 검증한다 - 앞으로 새 `Settings` 필드를
+      추가하면서 `.env.example`에는 넣고 `docker-compose.yml`에는
+      빠뜨리는 이 클래스의 회귀 전체를 영구히 막는다(개별 변수 하나마다
+      테스트를 새로 추가할 필요가 없어짐). `git stash`로
+      `docker-compose.yml`/`.env.example` 수정만 되돌리면 정확히
+      실패(누락된 16개 변수 목록까지 에러 메시지에 나열)하는 것까지
+      확인했다. 전체 421개 테스트 통과, 전체 커버리지 99%, mypy 클린.
+      순수 배포 설정 수정이라 애플리케이션 코드/API 응답 형태에 영향이
+      없어 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
+      없었다.
+

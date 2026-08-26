@@ -1,8 +1,15 @@
+import re
 from pathlib import Path
 
 import yaml
 
 _DOCKER_COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+_ENV_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / ".env.example"
+
+# docker-compose.yml 자체(caddy/grafana 서비스)에서만 쓰이고 앱(Settings)은 안
+# 읽는 변수 - .env.example의 자체 주석에도 "앱 자체는 이 값을 안 읽음"이라고
+# 명시돼 있다. haruhan-backend의 environment: 목록에 없는 게 정상이다.
+_COMPOSE_ONLY_VARS = {"DOMAIN", "GRAFANA_ADMIN_PASSWORD"}
 
 
 def _read_docker_compose() -> str:
@@ -11,6 +18,12 @@ def _read_docker_compose() -> str:
 
 def _parse_docker_compose() -> dict:
     return yaml.safe_load(_read_docker_compose())
+
+
+def _env_example_variable_names() -> set[str]:
+    content = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    names = {match.group(1) for match in re.finditer(r"^([A-Z][A-Z0-9_]*)=", content, re.MULTILINE)}
+    return names - _COMPOSE_ONLY_VARS
 
 
 def test_haruhan_backend_receives_environment_variable():
@@ -45,6 +58,28 @@ def test_every_service_has_log_rotation_configured():
         assert logging_config["driver"] == "json-file"
         assert "max-size" in logging_config["options"]
         assert "max-file" in logging_config["options"]
+
+
+def test_every_env_example_setting_reaches_haruhan_backend_container():
+    """113라운드가 ENVIRONMENT/LOG_LEVEL 두 개가 컨테이너에 전달 안 되던 걸
+    고쳤는데, 그 뒤로도 Settings 필드 17개가 더 같은 이유로 빠져 있었다(120
+    라운드) - `.env`에 값을 채워도 docker-compose.yml의 haruhan-backend
+    `environment:` 목록에 없는 변수는 컨테이너에 전혀 전달되지 않고 코드
+    기본값으로 조용히 fallback된다. AUTH_RATE_LIMIT(브루트포스 방어)/
+    MAX_BODY_SIZE_BYTES(요청 크기 DoS 방어)/WS_IDLE_TIMEOUT_SECONDS·
+    MAX_CONCURRENT_WS_CONNECTIONS(WS DB 커넥션 풀 고갈 방지)처럼 여러
+    라운드에 걸쳐 만든 안전장치가 배포 경로에서 죽은 설정이 될 수 있었다.
+    앞으로 이 항목들을 하나하나 손으로 대조하는 대신, `.env.example`에
+    문서화된 모든 설정이 `docker-compose.yml`의 environment: 목록에도
+    전부 있는지 일반화해서 확인한다 - 새 Settings 필드를 추가하면서
+    `.env.example`에는 넣고 docker-compose.yml에는 빠뜨리는 이 클래스의
+    회귀를 전부 잡는다."""
+    compose = _parse_docker_compose()
+    env_list = compose["services"]["haruhan-backend"]["environment"]
+    compose_var_names = {entry.split("=", 1)[0] for entry in env_list}
+
+    missing = _env_example_variable_names() - compose_var_names
+    assert not missing, f"docker-compose.yml에 전달되지 않는 .env.example 설정: {sorted(missing)}"
 
 
 def test_every_service_has_a_memory_limit():

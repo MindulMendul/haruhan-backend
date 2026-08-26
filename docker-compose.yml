@@ -55,6 +55,31 @@ services:
       # 비워두면(.env에서 REDIS_URL 미설정) 아래 내장 redis 서비스를 기본으로 쓴다.
       # 외부 관리형 Redis를 쓰려면 .env에 REDIS_URL을 직접 채워 이 기본값을 덮어쓰면 된다.
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      # ENVIRONMENT/LOG_LEVEL과 같은 이유로(113라운드) 위 13개 변수 말고도
+      # Settings의 나머지 필드 17개가 이 목록에서 전부 빠져 있었다 - .env에
+      # 값을 채워도 컨테이너에는 절대 전달되지 않고 코드 기본값으로 조용히
+      # fallback되는 상태였다. AUTH_RATE_LIMIT(브루트포스 방어)/
+      # MAX_BODY_SIZE_BYTES(요청 크기 DoS 방어)/WS_IDLE_TIMEOUT_SECONDS·
+      # MAX_CONCURRENT_WS_CONNECTIONS(WS DB 커넥션 풀 고갈 방지)처럼 여러
+      # 라운드에 걸쳐 만든 안전장치들이 실제 배포 경로에서는 운영자가
+      # 조정할 방법이 없는 죽은 설정이었던 셈이다.
+      - AUTH_RATE_LIMIT=${AUTH_RATE_LIMIT:-5/minute}
+      - EXPORT_RATE_LIMIT=${EXPORT_RATE_LIMIT:-10/minute}
+      - MODELS_RATE_LIMIT=${MODELS_RATE_LIMIT:-30/minute}
+      - MAX_CHAT_HISTORY_MESSAGES=${MAX_CHAT_HISTORY_MESSAGES:-40}
+      - MAX_QUIZ_SOURCE_LENGTH=${MAX_QUIZ_SOURCE_LENGTH:-20000}
+      - DEFAULT_QUIZ_QUESTION_COUNT=${DEFAULT_QUIZ_QUESTION_COUNT:-5}
+      - MAX_QUIZ_QUESTION_COUNT=${MAX_QUIZ_QUESTION_COUNT:-20}
+      - MAX_QUIZ_CHOICE_COUNT=${MAX_QUIZ_CHOICE_COUNT:-8}
+      - RAG_BACKFILL_BATCH_SIZE=${RAG_BACKFILL_BATCH_SIZE:-500}
+      - MAX_INTERVIEW_QUESTIONS=${MAX_INTERVIEW_QUESTIONS:-5}
+      - MAX_REVIEW_CONTENT_LENGTH=${MAX_REVIEW_CONTENT_LENGTH:-10000}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - RAG_TOP_K=${RAG_TOP_K:-3}
+      - RAG_MAX_CANDIDATE_CHUNKS=${RAG_MAX_CANDIDATE_CHUNKS:-2000}
+      - WS_IDLE_TIMEOUT_SECONDS=${WS_IDLE_TIMEOUT_SECONDS:-300}
+      - MAX_CONCURRENT_WS_CONNECTIONS=${MAX_CONCURRENT_WS_CONNECTIONS:-6}
+      - MAX_BODY_SIZE_BYTES=${MAX_BODY_SIZE_BYTES:-1048576}
     depends_on:
       redis:
         condition: service_healthy
