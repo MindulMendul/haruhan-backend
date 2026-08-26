@@ -3459,3 +3459,42 @@
       바뀐 순수 배포 설정 수정이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (114라운드)
+
+- [x] 138. `Caddyfile`이 `/metrics`를 경로 제한 없이 그대로 프록시해, 공개
+      도메인을 통해 누구나 인터넷에서 접근 가능했던 문제 수정.
+      `app/api/v1/routes/metrics.py`의 `/metrics`는 "Prometheus가
+      스크레이프할 엔드포인트... 인증 없이 노출한다(Prometheus 표준
+      관례)"는 의도적 설계지만, 이 관례는 Prometheus가 내부 네트워크로
+      직접 접근한다는 전제다 - 실제로 `monitoring/prometheus.yml`은
+      `targets: ["haruhan-backend:8000"]`으로 `haruhan-net` 내부 docker
+      네트워크를 통해 이 Caddy를 아예 거치지 않고 직접 스크레이프한다.
+      그런데 `Caddyfile`은 경로 매칭 없이 `{$DOMAIN}` 전체를
+      `reverse_proxy haruhan-backend:8000`으로 그대로 넘겨서, `/metrics`
+      도 공개 도메인을 통해 접근 가능한 상태였다 - Prometheus가 이미
+      내부망으로 스크레이프하고 있어 Caddy를 통한 공개 노출은 애초에
+      아무 기능적 이유 없이 존재하는 구멍이었다. 노출되는 지표
+      (`haruhan_user_signups_total`/`haruhan_guest_conversions_total`/
+      `haruhan_quiz_created_total` 같은 비즈니스 카운터, 라우트별 요청
+      수/응답시간)에 PII는 없지만 가입자 수·게스트 전환율·엔드포인트별
+      실시간 트래픽 패턴이 누구에게나 공개되는 건 의도치 않은 정보
+      노출이다. `handle /metrics { respond 404 }`를 나머지 경로를 처리하는
+      `handle { reverse_proxy ... }`보다 앞에 둬서(Caddy의 `handle`은
+      순서대로 먼저 매칭되는 블록만 적용되고 서로 배타적임) `/metrics`만
+      막고 나머지는 그대로 프록시되게 했다. 로컬에 `caddy` 바이너리가
+      없어(이 환경엔 Docker 데몬도 안 떠 있어 `caddy:2-alpine` 이미지도
+      못 씀) `apt-get download caddy` + `dpkg-deb -x`로 .deb 패키지에서
+      바이너리만 뽑아내 실제 Caddy 2.6.2로 직접 검증했다 - `caddy validate`
+      로 문법이 유효한지 확인한 뒤, 스텁 백엔드(파이썬 `http.server`)를
+      띄우고 실제 Caddy 프로세스를 로컬 포트로 구동해 `curl`로
+      `/metrics`는 정확히 404, `/health`/`/api/v1/study/sessions`는
+      그대로 백엔드까지 프록시되는 것을 라이브로 확인했다.
+      `tests/test_caddyfile.py`에 `test_caddyfile_blocks_public_access_to_metrics`
+      (`/metrics`와 `respond 404`가 파일에 있는지)를 추가했고, `git stash`
+      로 `Caddyfile` 수정만 되돌리면 정확히 실패하는 것까지 확인했다.
+      전체 413개 테스트 통과, 전체 커버리지 99%(`Caddyfile`은 애플리케이션
+      커버리지 대상이 아니라 텍스트 검증 테스트 + 위 라이브 검증으로
+      별도 확인), mypy 클린. 애플리케이션 코드는 전혀 안 건드린 순수
+      배포 설정 수정이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+

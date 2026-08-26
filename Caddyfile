@@ -5,5 +5,18 @@
 	# zstd/gzip을 명시적으로 켜서 대역폭을 줄인다 (WebSocket 업그레이드 응답처럼
 	# 본문이 없는 응답이나 이미 압축된 타입은 Caddy가 알아서 건너뛴다).
 	encode zstd gzip
-	reverse_proxy haruhan-backend:8000
+
+	# Prometheus는 이 Caddy를 거치지 않고 내부 docker 네트워크(haruhan-net)로
+	# haruhan-backend:8000의 /metrics를 직접 스크레이프한다(monitoring/prometheus.yml
+	# 참고) - Caddy를 통한 공개 노출은 기능적으로 전혀 필요 없는데, 경로 제한이
+	# 없어 공개 도메인을 통해 누구나 접근 가능한 상태였다. 노출되는 지표(가입자
+	# 수/게스트 전환율/엔드포인트별 실시간 트래픽 패턴)에 PII는 없지만 의도치
+	# 않은 정보 노출이라 막는다.
+	handle /metrics {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy haruhan-backend:8000
+	}
 }
