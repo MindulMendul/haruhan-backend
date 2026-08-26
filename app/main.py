@@ -69,6 +69,24 @@ def create_app() -> FastAPI:
     app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
 
+    # 라우터 바로 앞(FastAPI 라우팅/예외 핸들러보다는 바깥이지만 CORS/보안 헤더
+    # 미들웨어보다는 안쪽)에 등록한다. add_middleware는 나중에 등록할수록 더
+    # 바깥쪽으로 감싸므로, 여기서 가장 먼저 등록해야 CORSMiddleware/
+    # SecurityHeadersMiddleware가 이 미들웨어를 감싸는 형태가 된다.
+    # Content-Length만 보고 본문을 읽기 전에 차단한다는 목적(라우터/엔드포인트가
+    # 실제로 본문을 읽기 전에 막는 것)에는 이 위치로도 변화가 없다 - 본문을
+    # 읽는 건 여전히 이보다 안쪽인 라우터/엔드포인트뿐이기 때문이다. 반대로
+    # 예전처럼 CORS/보안 헤더 미들웨어보다 바깥에 두면, 이 미들웨어가 413을
+    # 직접 응답해버리는 요청은 그 두 미들웨어를 아예 거치지 않아
+    # Access-Control-Allow-Origin이나 X-Content-Type-Options 같은 헤더가 전혀
+    # 안 붙는 채로 나갔다 - 실제로 Origin 헤더를 넣어 대용량 payload를
+    # cross-origin 요청으로 보내 재현 확인(이 프로젝트의 실제 배포 형태가
+    # Vercel 프론트 → 다른 도메인 API인 cross-origin 구조라 61번 항목이
+    # expose_headers를 고친 것과 같은 이유로 실제 영향이 있다). 브라우저는
+    # CORS 헤더가 없는 응답을 자바스크립트에서 읽지 못하게 막으므로, 사용자는
+    # "메시지가 너무 깁니다" 같은 실제 에러 대신 그냥 알 수 없는 네트워크
+    # 오류만 보게 된다.
+    app.add_middleware(MaxBodySizeMiddleware, max_body_size=settings.max_body_size_bytes)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
@@ -92,8 +110,6 @@ def create_app() -> FastAPI:
         ],
     )
     app.add_middleware(SecurityHeadersMiddleware)
-    # 가장 바깥쪽(가장 나중에 add된 미들웨어)에서 본문을 읽기 전에 크기부터 차단한다.
-    app.add_middleware(MaxBodySizeMiddleware, max_body_size=settings.max_body_size_bytes)
     # 응답 헤더/본문 크기 검사까지 포함한 전체 왕복 시간을 재기 위해 가장 바깥쪽에 둔다.
     app.add_middleware(AccessLogMiddleware)
     app.add_middleware(MetricsMiddleware)

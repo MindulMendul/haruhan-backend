@@ -24,6 +24,34 @@ def test_body_size_limit_rejects_large_payload(monkeypatch):
     assert body["error"]["code"] == "payload_too_large"
 
 
+def test_body_size_limit_response_still_carries_cors_and_security_headers(monkeypatch):
+    """MaxBodySizeMiddleware는 413을 직접 응답하며 그 시점에서 응답을 끝내버린다
+    (뒤쪽 미들웨어/라우터로 넘기지 않음). 이전엔 CORSMiddleware/
+    SecurityHeadersMiddleware보다 더 바깥쪽(add_middleware는 나중에 등록할수록
+    더 바깥으로 감싼다)에 등록돼 있어서, 이 413 응답이 그 두 미들웨어를 아예
+    거치지 못하고 Access-Control-Allow-Origin/X-Content-Type-Options 같은
+    헤더가 하나도 안 붙은 채 나갔다 - 이 프로젝트의 실제 배포 형태(Vercel
+    프론트 → 다른 도메인 API, cross-origin)에서는 브라우저가 CORS 헤더 없는
+    응답을 자바스크립트에서 못 읽게 막으므로, 사용자는 "메시지가 너무
+    깁니다" 같은 실제 에러 메시지 대신 원인 불명의 네트워크 오류만 보게
+    됐다. main.py에서 MaxBodySizeMiddleware를 CORS/보안 헤더 미들웨어보다
+    안쪽(먼저 등록)으로 옮겨, 413 응답도 두 미들웨어를 거치도록 고쳤다."""
+    monkeypatch.setenv("MAX_BODY_SIZE_BYTES", "10")
+    monkeypatch.setenv("CORS_ORIGINS", "https://example.com")
+    get_settings.cache_clear()
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/chat",
+            json={"prompt": "this payload is definitely longer than 10 bytes"},
+            headers={"Origin": "https://example.com"},
+        )
+    assert response.status_code == 413
+    assert response.headers.get("access-control-allow-origin") == "https://example.com"
+    assert response.headers.get("x-content-type-options") == "nosniff"
+    assert response.headers.get("cache-control") == "no-store"
+
+
 def test_body_size_limit_ignores_malformed_content_length_header(monkeypatch):
     """이 미들웨어는 FastAPI 라우팅/예외 핸들러보다 바깥(ASGI 계층)에서 직접
     Content-Length를 파싱한다 - 예전엔 `int(content_length)`를 그대로 불러서,

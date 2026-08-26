@@ -3912,3 +3912,54 @@
       형태에 영향이 없어 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (124라운드)
+
+- [x] 148. `MaxBodySizeMiddleware`가 413을 직접 응답할 때 CORS/보안 헤더가
+      전혀 안 붙던 문제 수정. `app/main.py`는 `CORSMiddleware` →
+      `SecurityHeadersMiddleware` → `MaxBodySizeMiddleware` 순으로
+      `add_middleware`를 호출하고 있었는데, Starlette의
+      `add_middleware`는 나중에 등록할수록 더 바깥쪽으로 앱을 감싸므로
+      (직접 `Starlette.add_middleware`/`build_middleware_stack` 소스를
+      읽어 확인: `user_middleware.insert(0, ...)` 후
+      `reversed(middleware)` 순서로 wrap), 실제 실행 순서는
+      `MaxBodySizeMiddleware`가 `CORSMiddleware`/`SecurityHeadersMiddleware`
+      보다 바깥이었다. `MaxBodySizeMiddleware`는 본문 크기 초과 시 안쪽
+      앱(라우터는 물론 CORS/보안 헤더 미들웨어까지)을 아예 호출하지 않고
+      자기 자신이 413 응답을 완성해버리므로, 그 두 미들웨어를 완전히
+      건너뛴 채 응답이 나갔다.
+
+      `Origin` 헤더를 넣어 대용량 payload를 cross-origin 요청으로 보내
+      직접 재현 확인 - 수정 전에는 413 응답에 `content-length`/
+      `content-type`만 있고 `access-control-allow-origin`/
+      `x-content-type-options`/`cache-control` 등이 전부 빠져 있었다.
+      이 프로젝트의 실제 배포 형태는 Vercel에 배포된 프론트가 다른
+      도메인의 이 API를 호출하는 cross-origin 구조라(61번 항목이
+      `expose_headers` 누락을 고친 것과 같은 배포 형태) 실사용에도
+      영향이 있다 - 브라우저는 CORS 헤더가 없는 응답을 자바스크립트가
+      읽지 못하게 막으므로, 사용자는 "메시지가 너무 깁니다"라는 실제
+      에러 메시지(60번 항목이 통일한 에러 포맷) 대신 원인을 알 수 없는
+      네트워크 오류만 보게 된다. 정적 자산이 없는 순수 API 서버 전체에
+      일괄 적용되는 `SecurityHeadersMiddleware`의 표준 브라우저 보안
+      헤더도 마찬가지로 이 응답 하나만 예외적으로 빠지고 있었다.
+
+      `app.add_middleware(MaxBodySizeMiddleware, ...)` 호출을 `CORSMiddleware`/
+      `SecurityHeadersMiddleware`보다 먼저(=더 안쪽으로) 옮겼다.
+      "본문을 읽기 전에 크기부터 차단한다"는 이 미들웨어의 원래 목적은
+      그대로 유지된다 - 실제로 본문을 읽는 건 여전히 이 미들웨어보다
+      더 안쪽인 라우터/엔드포인트뿐이고, CORS/보안 헤더 미들웨어는 둘 다
+      요청 본문을 읽지 않기 때문이다. `AccessLogMiddleware`/
+      `MetricsMiddleware`(전체 왕복 시간을 재려고 의도적으로 가장
+      바깥쪽에 둔 두 미들웨어, 111라운드 주석 참고)의 상대적 위치는
+      건드리지 않았다.
+
+      `tests/test_middleware.py`에
+      `test_body_size_limit_response_still_carries_cors_and_security_headers`
+      를 추가해, `Origin` 헤더가 있는 대용량 payload 요청의 413 응답에
+      `access-control-allow-origin`/`x-content-type-options`/
+      `cache-control` 헤더가 실제로 붙는지 확인했다. `git stash`로
+      `app/main.py` 수정만 되돌리면 정확히 실패(헤더가 전혀 없음)하는
+      것까지 확인했다. 전체 433개 테스트 통과, 전체 커버리지 99%,
+      `mypy app tests scripts` 클린. 미들웨어 등록 순서만 바뀌었을 뿐
+      각 미들웨어의 동작/응답 바디 형태는 그대로라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+
