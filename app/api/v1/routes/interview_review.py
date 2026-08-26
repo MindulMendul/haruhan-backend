@@ -24,6 +24,7 @@ from app.core.dependencies import (
     get_rag_service,
     limit_ws_connections,
 )
+from app.core.errors import sanitize_pydantic_errors
 from app.core.rate_limit import check_rate_limit, limiter
 from app.db.models.user import User
 from app.db.session import get_db
@@ -169,7 +170,16 @@ async def stream_create_review(
             try:
                 payload = InterviewReviewCreateRequest.model_validate(raw_payload)
             except ValidationError as exc:
-                await websocket.send_json({"type": "error", "detail": str(exc)})
+                # ValidationError.__str__()/str(exc)에는 검증에 실패한 필드의 원본 입력값이
+                # 그대로 포함된다 - REST 쪽 422 응답이 이미 이 이유로 input을 제거하는데
+                # (app.core.errors.validation_exception_handler), 이 WS 경로는 FastAPI의
+                # 자동 검증을 안 타고 model_validate()를 직접 호출해서 그 sanitization을
+                # 거치지 않았다. 같은 헬퍼로 필드 위치/에러 종류/메시지만 남긴다.
+                messages = [
+                    f"{'.'.join(str(p) for p in error['loc'])}: {error['msg']}"
+                    for error in sanitize_pydantic_errors(exc.errors())
+                ]
+                await websocket.send_json({"type": "error", "detail": "; ".join(messages)})
                 continue
 
             allowed, retry_after = check_rate_limit(

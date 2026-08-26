@@ -3175,3 +3175,41 @@
       성능 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
       필요 없었다.
 
+## 백로그 (106라운드)
+
+- [x] 130. 면접복기 스트리밍 WebSocket(`POST /interview/reviews/stream`)이
+      pydantic `ValidationError`를 `str(exc)`로 그대로 클라이언트에 흘려보내,
+      검증에 실패한 필드의 원본 입력값이 에러 메시지에 그대로 노출되던 문제
+      수정. `app/core/errors.py`의 `validation_exception_handler`는 정확히
+      이 이유("password/current_password/refresh_token처럼 민감한 필드가
+      검증 실패하면 원본 값이 그대로 응답에 실려서 devtools 히스토리/로깅
+      도구에 남을 수 있다")로 REST 422 응답에서 `input` 필드를 이미 제거하고
+      있었는데, 이 WS 라우트는 FastAPI의 자동 검증 경로를 안 타고
+      `InterviewReviewCreateRequest.model_validate()`를 직접 호출해서 그
+      sanitization을 전혀 거치지 않았다. pydantic v2의 `ValidationError.__str__()`
+      은 실패한 필드의 `input_value`를 기본적으로 포함하므로(길면 가운데를
+      잘라서 보여주지만 앞부분은 그대로 남음), `content`가
+      `max_review_content_length`를 넘으면 사용자가 입력한 면접 복기 내용
+      앞부분이 에러 메시지에 그대로 echo됐다 - 학습챗 WS 라우트(`study.py`)
+      는 pydantic 모델 검증을 안 쓰고 수동으로 필드를 확인해서 이 문제가
+      없다는 것도 확인함(같은 라우트 그룹에서 이 경로만 취약).
+      `app/core/errors.py`에서 `input` 필드 제거 로직을 `sanitize_pydantic_errors()`
+      공용 헬퍼로 뽑아 `validation_exception_handler`가 그대로 재사용하도록
+      바꾸고, WS 라우트도 이 헬퍼로 원본 값을 뺀 뒤 필드 위치/메시지만 이어
+      붙인 문자열을 `detail`로 보내도록 고쳤다.
+
+      회귀 테스트를 처음 작성할 때 실수를 하나 했다 - 민감한 content 전체
+      문자열이 에러 메시지에 없는지 확인하려 했는데, pydantic이 긴
+      `input_value`는 가운데를 `...`로 잘라서 보여준다는 걸 몰라서, 고치기
+      전 코드로 `git stash` 검증을 해보니 (전체 문자열은 어차피 안 남아서)
+      수정 전 코드에서도 테스트가 통과해버렸다 - 아무것도 증명 못 하는
+      테스트였던 것. 잘려도 살아남는 맨 앞 마커 문자열(`SECRETMARKER98765`
+      + 반복 문자)로 바꿔서 다시 확인하니, 수정 전엔 실제로 이 마커가 에러
+      메시지에 그대로 남아 있어 테스트가 정확히 실패하는 것을 확인했다.
+      `test_stream_create_review_validation_error_does_not_leak_raw_input_value`
+      로 추가. 전체 399개 테스트 통과, 전체 커버리지 99%(`core/errors.py`/
+      `routes/interview_review.py` 모두 100%), mypy 클린. 에러 메시지
+      형태가 조금 달라졌을 뿐(원본 입력값이 빠지고 필드 위치/메시지만
+      남음) 프로토콜/스키마는 그대로라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, 마이그레이션도 필요 없었다.
+

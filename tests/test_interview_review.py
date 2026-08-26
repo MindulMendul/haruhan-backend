@@ -479,6 +479,30 @@ def test_stream_create_review_rejects_invalid_payload(client):
         assert error_event["type"] == "error"
 
 
+def test_stream_create_review_validation_error_does_not_leak_raw_input_value(client, monkeypatch):
+    """REST 쪽 422 응답(app.core.errors.validation_exception_handler)은 검증 실패
+    필드의 원본 입력값이 devtools 히스토리/로깅 도구에 남을 수 있다는 이유로
+    이미 제거하는데, 이 WS 경로는 FastAPI 자동 검증을 안 타고 model_validate()를
+    직접 호출해서 str(ValidationError)를 그대로 detail로 보내면 그 sanitization을
+    거치지 않는다 - 검증에 실패한 content 원문이 에러 메시지에 그대로 echo될 수
+    있었다. 같은 헬퍼(sanitize_pydantic_errors)로 원본 값을 제거했는지 확인한다."""
+    monkeypatch.setenv("MAX_REVIEW_CONTENT_LENGTH", "5")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client, email="stream-review-no-leak@example.com")
+
+    # pydantic이 ValidationError 메시지의 input_value를 길면 가운데를 잘라 보여주므로
+    # (예: 'SECRETMARKER98765가가...가가가가가가가'), 전체 문자열이 아니라 잘려도
+    # 살아남는 맨 앞 마커로 확인해야 실제로 leak 여부를 가려낼 수 있다.
+    marker = "SECRETMARKER98765"
+    sensitive_content = marker + "가" * 60
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_json(_create_payload(content=sensitive_content))
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+        assert marker not in error_event["detail"]
+
+
 def test_stream_create_review_rejects_malformed_json_frame(client):
     """websocket.receive_json()은 json.loads()를 그대로 호출하고 예외를 잡지
     않는다 - 이 라우트는 asyncio.TimeoutError만 잡고 있어서, 깨진 JSON

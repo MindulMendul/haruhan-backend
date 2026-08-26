@@ -1,3 +1,6 @@
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 from fastapi import HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -59,18 +62,21 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) 
     return request.app.state.limiter._inject_headers(response, request.state.view_rate_limit)
 
 
+def sanitize_pydantic_errors(errors: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """pydantic 에러 목록(ValidationError.errors()/RequestValidationError.errors())의
+    각 항목에는 검증에 실패한 필드에 실제로 들어온 원본 값이 "input"으로 그대로
+    담겨 있다 - password/current_password/refresh_token처럼 민감한 필드가 길이
+    제한 등으로 검증에 실패하면, 평문 값이 응답 바디에 그대로 실려서 브라우저
+    devtools 히스토리나 API 로깅/모니터링 도구(Sentry 등) 어디에나 남을 수
+    있었다. 필드 위치(loc)/에러 종류(type)/메시지(msg)에는 input이 필요 없으므로
+    제거한다."""
+    return [{key: value for key, value in error.items() if key != "input"} for error in errors]
+
+
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    # exc.errors()의 각 항목에는 검증에 실패한 필드에 실제로 들어온 원본 값이
-    # "input"으로 그대로 담겨 있다 - password/current_password/refresh_token처럼
-    # 민감한 필드가 길이 제한 등으로 검증에 실패하면, 평문 값이 422 응답 바디에
-    # 그대로 실려서 브라우저 devtools 히스토리나 API 로깅/모니터링 도구(Sentry 등)
-    # 어디에나 남을 수 있었다. 프론트가 실제로 쓰는 정보(필드 위치 loc/에러 종류
-    # type/메시지 msg)에는 input이 필요 없으므로 응답에서는 제거한다.
-    sanitized_errors = [
-        {key: value for key, value in error.items() if key != "input"} for error in exc.errors()
-    ]
+    sanitized_errors = sanitize_pydantic_errors(exc.errors())
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content=jsonable_encoder(
