@@ -3753,3 +3753,37 @@
       없어 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
       없었다.
 
+## 백로그 (121라운드)
+
+- [x] 145. 학습챗 메시지 전송이 REST(`POST
+      /study/sessions/{id}/messages`)와 WS(`stream_message`) 두 경로로
+      들어오는데, 공백만 있는 `content`에 대해 서로 다르게 동작하던 문제
+      수정. WS 경로는 이미 `not content.strip()`으로 걸러 "content는 비어
+      있을 수 없습니다" 에러 이벤트를 보내고 LLM을 아예 호출하지 않는데,
+      REST 경로의 `StudyMessageCreateRequest.content`는 `min_length=1`만
+      체크해 `" "` 같은 공백 문자열을 그대로 통과시켰다 - 빈 메시지가 실제
+      `StudyMessage` 행으로 저장되고, 그 뒤 불필요한 Ollama 호출까지
+      발생했다(동일 기능의 두 진입점이 같은 잘못된 입력에 대해 다르게
+      반응하는 상태). `app/schemas/study.py`의 기존
+      `validate_content_length` field_validator에 `value.strip()`이 빈
+      문자열이면 WS와 동일한 문구로 거부하는 체크를 앞에 추가해 REST를 WS
+      쪽 동작에 맞췄다.
+
+      `interview_practice.answer`/`interview_review.content`/
+      `quiz.source_text` 등 다른 스키마에도 같은 `min_length=1`-only 패턴이
+      있지만, 이번 라운드는 REST/WS 두 경로가 동일 기능에 대해 실제로 다르게
+      동작하는 `study.py` 케이스만 고쳤다 - 나머지는 대응하는 WS 구현이
+      따로 없어 "드리프트"가 존재하지 않으므로 범위를 넓히지 않았다(더 큰
+      후속 작업으로 남김).
+
+      `tests/test_study.py`에
+      `test_send_message_rejects_whitespace_only_content`를 추가해 공백만
+      있는 `content`가 422로 거부되고 세션에 메시지가 전혀 저장되지 않는
+      것까지 확인했다. `git stash`로 `app/schemas/study.py` 수정만
+      되돌리면 정확히 실패(200 OK로 빈 메시지가 저장됨)하는 것까지
+      확인했다. 전체 422개 테스트 통과, 전체 커버리지 99%(`app/schemas/
+      study.py`는 100%), `mypy app tests scripts` 클린. 순수 검증 강화라
+      기존 API 계약(성공 시 응답 형태)에는 변화가 없어(422 에러 케이스만
+      추가) `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
+      없었다.
+

@@ -179,6 +179,30 @@ def test_send_message_rejects_content_over_max_length(client, monkeypatch):
     assert response.status_code == 422
 
 
+def test_send_message_rejects_whitespace_only_content(client):
+    """WS 스트리밍 경로(stream_message)는 공백만 있는 content를 이미
+    "content는 비어 있을 수 없습니다"로 거부한다. REST 경로는 min_length=1만
+    체크해 " " 같은 공백 문자열을 그대로 통과시켜, 빈 메시지가 저장되고
+    불필요한 Ollama 호출까지 발생했다 - 두 경로가 동일한 규칙을 쓰도록
+    맞춘다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "공백 메시지 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "   "},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    assert detail.json()["messages"] == []
+
+
 def test_list_recent_for_session_returns_last_n_in_chronological_order(db_session_factory):
     """send_message/stream_message가 채팅 프롬프트에 넣을 최근 히스토리를
     구하던 이전 방식은 list_for_session()으로 세션 전체를 가져온 뒤 파이썬

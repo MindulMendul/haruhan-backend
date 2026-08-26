@@ -45,6 +45,14 @@ class StudyMessageCreateRequest(BaseModel):
     @field_validator("content")
     @classmethod
     def validate_content_length(cls, value: str) -> str:
+        # WS 스트리밍 경로(routes/study.py의 stream_message)는 공백만 있는
+        # content를 "content는 비어 있을 수 없습니다"로 거부하고 LLM을 호출하지
+        # 않는다. REST 경로는 min_length=1만으로는 " " 같은 공백 문자열을
+        # 그대로 통과시켜 빈 메시지가 저장되고 불필요한 LLM 호출까지 발생했다 -
+        # 두 경로가 동일한 기능(send_message)에 대해 다르게 동작하지 않도록
+        # REST도 WS와 같은 규칙으로 맞춘다.
+        if not value.strip():
+            raise ValueError("content는 비어 있을 수 없습니다.")
         max_length = get_settings().max_prompt_length
         if len(value) > max_length:
             raise ValueError(f"메시지는 최대 {max_length}자까지 허용됩니다.")
