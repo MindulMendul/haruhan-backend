@@ -3581,3 +3581,38 @@
       변경이라 애플리케이션 코드/API 응답 형태에 영향이 없어
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (117라운드)
+
+- [x] 141. `docker-compose.yml`의 5개 서비스(haruhan-backend/redis/prometheus/
+      grafana/caddy) 어디에도 로그 로테이션 설정이 없던 문제 수정. Docker의
+      기본 로깅 드라이버(`json-file`)는 `max-size`/`max-file`을 지정하지
+      않으면 로그 파일 크기에 상한이 없다 - `Dockerfile`의 CMD(`uvicorn ...`)
+      에 `--no-access-log`가 없어 uvicorn 기본 access log(요청마다 1줄)가
+      stdout으로 계속 쌓이는데, 로테이션이 없으니 디스크가 서서히 채워진다.
+      즉각적인 문제는 아니지만 운영 개월 수가 쌓일수록 확실히 터지는
+      유형이고, 결국 디스크가 가득 차면 Caddy 인증서 갱신 실패나 DB 쓰기
+      실패로 스택 전체가 조용히 멈출 수 있다. 최상위 `x-logging` YAML
+      앵커(`driver: json-file`, `max-size: "10m"`, `max-file: "3"`)를 추가해
+      5개 서비스 전부가 `logging: *default-logging`으로 공유하도록 했다 -
+      값 하나를 한 곳에서만 관리하면 되고, 새 서비스가 추가돼도 앵커를
+      까먹지 않는 한 자동으로 적용된다. `docker compose config`로 앵커가
+      5개 서비스 전부에 정확히 풀리는지(YAML 파싱만이 아니라 docker
+      compose 자신의 스키마 해석으로) 직접 확인했다.
+
+      `tests/test_docker_compose.py`에
+      `test_every_service_has_log_rotation_configured`를 추가했는데,
+      기존 두 테스트(`ENVIRONMENT`/`LOG_LEVEL`)와 달리 이번엔 파일을
+      `PyYAML`로 실제로 파싱해 모든 서비스 각각에 `logging.driver`/
+      `logging.options.max-size`/`max-file`이 다 있는지 확인한다(단순
+      텍스트 포함 여부만 보면 "5개 중 1개에만 로테이션이 있어도" 통과해버려
+      의미가 없음). `git stash`로 `docker-compose.yml` 수정만 되돌리면
+      정확히 실패하는 것까지 확인했다. `PyYAML`이 지금까지 이 저장소의
+      직접적인 의존성으로 선언된 적이 없었다는 것도 확인해서(이 세션
+      환경엔 어쩌다 설치돼 있었을 뿐, `requirements-dev.txt`에 없으면 CI
+      환경에서 이 테스트가 `ModuleNotFoundError`로 깨질 수 있었음)
+      `requirements-dev.txt`에 `PyYAML==6.0.3`을 명시적으로 추가했다 -
+      `pip-audit`로 알려진 취약점이 없는 것도 확인했다. 전체 415개 테스트
+      통과, 전체 커버리지 99%, mypy 클린. 순수 배포 설정/CI 의존성 수정이라
+      애플리케이션 코드/API 응답 형태에 영향이 없어
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+

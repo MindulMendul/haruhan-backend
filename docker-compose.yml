@@ -1,3 +1,14 @@
+# Docker의 기본 로깅 드라이버(json-file)는 max-size/max-file을 지정하지 않으면
+# 로그 파일 크기에 상한이 없다 - uvicorn 기본 access log(요청마다 1줄)가 로테이션
+# 없이 계속 쌓이면, 운영 개월 수가 쌓일수록 디스크가 서서히 채워져 결국 Caddy
+# 인증서 갱신 실패나 DB 쓰기 실패로 스택 전체가 조용히 멎을 수 있는 장기 리스크다.
+# 모든 서비스가 공유하는 앵커로 한 곳에서만 값을 관리한다.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   haruhan-backend:
     build:
@@ -5,6 +16,7 @@ services:
       dockerfile: Dockerfile
     container_name: haruhan-backend
     restart: unless-stopped
+    logging: *default-logging
     # 외부 접근은 caddy가 대신 받으므로 호스트 포트를 열어두지 않는다
     # (필요하면 디버깅용으로 "18000:8000"을 임시로 되살려도 됨).
     environment:
@@ -49,6 +61,7 @@ services:
     image: redis:7-alpine
     container_name: haruhan-redis
     restart: unless-stopped
+    logging: *default-logging
     # 레이트리밋 카운터는 휘발성 데이터라 영속 볼륨이 필요 없다. 메모리 상한 + LRU
     # 축출 정책만 걸어서 무한정 커지는 것을 막는다. 외부 포트는 열지 않는다
     # (haruhan-backend에서만 내부 네트워크로 접근).
@@ -65,6 +78,7 @@ services:
     image: prom/prometheus:v2.55.1
     container_name: haruhan-prometheus
     restart: unless-stopped
+    logging: *default-logging
     # haruhan-backend의 /metrics를 스크레이프한다. 대시보드 UI는 아직 아무도 안 쓰므로
     # 외부 포트는 열지 않는다 (필요하면 SSH 터널로 접근).
     volumes:
@@ -87,6 +101,7 @@ services:
     image: grafana/grafana:11.3.1
     container_name: haruhan-grafana
     restart: unless-stopped
+    logging: *default-logging
     # Prometheus 데이터소스는 자동 프로비저닝되지만, 대시보드 패널 구성은 사람이
     # 직접 만든다 (이번 자동화 범위 밖). 사람이 실제로 들여다볼 UI라 호스트 포트를 연다.
     ports:
@@ -112,6 +127,7 @@ services:
     image: caddy:2-alpine
     container_name: haruhan-caddy
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"

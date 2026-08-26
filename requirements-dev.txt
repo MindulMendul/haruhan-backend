@@ -4,3 +4,6 @@ pytest-cov==7.1.0
 pip-audit==2.10.1
 aiosqlite==0.22.1
 mypy==1.19.1
+# tests/test_docker_compose.py가 docker-compose.yml을 실제로 파싱해서(단순 텍스트
+# 검증이 아니라) 서비스마다 필요한 설정이 빠짐없이 있는지 확인한다.
+PyYAML==6.0.3
