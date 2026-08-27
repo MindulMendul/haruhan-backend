@@ -35,15 +35,21 @@ class AccountDeletionRequest(BaseModel):
     token만으로 계정을 통째로 지우지 못하도록 현재 비밀번호로 재확인해야 하고,
     게스트 계정은 비교할 비밀번호가 없으므로 생략 가능하다."""
 
-    current_password: str | None = None
+    # 다른 모든 비밀번호 필드(SignupRequest.password 등)와 같이 72자 상한을 둔다 -
+    # verify_password()는 72바이트 초과 입력도 안전하게(예외 없이 그냥 불일치로)
+    # 처리하므로(112라운드) 크래시 위험은 없지만, 상한이 없으면 터무니없이 긴
+    # 값도 스키마 검증은 통과해 서비스 계층까지 내려가 "비밀번호가 틀렸습니다"
+    # (401)로 응답한다 - 다른 필드들처럼 422로 일찍 거부하는 게 일관적이다.
+    current_password: str | None = Field(default=None, max_length=72)
 
 
 class UserUpdateRequest(BaseModel):
     email: NormalizedEmail | None = None
     password: str | None = Field(default=None, min_length=8, max_length=72)
     # email/password 변경은 탈취된 access token만으로 계정을 완전히 뺏기지 못하도록
-    # 반드시 현재 비밀번호 확인을 요구한다.
-    current_password: str | None = None
+    # 반드시 현재 비밀번호 확인을 요구한다. 다른 비밀번호 필드들과 같은 이유로
+    # max_length=72를 둔다(AccountDeletionRequest.current_password 주석 참고).
+    current_password: str | None = Field(default=None, max_length=72)
 
     @model_validator(mode="after")
     def _require_current_password_when_changing_credentials(self) -> "UserUpdateRequest":

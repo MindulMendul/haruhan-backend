@@ -43,6 +43,20 @@ def test_update_email_wrong_current_password(client):
     assert response.status_code == 401
 
 
+def test_update_profile_rejects_oversized_current_password(client):
+    """다른 모든 비밀번호 필드(SignupRequest.password 등)와 같이
+    current_password도 72자 상한이 있어야 한다 - 없으면 터무니없이 긴 값이
+    스키마 검증은 통과해 서비스 계층까지 내려가 "비밀번호가 틀렸습니다"(401)
+    로 응답한다. 다른 필드들처럼 422로 일찍 거부하는지 확인한다."""
+    tokens = _signup_and_get_tokens(client, email="update-oversized-pw@example.com")
+    response = client.patch(
+        "/api/v1/users/me",
+        json={"email": "new@example.com", "current_password": "a" * 73},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 422
+
+
 def test_update_email_success(client):
     tokens = _signup_and_get_tokens(client)
     response = client.patch(
@@ -275,6 +289,21 @@ def test_delete_account_wrong_current_password(client):
         headers=_auth_headers(tokens["access_token"]),
     )
     assert response.status_code == 401
+
+
+def test_delete_account_rejects_oversized_current_password(client):
+    """다른 모든 비밀번호 필드(SignupRequest.password 등)와 같이
+    current_password도 72자 상한이 있어야 한다 - 없으면 터무니없이 긴 값이
+    스키마 검증은 통과해 서비스 계층까지 내려가 "비밀번호가 틀렸습니다"(401)
+    로 응답한다. 다른 필드들처럼 422로 일찍 거부하는지 확인한다."""
+    tokens = _signup_and_get_tokens(client, email="delete-oversized-pw@example.com")
+    response = client.request(
+        "DELETE",
+        "/api/v1/users/me",
+        json={"current_password": "a" * 73},
+        headers=_auth_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 422
 
 
 def test_delete_account_success_for_real_account(client):

@@ -4327,3 +4327,35 @@
       바뀐 것이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
       필요 없었다.
 
+## 백로그 (134라운드)
+
+- [x] 158. `AccountDeletionRequest.current_password`/`UserUpdateRequest.
+      current_password`에 다른 모든 비밀번호 필드와 달리 `max_length`가
+      빠져 있던 문제 수정. `SignupRequest.password`/`LoginRequest.
+      password`/`GuestUpgradeRequest.password`/`UserUpdateRequest.
+      password`는 전부 `max_length=72`가 있는데, 두 `current_password`
+      필드만 길이 제한이 전혀 없었다 - 112라운드가 `verify_password()`를
+      72바이트 초과 입력에도 예외 없이 안전하게(그냥 불일치로) 처리하도록
+      이미 고쳐놔서 크래시 위험은 없지만, 상한이 없으면 터무니없이 긴
+      값도 스키마 검증은 그대로 통과해 서비스 계층까지 내려가 "비밀번호가
+      틀렸습니다"(401)로 응답한다 - 102라운드가 `RefreshRequest.
+      refresh_token`에 상한을 추가한 것과 같은 이유로, 다른 필드들처럼
+      422로 일찍 거부하는 게 이 코드베이스의 일관된 관례에 맞다. 148~157
+      라운드에 걸친 여러 독립 조사가 이 항목을 두 번 후보로 올렸다가
+      매번 더 시급한 다른 항목에 밀려 미뤄져 온 것을, 이번 라운드에서
+      다른 더 나은 후보가 없어 드디어 구현했다.
+
+      `app/schemas/user.py`의 두 `current_password: str | None = None`
+      필드를 `Field(default=None, max_length=72)`로 바꿨다.
+      `tests/test_users.py`에
+      `test_update_profile_rejects_oversized_current_password`
+      (`PATCH /users/me`)와
+      `test_delete_account_rejects_oversized_current_password`
+      (`DELETE /users/me`)를 추가해, 73자 `current_password`가 422로
+      거부되는지 확인했다. `git stash`로 `app/schemas/user.py` 수정만
+      되돌리면 두 테스트 모두 정확히 실패(401로 응답)하는 것까지
+      확인했다. 전체 459개 테스트 통과, 전체 커버리지 99%
+      (`app/schemas/user.py` 100% 포함), `mypy app tests scripts` 클린.
+      정상 범위(72자 이하) 비밀번호 확인 동작은 그대로라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+
