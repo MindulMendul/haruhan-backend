@@ -4427,3 +4427,46 @@
       클린. 정상 범위(양수) 설정의 동작은 그대로라 `docs/
       FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (137라운드)
+
+- [x] 161. `MAX_BODY_SIZE_BYTES`에 양수 검증이 없어, 0 이하로 설정하면
+      이 앱의 쓰기 API 사실상 전체(회원가입/로그인/학습챗/퀴즈 제출/
+      면접복기 등)가 시작 시점엔 전혀 티가 안 나는 상태로 계속 막히던
+      문제 수정. `MaxBodySizeMiddleware`(`core/middleware.py`)는
+      `Content-Length` 헤더가 있는 모든 요청에 대해
+      `parsed_content_length > self.max_body_size`면 413로 거부한다 -
+      이 값이 0이면 본문이 있는(`Content-Length`가 1 이상인) 요청은
+      전부 거부되고, 음수라면 본문이 없는(`Content-Length: 0`) 요청까지
+      거부된다. 159/160라운드가 고친 `MAX_QUIZ_CHOICE_COUNT`/
+      `MAX_PROMPT_LENGTH`보다도 영향 범위가 더 넓다 - 그쪽들은 각각
+      퀴즈 생성/메시지 전송 기능만 막았지만, 이건 회원가입/로그인처럼
+      메시지가 아닌 요청까지 포함해 본문이 있는 모든 쓰기 요청을 막는다.
+      `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로, 이 파일이
+      여러 라운드에 걸쳐 막아온 "Settings 필드 하나가 시작 시점 검증
+      없이 조용히 앱을 망가진 상태로 띄우는" 클래스의 또 다른 인스턴스
+      였다 - 160라운드의 조사가 다음 라운드 후보로 미리 짚어둔 항목을
+      그대로 구현했다.
+
+      `app/core/config.py`에 `max_body_size_bytes`용 `field_validator`
+      를 추가해(`_validate_max_prompt_length_is_positive`/
+      `_validate_max_quiz_choice_count`와 같은 위치·문체) `<= 0`이면
+      거부하도록 했다. `tests/test_config.py`에
+      `test_settings_accepts_positive_max_body_size_bytes`와
+      `test_settings_rejects_non_positive_max_body_size_bytes`(0/-1
+      parametrize)를 추가했다. `git stash`로 `app/core/config.py`
+      수정만 되돌리면 두 케이스 모두 정확히 실패(`ValidationError`가
+      안 남)하는 것까지 확인했다. 전체 470개 테스트 통과, 전체 커버리지
+      99%(`app/core/config.py` 100% 포함), `mypy app tests scripts`
+      클린. 정상 범위(양수) 설정의 동작은 그대로라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+
+      (이 라운드와 무관하게, 전체 스위트 실행 중
+      `app/services/user_service.py:69-71`(`update_profile`의 동시
+      이메일 중복 가입을 409로 변환하는 `IntegrityError` 방어 분기)이
+      테스트로 전혀 안 걸리고 있는 것을 우연히 발견했다 - 기존에
+      "미커버 2줄"로 알려져 있던 `interview_review.py:61`/
+      `auth_service.py:115`와 같은 성격의 방어 분기이지만 그동안
+      감사에서 누락되어 있었다. 이번 라운드 범위(`MAX_BODY_SIZE_BYTES`)
+      와 무관한 별개 파일이라 여기서 손대지 않고, 다음 라운드 조사를
+      위한 메모로 남겨둔다.)
+

@@ -256,6 +256,28 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("max_body_size_bytes")
+    @classmethod
+    def _validate_max_body_size_bytes_is_positive(cls, value: int) -> int:
+        """`MaxBodySizeMiddleware`(core/middleware.py)는 `Content-Length`
+        헤더가 있는 모든 요청에 대해 `parsed_content_length > self.max_body_size`
+        면 413로 거부한다. 이 값이 0 이하면 본문이 있는(=`Content-Length`가
+        1 이상인) 요청은 전부 거부되고, 음수라면 본문이 없는(`Content-Length:
+        0`) 요청까지도 거부된다 - 회원가입/로그인/학습챗/퀴즈 제출/면접복기
+        등 이 앱의 쓰기 API 사실상 전체가 시작 시점에는 전혀 티가 안 나는
+        상태로 막히게 된다(160라운드가 고친 `MAX_PROMPT_LENGTH`보다도 영향
+        범위가 넓다 - 그쪽은 메시지를 보내는 기능만 막았지만 이건
+        회원가입/로그인처럼 메시지가 아닌 요청까지 포함한다).
+        `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로, 다른 숫자
+        설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_BODY_SIZE_BYTES({value})는 0보다 커야 합니다 - 0 이하면 "
+                "본문이 있는(0 이하일 땐 본문이 없는 요청까지) 모든 요청이 413으로 "
+                "거부되어 회원가입/로그인/학습챗/퀴즈 제출 등 쓰기 API 전체가 막힙니다."
+            )
+        return value
+
     @field_validator("max_quiz_choice_count")
     @classmethod
     def _validate_max_quiz_choice_count(cls, value: int) -> int:

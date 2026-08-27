@@ -157,3 +157,21 @@ def test_settings_rejects_non_positive_max_prompt_length(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, max_prompt_length=bad_value)
     assert "MAX_PROMPT_LENGTH" in str(exc_info.value)
+
+
+def test_settings_accepts_positive_max_body_size_bytes():
+    settings = Settings(jwt_secret_key="a" * 32, max_body_size_bytes=1)
+    assert settings.max_body_size_bytes == 1
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_max_body_size_bytes(bad_value):
+    """MaxBodySizeMiddleware(core/middleware.py)는 Content-Length 헤더가 있는
+    모든 요청에 대해 parsed_content_length > max_body_size면 413로 거부한다.
+    0 이하면 본문이 있는 요청은 전부 거부되고, 음수면 본문이 없는(Content-
+    Length: 0) 요청까지도 거부되어 회원가입/로그인/학습챗/퀴즈 제출 등
+    쓰기 API 사실상 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속
+    막히게 된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, max_body_size_bytes=bad_value)
+    assert "MAX_BODY_SIZE_BYTES" in str(exc_info.value)
