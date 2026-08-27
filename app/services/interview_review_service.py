@@ -135,8 +135,7 @@ class InterviewReviewService:
         content: str | None,
     ) -> InterviewReview:
         # get_for_user_locked()로 같은 복기에 대한 거의 동시 수정을 직렬화한다 -
-        # 자세한 이유는 그 메서드의 docstring 참고. 커밋 전에 RAG 재색인까지
-        # 끝내서, 잠금이 풀리기 전에 이번 수정의 색인까지 전부 반영되게 한다.
+        # 자세한 이유는 그 메서드의 docstring 참고.
         review = await self._reviews.get_for_user_locked(review_id, user_id)
         if review is None:
             raise _NOT_FOUND
@@ -156,12 +155,29 @@ class InterviewReviewService:
             review.content = content
             review.ai_feedback = feedback
 
+        # RagService.index_content()는 실패해도(임베딩 호출 오류뿐 아니라 DB 오류까지)
+        # 조용히 건너뛰도록 설계되어 있는데, 그 설계가 기대하는 대로 동작하려면 항상
+        # "본 기능이 이미 커밋된 뒤"에 호출해야 한다(rag_service.py의 index_content
+        # docstring 참고) - 커밋 전에 부르면, 재색인 도중 예상 못 한 예외가 났을 때
+        # index_content 내부의 rollback()이 아직 커밋 안 된 이 복기 수정 자체까지
+        # 같은 트랜잭션이라 통째로 되돌려버린다. 그러면 사용자에게는 성공한 것처럼
+        # 보이지 않으면서 방금 쓴 수정 내용이 조용히 사라지고, 그 뒤 만료된 review
+        # 객체에 접근하다 깨지기까지 한다. create_review/stream_create_review/
+        # interview_practice_service.submit_answer 등 이 저장소에서 index_content를
+        # 쓰는 다른 모든 곳과 마찬가지로 커밋을 먼저 끝낸다 - 대신 FOR UPDATE 잠금은
+        # 이 커밋 시점에 풀리므로, 아주 드문 "같은 복기를 정말 동시에 두 번 수정"하는
+        # 경우 재색인 단계끼리는 더 이상 직렬화되지 않는다(source_id에 유니크 제약이
+        # 없어 이론적으로 knowledge_chunks에 중복 행이 생길 수 있음). 하지만 다음
+        # 수정에서 delete_for_source가 그 중복까지 전부 지우고 다시 만들어 자연히
+        # 복구되므로, 매 수정마다(동시성과 무관하게) 사용자의 실제 수정 내용을 통째로
+        # 잃어버릴 수 있는 지금 버그보다 훨씬 가벼운 대가라고 판단했다.
+        await self._session.commit()
+
         if content_changed:
             await self._rag.index_content(
                 user_id=user_id, source_type="interview_review", source_id=review.id, content=review.content
             )
 
-        await self._session.commit()
         return review
 
     async def delete_review(self, review_id: uuid.UUID, user_id: uuid.UUID) -> None:

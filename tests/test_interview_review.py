@@ -742,3 +742,73 @@ def test_get_for_user_locked_requests_row_lock_on_postgres():
     assert session.captured_statement is not None
     compiled = str(session.captured_statement.compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE" in compiled
+
+
+def test_update_review_persists_content_edit_even_if_rag_reindex_fails(db_session_factory, monkeypatch):
+    """update_review()는 원래 커밋 전에 RAG 재색인(index_content)까지 끝내고 있었다
+    (같은 복기에 대한 거의 동시 수정을 직렬화하는 FOR UPDATE 잠금을 재색인까지
+    커버하려는 의도) - 그런데 RagService.index_content()는 실패하면 자기
+    자신을 조용히 건너뛰도록 session.rollback()을 부르는데, 그게 아직 커밋
+    안 된 이 복기의 content/ai_feedback 수정까지 같은 트랜잭션이라 통째로
+    되돌려버렸다(143라운드). KnowledgeChunkRepository.delete_for_source를
+    패치해 재색인 도중 예상 못 한 DB 오류를 재현하고, 그래도 content 수정은
+    실제로 커밋되어 있는지(별도 세션으로 다시 조회) 확인한다."""
+    import asyncio
+    import uuid
+    from datetime import date
+
+    from app.repositories.interview_review_repository import InterviewReviewRepository
+    from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.interview_review_service import InterviewReviewService
+    from app.services.rag_service import RagService
+
+    async def _fake_delete_for_source(self, source_type, source_id):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(KnowledgeChunkRepository, "delete_for_source", _fake_delete_for_source)
+
+    async def _create_and_update():
+        async with db_session_factory() as session:
+            users = UserRepository(session)
+            user = await users.create_guest()
+            await session.commit()
+
+            reviews = InterviewReviewRepository(session)
+            review = await reviews.create(
+                user_id=user.id,
+                company="하루한",
+                position="백엔드 개발자",
+                interview_date=date(2024, 1, 1),
+                content="원래 내용",
+                model="qwen2.5:3b",
+            )
+            review.ai_feedback = "원래 피드백"
+            await session.commit()
+            review_id = review.id
+            user_id = review.user_id
+
+            rag = RagService(session=session, ollama_service=FakeOllamaService(), settings=get_settings())
+            service = InterviewReviewService(session=session, ollama_service=FakeOllamaService(), rag_service=rag)
+
+            updated = await service.update_review(
+                review_id=review_id,
+                user_id=user_id,
+                company=None,
+                position=None,
+                interview_date=None,
+                content="수정된 내용",
+            )
+            return review_id, user_id, updated.content
+
+    review_id, user_id, content_from_service_return = asyncio.run(_create_and_update())
+    assert content_from_service_return == "수정된 내용"
+
+    async def _refetch():
+        async with db_session_factory() as session:
+            reviews = InterviewReviewRepository(session)
+            review = await reviews.get_for_user(review_id, user_id)
+            return review.content if review else None
+
+    persisted_content = asyncio.run(_refetch())
+    assert persisted_content == "수정된 내용"

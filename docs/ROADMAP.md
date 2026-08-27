@@ -4689,3 +4689,62 @@
       동작은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (143라운드)
+
+- [x] 167. `InterviewReviewService.update_review()`가 RAG 재색인 실패 시
+      방금 저장한 수정 내용을 통째로 잃어버리고 크래시까지 하던 버그
+      해소 - 지난 6라운드 연속 `config.py` 숫자 필드 검증만 다뤄서
+      이번엔 다른 영역을 조사했고, RAG 색인 파이프라인과 최근 추가된
+      기능들을 다시 훑다가 발견했다.
+
+      `RagService.index_content()`는 자신의 docstring에 명시된 전제가
+      있다 - "본 기능이 이미 커밋된 뒤" 마지막 단계로 호출되어야 하며,
+      임베딩 호출뿐 아니라 예상 못 한 DB 오류까지 조용히 삼키기 위해
+      실패 시 `session.rollback()`을 부른다. `create_review`/
+      `stream_create_review`(같은 파일)와 `interview_practice_service.
+      submit_answer`(동일하게 `get_for_user_locked`를 쓰는 자매 메서드)
+      모두 이 전제를 지켜 커밋을 먼저 끝낸 뒤 `index_content`를 부르는데,
+      `update_review`만 유일하게 거꾸로 되어 있었다 - `content`/
+      `ai_feedback` 수정을 아직 커밋하지 않은 채로 `index_content`를
+      먼저 부르고 있었다("같은 복기에 대한 거의 동시 수정을 직렬화하는
+      FOR UPDATE 잠금을 재색인까지 커버하려는" 의도로 보인다).
+
+      그 결과 `index_content` 내부(`delete_for_source`나 임베딩 생성 이후
+      경로)에서 예상 못 한 예외가 나면, 그 메서드가 부르는
+      `rollback()`이 같은 트랜잭션이라 아직 커밋 안 된 `content`/
+      `ai_feedback` 수정까지 통째로 되돌려버린다 - 사용자는 성공한 줄
+      알지만 방금 쓴 수정 내용이 조용히 사라지고, 그 뒤 만료된
+      `review` 객체를 반환/직렬화하려다 `MissingGreenlet`까지 발생해
+      `PATCH /interview-reviews/{id}`가 예외 처리 안 된 500으로 끝난다.
+      `KnowledgeChunkRepository.delete_for_source`를 패치해 재색인
+      도중 DB 오류를 재현하는 것으로 직접 확인했다(수정 전 코드에서
+      정확히 `MissingGreenlet`이 재현됨).
+
+      `app/services/interview_review_service.py`의 `update_review`를
+      다른 4개 호출부와 같은 순서(커밋 → 재색인)로 바꿨다. 대신 FOR
+      UPDATE 잠금은 커밋 시점에 풀리므로, 아주 드문 "같은 복기를 정말
+      동시에 두 번 수정"하는 경우 재색인 단계끼리는 더 이상
+      직렬화되지 않아 이론적으로 `knowledge_chunks`에 중복 행이 생길
+      수 있다 - 하지만 다음 수정의 `delete_for_source`가 그 중복까지
+      지우고 다시 만들어 자연히 복구되므로, 매 수정마다(동시성과 무관)
+      사용자의 실제 수정 내용을 통째로 잃어버릴 수 있던 기존 버그보다
+      훨씬 가벼운 대가라고 판단했다. `app/repositories/interview_review_
+      repository.py`의 `get_for_user_locked()` docstring도 이 잠금이
+      더 이상 재색인을 커버하지 않는다는 사실에 맞게 갱신했다.
+
+      `tests/test_interview_review.py`에
+      `test_update_review_persists_content_edit_even_if_rag_reindex_fails`
+      를 추가했다 - `KnowledgeChunkRepository.delete_for_source`를 패치해
+      재색인 도중 DB 오류를 재현하고, (1) 예외 없이 정상 반환되는지,
+      (2) 별도 세션으로 다시 조회했을 때도 수정된 content가 실제로
+      커밋되어 있는지 확인한다. `git stash`로 서비스/저장소 파일
+      수정만 되돌리면 정확히 진단한 대로 `MissingGreenlet`이 나며
+      실패하는 것까지 확인했다.
+
+      전체 483개 테스트 통과,
+      `app/services/interview_review_service.py`/`app/repositories/
+      interview_review_repository.py` 100% 커버리지, `mypy app tests
+      scripts` 클린. `PATCH /interview-reviews/{id}`의 정상 응답
+      형식은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마
+      변경이 없어 마이그레이션도 필요 없었다.
+

@@ -83,19 +83,26 @@ class InterviewReviewRepository:
     ) -> InterviewReview | None:
         """get_for_user()와 같지만 `SELECT ... FOR UPDATE`로 이 복기 행을 잠근다.
 
-        update_review()는 content가 바뀔 때 피드백을 다시 생성하고 RAG 색인도
-        다시 만드는데(RagService.index_content()가 delete_for_source 후 임베딩
-        호출을 거쳐 create하는 동안 커밋 없이 진행됨), 이 조회 없이는 같은 복기에
-        대한 거의 동시 수정(이중 클릭, 네트워크 재시도)이 서로 다른 트랜잭션에서
-        겹쳐 실행되어 knowledge_chunks에 중복 행(하나는 최신 content와 안 맞는
-        낡은 내용)을 남길 수 있다 - source_id에는 유니크 제약이 없어 DB가 막아주지
-        않는다. 이 조회로 같은 복기에 대한 수정을 직렬화하면, 먼저 도착한 요청이
-        (RAG 색인까지 포함해) 커밋을 마칠 때까지 나중 요청이 대기했다가 이미
-        반영된 content를 보고 다시 판단하게 된다. Postgres(운영)에서만 실제로
-        잠그고, SQLite(테스트/로컬)는 FOR UPDATE를 지원하지 않아 이 조회가 일반
-        SELECT로 컴파일된다 - 그래서 이 잠금에 의존하는 동시성 자체는 SQLite
-        기반 테스트로 재현/검증할 수 없다(92번 라운드에서 이미 마주친 것과 같은
-        성격의 한계).
+        update_review()는 content가 바뀔 때 피드백을 다시 생성하는데, 이 조회
+        없이는 같은 복기에 대한 거의 동시 수정(이중 클릭, 네트워크 재시도)이
+        서로 다른 트랜잭션에서 겹쳐 실행되어 둘 다 "바뀌기 전" content를 기준으로
+        판단해버릴 수 있다(예: 먼저 도착한 요청이 아직 커밋 전인 상태에서 나중
+        요청이 자신도 content_changed라고 잘못 판단). 이 조회로 같은 복기에 대한
+        수정을 직렬화하면, 먼저 도착한 요청이 커밋을 마칠 때까지 나중 요청이
+        대기했다가 이미 반영된 content를 보고 다시 판단하게 된다.
+
+        RAG 재색인(RagService.index_content())은 이 잠금 범위 밖이다 - 커밋 이후
+        (잠금이 풀린 뒤)에 별도로 호출된다(143라운드 참고: 커밋 전에 부르면
+        index_content 내부의 실패 시 rollback()이 아직 커밋 안 된 이 복기 수정
+        자체까지 되돌려버리는 문제가 있었다). 그래서 아주 드물게 같은 복기를
+        정말 동시에 두 번 수정하면 재색인 단계끼리는 직렬화되지 않아 이론적으로
+        knowledge_chunks에 중복 행이 생길 수 있지만, 다음 수정의 delete_for_source가
+        그 중복까지 지우고 다시 만들어 자연히 복구된다.
+
+        Postgres(운영)에서만 실제로 잠그고, SQLite(테스트/로컬)는 FOR UPDATE를
+        지원하지 않아 이 조회가 일반 SELECT로 컴파일된다 - 그래서 이 잠금에
+        의존하는 동시성 자체는 SQLite 기반 테스트로 재현/검증할 수 없다(92번
+        라운드에서 이미 마주친 것과 같은 성격의 한계).
         """
         result = await self._session.execute(
             select(InterviewReview)
