@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.clock import utcnow_naive
 from app.core.config import get_settings
+from app.core.password import hash_password
 from app.core.tokens import hash_refresh_token, refresh_token_expiry
 from app.db.base import Base
 from app.db.models.refresh_token import RefreshToken
@@ -215,6 +216,150 @@ def test_concurrent_refresh_of_same_token_is_detected_and_revokes_all_sessions(
     assert caught is not None
     assert caught.status_code == 401
     assert remaining == []
+
+
+def test_login_returns_401_when_account_deleted_during_login(db_session_factory, monkeypatch):
+    """get_by_email() 확인과 그 뒤 bcrypt 비교로 늘어난 시간차 사이에 다른 요청이
+    UserService.delete_account()로 이 계정을 지워버리면, _issue_tokens()의
+    refresh_token INSERT가(RefreshToken.user_id는 nullable=False FK) IntegrityError로
+    실패한다 - 잡지 않으면 로그인이라는 이 앱에서 가장 자주 타는 경로가 그대로
+    처리되지 않은 예외(500)로 새어나간다. get_by_email이 반환하기 직전 별도
+    세션에서 그 계정을 실제로 지우도록 만들어 이 타이밍을 결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create(
+                email="disappearing@example.com", hashed_password=hash_password("supersecret")
+            )
+            await session.commit()
+            user_id = user.id
+
+            class DeletingUserRepository(UserRepository):
+                async def get_by_email(self, email):
+                    result = await super().get_by_email(email)
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    return result
+
+            monkeypatch.setattr(auth_service_module, "UserRepository", DeletingUserRepository)
+
+            settings = get_settings()
+            service = AuthService(session=session, settings=settings)
+
+            try:
+                await service.login(email="disappearing@example.com", password="supersecret")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+
+
+def test_refresh_returns_401_when_account_deleted_during_refresh(db_session_factory, monkeypatch):
+    """refresh()도 login()과 같은 이유로 취약하다 - revoke_if_active()로 옛
+    토큰을 성공적으로 폐기한 직후, _issue_tokens()의 INSERT 전에 다른 요청이
+    이 계정을 지워버리면 같은 IntegrityError가 새어나간다. revoke_if_active가
+    반환하기 직전 별도 세션에서 계정을 지우도록 만들어 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            settings = get_settings()
+            raw_token = "raw-token-for-account-deleted-during-refresh"
+            await RefreshTokenRepository(session).create(
+                user_id=user.id,
+                token_hash=hash_refresh_token(raw_token),
+                expires_at=refresh_token_expiry(settings),
+            )
+            await session.commit()
+
+            class DeletingRefreshTokenRepository(RefreshTokenRepository):
+                async def revoke_if_active(self, token_id):
+                    result = await super().revoke_if_active(token_id)
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    return result
+
+            monkeypatch.setattr(
+                auth_service_module, "RefreshTokenRepository", DeletingRefreshTokenRepository
+            )
+            service = AuthService(session=session, settings=settings)
+
+            try:
+                await service.refresh(raw_token)
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+
+
+def test_refresh_returns_401_when_account_deleted_before_user_lookup(db_session_factory, monkeypatch):
+    """refresh()가 계정 삭제 경쟁에 취약해질 수 있는 지점이 하나 더 있다 - 위 두
+    테스트보다 더 이른 시점(stored refresh_token을 읽은 직후, get_by_id() 전)에
+    계정이 지워지면, User.delete()의 CASCADE로 이 refresh_token row 자체도
+    이미 함께 지워진 뒤라 get_by_id()가 그냥 None을 반환한다(IntegrityError가
+    아니라). refresh()는 이미 `if user is None: raise _INVALID_REFRESH_TOKEN`으로
+    이 경우를 올바르게 처리하고 있었지만, 이 정확한 타이밍을 재현하는 테스트가
+    없어 이 분기가 커버되지 않고 있었다 - 위 두 테스트가 다루는 "계정 삭제 경쟁"
+    조사의 연장선에서 함께 메운다. get_by_hash가 반환하기 직전 별도 세션에서
+    계정을 지우도록 만들어 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            settings = get_settings()
+            raw_token = "raw-token-for-account-deleted-before-lookup"
+            await RefreshTokenRepository(session).create(
+                user_id=user.id,
+                token_hash=hash_refresh_token(raw_token),
+                expires_at=refresh_token_expiry(settings),
+            )
+            await session.commit()
+
+            class DeletingRefreshTokenRepository(RefreshTokenRepository):
+                async def get_by_hash(self, token_hash):
+                    result = await super().get_by_hash(token_hash)
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    return result
+
+            monkeypatch.setattr(
+                auth_service_module, "RefreshTokenRepository", DeletingRefreshTokenRepository
+            )
+            service = AuthService(session=session, settings=settings)
+
+            try:
+                await service.refresh(raw_token)
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
 
 
 def test_login_rejects_nonexistent_email(client):

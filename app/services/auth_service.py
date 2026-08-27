@@ -88,8 +88,18 @@ class AuthService:
         if user is None or hashed_password is None or not password_matches:
             raise _INVALID_CREDENTIALS
 
-        tokens = await self._issue_tokens(user)
-        await self._session.commit()
+        # get_by_email 확인(과 그 뒤 bcrypt 비교로 늘어난 시간차) 사이에 다른 요청이
+        # UserService.delete_account()로 이 계정을 지워버리면(RefreshToken.user_id는
+        # nullable=False FK), _issue_tokens()의 refresh_token INSERT가
+        # IntegrityError로 실패한다 - 잡지 않으면 로그인이라는, 이 앱에서 가장 자주
+        # 타는 경로가 그대로 처리되지 않은 예외(500)로 새어나간다. "계정이 이미
+        # 없어졌다"는 사실상 잘못된 자격증명과 같은 취급이라 같은 401로 변환한다.
+        try:
+            tokens = await self._issue_tokens(user)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _INVALID_CREDENTIALS from None
         return tokens
 
     async def refresh(self, refresh_token: str) -> TokenResponse:
@@ -127,8 +137,18 @@ class AuthService:
             await self._session.commit()
             raise _INVALID_REFRESH_TOKEN
 
-        tokens = await self._issue_tokens(user)
-        await self._session.commit()
+        # get_by_id 확인과 여기 사이에 다른 요청이 UserService.delete_account()로
+        # 이 계정을 지워버리면(login()과 같은 이유 - RefreshToken.user_id는
+        # nullable=False FK), _issue_tokens()의 INSERT가 IntegrityError로 실패한다.
+        # 잡지 않으면 처리되지 않은 예외(500)로 새어나간다 - 위 revoke_if_active()
+        # 성공(UPDATE)도 아직 커밋 전이라, 여기서 rollback()하면 그 폐기까지 함께
+        # 되돌아가 낡은 refresh_token을 헛되이 태우지 않는다.
+        try:
+            tokens = await self._issue_tokens(user)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _INVALID_REFRESH_TOKEN from None
         return tokens
 
     async def create_guest_session(self) -> TokenResponse:

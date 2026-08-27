@@ -4799,3 +4799,61 @@
       응답/기존 에러 형식은 그대로라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (145라운드)
+
+- [x] 169. `AuthService.login()`/`refresh()`가 계정 삭제 경쟁에 노출돼
+      있던 문제 해소 - 143/144라운드가 발견한 "check-then-act 사이에
+      참조 대상이 지워지면 나중 INSERT가 IntegrityError로 새어나간다"
+      버그 클래스를 이 서비스에도 전수 재감사하다가 찾았다(quiz_service/
+      interview_practice_service/interview_review_service는 이미 전부
+      `get_for_user_locked`나 `try/except IntegrityError`로 방어돼
+      있음을 다시 읽어 확인했다).
+
+      `UserService.delete_account()`(비교적 최근에 추가된 기능)로 계정을
+      완전히 지우면 `RefreshToken.user_id`가 `nullable=False, ondelete=
+      CASCADE` FK라 그 계정의 refresh_token도 함께 사라진다. `login()`은
+      `get_by_email()` 확인(과 그 뒤 bcrypt 비교로 늘어난 시간차) 사이에,
+      `refresh()`는 `get_by_id()` 확인 뒤 `_issue_tokens()`가 새 토큰을
+      `INSERT`하기 전에, 다른 요청(같은 계정의 다른 탭/기기에서 온 계정
+      삭제)이 이 계정을 지워버리면 그 INSERT가 `IntegrityError`로
+      실패한다 - 잡지 않으면 로그인/토큰 갱신이라는 이 앱에서 가장 자주
+      타는 경로가 그대로 처리되지 않은 예외(500)로 새어나간다.
+
+      `app/services/auth_service.py`의 `login()`/`refresh()` 양쪽 모두
+      `_issue_tokens()` 호출+커밋을 `try/except IntegrityError:
+      rollback() + raise 401`로 감쌌다(`signup()`이 이미 같은 패턴을
+      쓰고 있었음). `refresh()`의 경우 `rollback()`이 그 직전
+      `revoke_if_active()`의 폐기(UPDATE)까지 함께 되돌리는데, 이는
+      의도한 동작이다 - 새 토큰을 발급 못 할 거면 옛 토큰을 헛되이
+      태우지 않는 게 맞다.
+
+      `tests/test_auth.py`에 `test_login_returns_401_when_account_
+      deleted_during_login`과 `test_refresh_returns_401_when_account_
+      deleted_during_refresh`를 추가했다 - 기존
+      `test_concurrent_refresh_of_same_token_is_detected_and_revokes_
+      all_sessions`(129라운드 이후 이 파일에 이미 있던, 저장소 메서드를
+      서브클래싱해 `auth_service_module`에 monkeypatch하는 패턴)와
+      144라운드의 "별도 세션에서 실제로 지운다" 기법을 조합해, 각각
+      `get_by_email`/`revoke_if_active`가 반환하기 직전 별도 세션에서
+      계정을 실제로 지우도록 만들어 재현했다. `git stash`로
+      `app/services/auth_service.py` 수정만 되돌리면 두 테스트 모두
+      정확히 `IntegrityError`(FOREIGN KEY constraint failed)로
+      실패하는 것까지 확인했다.
+
+      조사 과정에서 `refresh()`의 `if user is None: raise
+      _INVALID_REFRESH_TOKEN`(더 이른 타이밍 - `get_by_id()` 자체가
+      `None`을 반환하는 경우, CASCADE로 refresh_token row 자체가
+      이미 함께 지워진 뒤라 이쪽은 원래도 올바르게 처리되고 있었음)
+      분기가 오래 전부터 테스트로 커버되지 않고 있던 것도 함께
+      발견해서, 같은 조사의 연장으로 `test_refresh_returns_401_when_
+      account_deleted_before_user_lookup`을 추가해 메웠다(애플리케이션
+      코드 변경 없이 순수 테스트 보강 - `git stash`로 확인해도 이
+      테스트는 수정 전/후 동일하게 통과함).
+
+      전체 488개 테스트 통과, `app/services/auth_service.py` 100%
+      커버리지(이번 라운드가 우연히 143/144라운드 이전부터 있던
+      미커버 갭까지 메워, 전체 미커버 라인이 2개에서 1개로 줄었다),
+      `mypy app tests scripts` 클린. `/auth/login`/`/auth/refresh`의
+      정상 응답 형식은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+
