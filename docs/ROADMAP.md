@@ -5208,3 +5208,36 @@
       백필 job이 그날 아무 일도 안 함) 이번 라운드 범위에는 넣지
       않았다.)
 
+## 백로그 (153라운드)
+
+- [x] 177. `/api/v1/chat`(범용 Ollama 프록시)의 `ChatRequest.prompt`가
+      공백-only 값을 그대로 통과시키던 문제 해소 - 121/151라운드가 이미
+      학습챗/면접연습/면접복기/퀴즈의 프롬프트 필드 전부에 이 검증을
+      추가했는데, 정작 가장 단순한(그리고 유일하게 인증 방식도 다른)
+      이 프록시 엔드포인트만 빠져 있었다 - 세 라운드 어디에도 `ChatRequest`
+      가 언급되지 않아, 의도적 제외가 아니라 단순 누락이었다.
+
+      `docs/FRONTEND_INTEGRATION.md`가 이 엔드포인트를 "4개 실기능과
+      무관한 초기 프로토타입용, 신규 프론트 연동에서는 안 씀"으로 이미
+      명시하고 있어 다른 세 필드보다 심각도는 낮다 - 아무것도 영구히
+      저장되지 않고(단발성 프록시 호출), 응답도 그 자리에서 바로
+      돌아간다. 그래도 공백-only `prompt`가 통과하면 의미 없는
+      프롬프트로 Ollama 호출만 낭비하게 되는 건 다른 필드들과 동일한
+      문제였다.
+
+      `app/schemas/chat.py`의 `validate_prompt_length`에
+      `study.py`(121라운드)와 동일한 `if not value.strip(): raise
+      ValueError(...)` 검증을 추가했다.
+
+      `tests/test_chat.py`에 `test_chat_rejects_whitespace_only_prompt`를
+      추가했다 - 422가 나는지뿐 아니라, `FakeOllamaService.generate()`가
+      실제로 한 번도 안 불렸는지(호출 카운터로)까지 확인해 "낭비되는
+      호출"이라는 문제 자체가 실제로 막혔는지 검증한다. `git stash`로
+      `app/schemas/chat.py` 수정만 되돌리면 이 테스트가 정확히
+      실패(200이 나오고 generate()가 호출됨)하는 것까지 확인했다.
+
+      전체 510개 테스트 통과, `app/schemas/chat.py` 100% 커버리지,
+      `mypy app tests scripts` 클린. 정상 범위(공백이 아닌) 입력의
+      동작은 완전히 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+
