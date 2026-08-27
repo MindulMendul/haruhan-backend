@@ -4748,3 +4748,54 @@
       형식은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마
       변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (144라운드)
+
+- [x] 168. `StudyService.send_message`/`stream_message`가 첫 번째
+      INSERT(user_message)에서도 81라운드가 이미 두 번째 INSERT
+      (assistant_message)에 대해 고친 것과 같은 종류의 경쟁 상태에
+      노출돼 있던 문제 해소 - 143라운드가 고친 `index_content`/
+      `forget_content` 커밋 순서 버그를 계기로, "잠금이나 커밋 순서에
+      의존하는 다른 호출부도 같은 함정이 있는지" 전수 재감사를 했고
+      (`index_content`/`forget_content` 호출부는 전부 정상이었음),
+      그 과정에서 이 별개의 오래된 경쟁 상태를 새로 발견했다.
+
+      `send_message`/`stream_message`는 `get_for_user()`로 세션
+      존재를 확인한 뒤 `list_recent_for_session()` 조회를 한 번 더
+      거쳐서야 `user_message`를 만드는데, 이 좁은 틈에도 다른 요청이
+      같은 세션을 지워버리면(`StudyMessage.session_id`가
+      `nullable=False` FK) 이 INSERT가 `IntegrityError`로 실패한다.
+      81라운드는 그 뒤에 있는 (Ollama 호출까지 거치는 훨씬 넓은
+      창의) `assistant_message` INSERT에는 이미 `try/except
+      IntegrityError` 방어를 달아뒀지만, 20~30줄 앞의 이 더 이른
+      INSERT는 같은 함수 안인데도 그 처리가 빠져 있었다 - 잡히지
+      않으면 REST 경로는 전역 예외 핸들러가 없어(main.py는
+      `HTTPException`/`RequestValidationError`만 등록) 그대로
+      Starlette 기본 500으로 새어나가 이 앱의 균일한 에러 응답 형식이
+      깨지고, WebSocket 경로는 139라운드가 추가한 `except Exception`
+      에 걸려 "처리되지 않은 예외"로 잘못 로깅되며 정상적인 404
+      대신 뭉뚱그린 에러로 연결이 강제 종료된다.
+      `StudyMessageRepository.list_recent_for_session`을 패치해
+      반환 직전 별도 세션에서 세션을 지우도록 만드는 것으로 직접
+      재현해 확인했다.
+
+      `app/services/study_service.py`의 `send_message`/
+      `stream_message` 양쪽 모두, 첫 번째 `user_message` 생성+커밋을
+      `assistant_message`와 같은 `try/except IntegrityError:
+      rollback() + raise _SESSION_NOT_FOUND` 패턴으로 감쌌다.
+
+      `tests/test_study_message_session_deleted_race.py`(81라운드가
+      만든 기존 경쟁 테스트 파일)에
+      `test_send_message_returns_404_when_session_deleted_before_first_message_insert`
+      와 그 스트리밍 버전을 추가했다 - 기존 두 테스트와 같은 패턴
+      (가짜 서비스/저장소 메서드가 응답 직전 별도 세션에서 실제로
+      세션을 지움)을 재사용하되, 주입 지점만 Ollama 호출 대신
+      `list_recent_for_session` 반환 직후로 옮겼다. `git stash`로
+      `app/services/study_service.py` 수정만 되돌리면 두 테스트 모두
+      정확히 `IntegrityError`(404로 변환되지 않은 원본 예외)로
+      실패하는 것까지 확인했다.
+
+      전체 485개 테스트 통과, `app/services/study_service.py` 100%
+      커버리지, `mypy app tests scripts` 클린. 두 엔드포인트의 정상
+      응답/기존 에러 형식은 그대로라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

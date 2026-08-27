@@ -112,9 +112,16 @@ class StudyService:
             session_id, self._settings.max_chat_history_messages
         )
 
-        user_message = await self._messages.create(session_id=session_id, role="user", content=content)
-        # AI 호출 성패와 무관하게 사용자가 입력한 메시지는 먼저 커밋해서 보존한다.
-        await self._session.commit()
+        # get_for_user() 확인과 여기 사이에도(길지는 않지만) DB 조회 한 번이 끼어
+        # 있어, 그 사이 세션이 삭제되면 이 INSERT가 IntegrityError로 실패할 수
+        # 있다 - 아래 assistant_message와 같은 이유로 404로 변환한다.
+        try:
+            user_message = await self._messages.create(session_id=session_id, role="user", content=content)
+            # AI 호출 성패와 무관하게 사용자가 입력한 메시지는 먼저 커밋해서 보존한다.
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _SESSION_NOT_FOUND from None
 
         chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
 
@@ -172,8 +179,15 @@ class StudyService:
             session_id, self._settings.max_chat_history_messages
         )
 
-        user_message = await self._messages.create(session_id=session_id, role="user", content=content)
-        await self._session.commit()
+        # send_message()와 같은 이유(그 메서드의 docstring 참고)로, get_for_user()
+        # 확인과 여기 사이에 낀 DB 조회 도중 세션이 삭제되면 이 INSERT가
+        # IntegrityError로 실패할 수 있다 - 404로 변환한다.
+        try:
+            user_message = await self._messages.create(session_id=session_id, role="user", content=content)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _SESSION_NOT_FOUND from None
         yield "user_message", user_message
 
         chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
