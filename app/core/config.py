@@ -318,6 +318,27 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("max_review_content_length")
+    @classmethod
+    def _validate_max_review_content_length_is_positive(cls, value: int) -> int:
+        """`InterviewReviewCreateRequest`/`InterviewReviewUpdateRequest`의
+        `validate_content_length` field_validator(schemas/interview_review.py)가
+        이 값을 `len(value) > max_length`로 검사한다. 이 값이 0 이하면
+        `min_length=1`을 통과한(=빈 문자열이 아닌) 어떤 content도 항상 이
+        조건을 만족해 거부된다 - `POST /interview-reviews`(생성)와
+        `PATCH /interview-reviews/{id}`(수정, content 포함 시) 전부가 시작
+        시점에는 전혀 티가 안 나는 상태로 계속 막히게 된다(160라운드가 고친
+        `MAX_PROMPT_LENGTH`와 같은 성격이지만 이쪽은 면접복기 기능으로
+        범위가 한정된다). `Settings()` 생성 자체는 성공해 앱도 정상적으로
+        뜨므로, 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_REVIEW_CONTENT_LENGTH({value})는 0보다 커야 합니다 - 0 이하면 "
+                "빈 문자열이 아닌 어떤 면접복기 내용도 항상 길이 초과로 거부되어 "
+                "면접복기 생성/수정 기능 전체가 막힙니다."
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_quiz_question_count_defaults(self) -> "Settings":
         """`QuizCreateRequest`는 `question_count`를 안 보낸 요청에는

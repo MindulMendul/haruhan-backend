@@ -4598,3 +4598,46 @@
       동작은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
       필요 없었다.
 
+## 백로그 (141라운드)
+
+- [x] 165. `MAX_REVIEW_CONTENT_LENGTH`에 양수 검증 추가 - 140라운드
+      조사에서 후보로만 언급되고 구현되지 않았던 항목을 이어받았다.
+      159~164라운드와 같은 성격의 설정 검증 공백이다.
+
+      `InterviewReviewCreateRequest`/`InterviewReviewUpdateRequest`
+      (schemas/interview_review.py)의 `validate_content_length`
+      field_validator가 이 값을 `len(value) > max_length`로 검사한다.
+      이 값이 0 이하면 `min_length=1`을 통과한(=빈 문자열이 아닌) 어떤
+      면접복기 내용도 항상 이 조건을 만족해 거부된다 - `POST
+      /interview-reviews`(생성)와 `PATCH /interview-reviews/{id}`
+      (content를 포함한 수정) 전부가 시작 시점에는 전혀 티가 안 나는
+      상태로 계속 막히게 된다. `Settings()` 생성 자체는 성공해 앱도
+      정상적으로 뜨므로, 160라운드가 고친 `MAX_PROMPT_LENGTH`와 정확히
+      같은 형태의 버그이지만 영향 범위는 면접복기 기능으로 한정된다.
+
+      `app/core/config.py`에
+      `_validate_max_review_content_length_is_positive` field_validator를
+      추가했다(`value <= 0`이면 거부, 기존 필드들과 동일한 위치/스타일).
+      `tests/test_config.py`에
+      `test_settings_accepts_positive_max_review_content_length`와
+      `test_settings_rejects_non_positive_max_review_content_length`
+      (0/-1 parametrize)를 추가했다. `git stash`로
+      `app/core/config.py` 수정만 되돌리면 두 케이스 모두 정확히
+      실패(`ValidationError`가 안 남)하는 것까지 확인했다.
+
+      전체 479개 테스트 통과, 전체 커버리지 99%(`app/core/config.py`
+      100% 포함), `mypy app tests scripts` 클린. 정상 범위(양수) 설정의
+      동작은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+
+      (140라운드 조사가 함께 발견한 `MAX_QUIZ_SOURCE_LENGTH <= 0`은
+      성격이 다르다 - 스키마 검증 경로는 이번 라운드와 같은 "항상
+      거부" 버그지만, `quiz_service.py`의 세션 소스 truncate 경로는
+      `source_text[-0:]`가 파이썬 슬라이싱 특성상 `-0 == 0`이라
+      전체 문자열을 그대로 반환해버려 truncate 안전장치 자체가
+      조용히 무력화되는 별개의 버그다. "0을 거부할지 무제한으로
+      취급할지"가 설계 판단이 필요해(이 파일에 `max_chat_history_
+      messages`처럼 "0 이하 = 특수 모드"로 문서화된 필드가 있어
+      선례가 갈릴 수 있음) 이번 라운드 범위에는 넣지 않고, 다음
+      라운드를 위한 메모로 남겨둔다.)
+

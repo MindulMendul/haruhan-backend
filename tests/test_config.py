@@ -192,3 +192,20 @@ def test_settings_rejects_non_positive_max_concurrent_ws_connections(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, max_concurrent_ws_connections=bad_value)
     assert "MAX_CONCURRENT_WS_CONNECTIONS" in str(exc_info.value)
+
+
+def test_settings_accepts_positive_max_review_content_length():
+    settings = Settings(jwt_secret_key="a" * 32, max_review_content_length=1)
+    assert settings.max_review_content_length == 1
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_max_review_content_length(bad_value):
+    """InterviewReviewCreateRequest/InterviewReviewUpdateRequest의
+    validate_content_length가 이 값을 len(value) > max_length로 검사한다.
+    0 이하면 min_length=1을 통과한(=빈 문자열이 아닌) 어떤 면접복기
+    내용도 항상 이 조건을 만족해 거부되어, 면접복기 생성/수정 기능
+    전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속 막히게 된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, max_review_content_length=bad_value)
+    assert "MAX_REVIEW_CONTENT_LENGTH" in str(exc_info.value)
