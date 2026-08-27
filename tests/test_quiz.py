@@ -311,6 +311,22 @@ def test_create_quiz_rejects_source_text_over_max_length(client, monkeypatch):
     assert response.status_code == 422
 
 
+def test_create_quiz_rejects_whitespace_only_source_text(client):
+    """min_length=1은 빈 문자열만 막을 뿐 공백만 있는 값은 통과시킨다(공백
+    문자열은 `not self.source_text`에도 False라 "하나는 필요합니다" 검증도
+    그냥 통과함) - 통과하면 빈 소스로 AI가 퀴즈를 생성해 영구히 저장한다
+    (title 외에는 수정할 방법이 없음). 121/122라운드가 범위 밖으로 미뤄뒀던
+    필드다."""
+    token = _signup_and_get_token(client)
+
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "공백 소스", "source_text": "   "},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
 def test_create_quiz_rejects_question_count_over_max(client, monkeypatch):
     # DEFAULT_QUIZ_QUESTION_COUNT(기본 5)가 MAX보다 커지면 Settings 자체가
     # 시작 시점에 거부하므로(84번 라운드), DEFAULT도 함께 낮춰야 한다.

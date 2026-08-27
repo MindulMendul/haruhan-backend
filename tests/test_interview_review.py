@@ -132,6 +132,37 @@ def test_create_review_rejects_content_too_long(client, monkeypatch):
     assert response.status_code == 422
 
 
+def test_create_review_rejects_whitespace_only_content(client):
+    """min_length=1은 빈 문자열만 막을 뿐 공백만 있는 값은 통과시킨다 - 통과하면
+    빈 내용으로 AI 피드백을 생성해 저장한다. 121/122라운드가 범위 밖으로
+    미뤄뒀던 필드다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+
+    response = client.post(
+        "/api/v1/interview/reviews",
+        json=_create_payload(content="   "),
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_update_review_rejects_whitespace_only_content(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"content": "   "},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
 def test_list_and_get_review(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

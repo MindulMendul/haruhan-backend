@@ -35,6 +35,12 @@ class InterviewReviewCreateRequest(BaseModel):
     @field_validator("content")
     @classmethod
     def validate_content_length(cls, value: str) -> str:
+        # min_length=1은 빈 문자열("")만 막을 뿐 "   "처럼 공백만 있는 값은 그대로
+        # 통과시킨다 - study.py의 validate_content_length(121라운드)와 같은 이유로,
+        # 통과하면 빈 내용으로 AI 피드백을 생성해 저장한다(121/122라운드가 "대응하는
+        # WS 구현이 없어 범위 밖"이라는 이유로 미뤄뒀던 필드다).
+        if not value.strip():
+            raise ValueError("content는 비어 있을 수 없습니다.")
         max_length = get_settings().max_review_content_length
         if len(value) > max_length:
             raise ValueError(f"content는 최대 {max_length}자까지 허용됩니다.")
@@ -59,6 +65,10 @@ class InterviewReviewUpdateRequest(BaseModel):
     def validate_content_length(cls, value: str | None) -> str | None:
         if value is None:
             return value
+        # Create 쪽과 같은 이유(그 검증기 참고) - 공백만 있는 값으로 content를
+        # "수정"하면 그 즉시 update_review()가 빈 내용으로 AI 피드백을 재생성해버린다.
+        if not value.strip():
+            raise ValueError("content는 비어 있을 수 없습니다.")
         max_length = get_settings().max_review_content_length
         if len(value) > max_length:
             raise ValueError(f"content는 최대 {max_length}자까지 허용됩니다.")

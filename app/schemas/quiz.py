@@ -22,6 +22,14 @@ class QuizCreateRequest(BaseModel):
             raise ValueError("study_session_id 또는 source_text 중 하나는 필요합니다.")
         if self.study_session_id and self.source_text:
             raise ValueError("study_session_id와 source_text는 동시에 지정할 수 없습니다.")
+        # min_length=1은 빈 문자열("")만 막을 뿐 "   "처럼 공백만 있는 값은 그대로
+        # 통과시킨다(`not self.source_text`도 공백 문자열엔 False라 위 두 검증을
+        # 그대로 통과함) - study.py의 validate_content_length(121라운드)와 같은
+        # 이유로, 통과하면 빈 소스로 AI가 퀴즈를 생성해 저장한다(title 외에는
+        # 수정할 방법이 없음 - 121/122라운드가 "대응하는 WS 구현이 없어 범위 밖"
+        # 이라는 이유로 미뤄뒀던 필드다).
+        if self.source_text is not None and not self.source_text.strip():
+            raise ValueError("source_text는 비어 있을 수 없습니다.")
         if self.source_text and len(self.source_text) > settings.max_quiz_source_length:
             raise ValueError(f"source_text는 최대 {settings.max_quiz_source_length}자까지 허용됩니다.")
 

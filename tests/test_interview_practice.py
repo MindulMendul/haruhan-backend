@@ -383,6 +383,35 @@ def test_submit_answer_rejects_answer_over_max_length(client, monkeypatch):
     assert response.status_code == 422
 
 
+def test_submit_answer_rejects_whitespace_only_answer(client):
+    """min_length=1은 빈 문자열만 막을 뿐 공백만 있는 값은 통과시킨다 - 통과하면
+    mark_answered_if_pending()의 단발성 CAS(재제출 엔드포인트 없음)로 그 턴을
+    빈 답변인 채로 영구히 소비해버린다. 121/122라운드가 범위 밖으로 미뤄뒀던
+    필드다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "   "},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+    # 거부됐다면 그 턴은 여전히 미답변 상태로 남아, 정상적인 답변으로 다시
+    # 제출할 수 있어야 한다.
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert detail.json()["turns"][0]["answer"] is None
+
+
 def test_submit_answer_returns_feedback_and_next_question(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

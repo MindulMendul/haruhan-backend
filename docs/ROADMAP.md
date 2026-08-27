@@ -5118,3 +5118,49 @@
       FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (151라운드)
+
+- [x] 175. `InterviewPracticeAnswerRequest.answer`/
+      `InterviewReviewCreateRequest.content`/
+      `InterviewReviewUpdateRequest.content`/`QuizCreateRequest.
+      source_text`가 공백-only 값을 그대로 통과시키던 문제 해소 -
+      121/122라운드가 "프롬프트로 쓰이는 필드는 대응하는 WS 구현이
+      없어 드리프트가 없다"는 이유로 명시적으로 범위 밖에 남겨뒀던
+      바로 그 필드들이다. 150라운드까지 이어온 다른 조사 끝에, 아직
+      해소되지 않은 채 남아있던 이 항목을 정확히 찾아 마무리했다.
+
+      네 필드 모두 `min_length=1`만 걸려 있어 빈 문자열("")만 막고
+      `"   "`(공백만 있는 값)은 그대로 통과시켰다 - `quiz.py`는 한 걸음
+      더 미묘한데, `not self.source_text`가 공백 문자열에도 `False`라
+      "study_session_id 또는 source_text 중 하나는 필요합니다"
+      검증조차 우회했다. 통과하면 AI가 빈 내용으로 질문/피드백/퀴즈를
+      생성하고, 그 결과가 되돌릴 방법이 없는(또는 매우 제한적으로만
+      되돌릴 수 있는) 형태로 저장된다 - `InterviewPracticeAnswerRequest.
+      answer`가 가장 심각한데, `mark_answered_if_pending()`의 단발성
+      CAS(`WHERE answer IS NULL`)로 그 턴이 빈 답변인 채 영구히
+      소비되고 재제출 엔드포인트가 없다. 나머지 셋은 각각 `update_review`
+      (재수정 가능), `PATCH`(재수정 가능, 다만 처음 생성 시점의 값은
+      여전히 잘못 남을 수 있음), 퀴즈 삭제 후 재생성(title 외 수정
+      불가)으로만 복구 가능하다.
+
+      `app/schemas/interview_practice.py`/`app/schemas/interview_
+      review.py`(Create/Update 양쪽)/`app/schemas/quiz.py`에 각각
+      `study.py`의 `validate_content_length`(121라운드)와 동일한
+      `if not value.strip(): raise ValueError(...)` 패턴을 추가했다.
+      `quiz.py`는 기존 검증 순서(`study_session_id`/`source_text` 상호
+      배타 확인 → 길이 확인)에 자연스럽게 끼워 넣었다.
+
+      `tests/test_interview_practice.py`/`tests/test_interview_review.py`
+      (Create/Update 둘 다)/`tests/test_quiz.py`에 각 필드마다
+      `..._rejects_whitespace_only_*` 테스트를 추가했다 - 특히 면접연습
+      답변 테스트는 거부된 뒤에도 그 턴이 여전히 미답변 상태로 남아
+      나중에 정상적으로 재제출할 수 있는지까지 확인한다. `git stash`로
+      스키마 파일 세 개 수정만 되돌리면 네 테스트 모두 정확히 실패(422가
+      아니라 실제로 AI 호출까지 진행되어 502/201이 나옴)하는 것까지
+      확인했다.
+
+      전체 506개 테스트 통과, `mypy app tests scripts` 클린. 정상
+      범위(공백이 아닌) 입력의 동작은 완전히 그대로라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+
