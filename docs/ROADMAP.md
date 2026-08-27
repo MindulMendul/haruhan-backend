@@ -5164,3 +5164,47 @@
       FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (152라운드)
+
+- [x] 176. `WS_IDLE_TIMEOUT_SECONDS`에 양수 검증 추가 - 159~166/151라운드가
+      이어온 "Settings 숫자 필드 검증" 계열이 "완전히 끝남"으로 분류돼
+      있었지만, 다시 field-by-field로 훑다가 실제로 빠져 있던 필드
+      하나를 발견했다(이 계열이 두 번째로 "끝났다"는 판단이 틀렸던
+      사례 - 135/136라운드 때도 같은 일이 있었다).
+
+      학습챗/면접복기 WebSocket 스트리밍 라우트(`routes/study.py`의
+      `stream_message`, `routes/interview_review.py`의
+      `stream_create_review`)는 매 메시지 대기마다 `asyncio.wait_for(
+      websocket.receive_json(), timeout=ws_idle_timeout_seconds)`를
+      쓴다. 이 값이 0 이하면 `asyncio.wait_for`가 코루틴이 완료될
+      기회조차 주지 않고 즉시 `TimeoutError`를 낸다는 것을 직접
+      재현해 확인했다 - 클라이언트가 연결하자마자 메시지를 보내도
+      첫 대기에서 곧바로 "idle timeout"으로 연결이 끊겨, 두 스트리밍
+      기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속 끊기게
+      된다. `MAX_CONCURRENT_WS_CONNECTIONS`(164라운드)와 같은 두
+      라우트에 영향을 주지만, 그 검증기 자신의 docstring이 참조하는
+      "형제 안전장치"인 이 필드는 정작 검증되지 않은 채 남아있었다.
+
+      `app/core/config.py`에
+      `_validate_ws_idle_timeout_seconds_is_positive` field_validator를
+      추가했다(`value <= 0`이면 거부, 기존 필드들과 동일한 위치/스타일,
+      `max_concurrent_ws_connections` 검증기 바로 앞에 배치).
+      `tests/test_config.py`에
+      `test_settings_accepts_positive_ws_idle_timeout_seconds`와
+      `test_settings_rejects_non_positive_ws_idle_timeout_seconds`
+      (0/-1 parametrize)를 추가했다. `git stash`로
+      `app/core/config.py` 수정만 되돌리면 두 케이스 모두 정확히
+      실패(`ValidationError`가 안 남)하는 것까지 확인했다.
+
+      전체 509개 테스트 통과, 전체 커버리지 99%(`app/core/config.py`
+      100% 포함), `mypy app tests scripts` 클린. 정상 범위(양수) 설정의
+      동작은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+
+      (조사 중 `max_interview_questions`/`rag_top_k`/`rag_max_candidate_
+      chunks`/`rag_backfill_batch_size`도 함께 재검토했다 - 전부 0
+      이하에서 크래시나 전면 장애가 아니라 우아한 성능 저하로 이어져서
+      (면접연습이 첫 질문 뒤 바로 끝남, RAG 그라운딩이 빈 배열,
+      백필 job이 그날 아무 일도 안 함) 이번 라운드 범위에는 넣지
+      않았다.)
+

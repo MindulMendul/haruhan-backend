@@ -227,3 +227,20 @@ def test_settings_rejects_non_positive_max_quiz_source_length(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, max_quiz_source_length=bad_value)
     assert "MAX_QUIZ_SOURCE_LENGTH" in str(exc_info.value)
+
+
+def test_settings_accepts_positive_ws_idle_timeout_seconds():
+    settings = Settings(jwt_secret_key="a" * 32, ws_idle_timeout_seconds=1.0)
+    assert settings.ws_idle_timeout_seconds == 1.0
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_ws_idle_timeout_seconds(bad_value):
+    """학습챗/면접복기 WebSocket 스트리밍 라우트는 매 메시지 대기마다
+    asyncio.wait_for(..., timeout=ws_idle_timeout_seconds)를 쓴다. 0 이하면
+    asyncio.wait_for가 코루틴이 완료될 기회조차 주지 않고 즉시 TimeoutError를
+    내서, 클라이언트가 연결하자마자 메시지를 보내도 두 스트리밍 기능 전체가
+    시작 시점에는 전혀 티가 안 나는 상태로 매번 곧바로 끊기게 된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, ws_idle_timeout_seconds=bad_value)
+    assert "WS_IDLE_TIMEOUT_SECONDS" in str(exc_info.value)

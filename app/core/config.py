@@ -298,6 +298,27 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("ws_idle_timeout_seconds")
+    @classmethod
+    def _validate_ws_idle_timeout_seconds_is_positive(cls, value: float) -> float:
+        """학습챗/면접복기 WebSocket 스트리밍 라우트(routes/study.py의
+        stream_message, routes/interview_review.py의 stream_create_review)는
+        매 메시지 대기마다 `asyncio.wait_for(websocket.receive_json(),
+        timeout=ws_idle_timeout_seconds)`를 쓴다. 이 값이 0 이하면
+        `asyncio.wait_for`가 코루틴이 완료될 기회조차 주지 않고 즉시
+        `TimeoutError`를 낸다(직접 재현해 확인함) - 클라이언트가 연결하자마자
+        메시지를 보내도 첫 대기에서 곧바로 "idle timeout"으로 연결이 끊겨,
+        두 스트리밍 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로
+        계속 끊기게 된다. `Settings()` 생성 자체는 성공해 앱도 정상적으로
+        뜨므로, 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"WS_IDLE_TIMEOUT_SECONDS({value})는 0보다 커야 합니다 - 0 이하면 "
+                "asyncio.wait_for가 즉시 타임아웃되어, 연결하자마자 메시지를 보내도 "
+                "학습챗/면접복기 WebSocket 스트리밍이 매번 곧바로 끊깁니다."
+            )
+        return value
+
     @field_validator("max_concurrent_ws_connections")
     @classmethod
     def _validate_max_concurrent_ws_connections_is_positive(cls, value: int) -> int:
