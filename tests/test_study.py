@@ -47,6 +47,68 @@ def _auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_create_session_returns_401_when_account_deleted_during_creation(db_session_factory, monkeypatch):
+    """create_session()은 get_current_user 인증 확인과 이 INSERT 사이에(다른
+    create류 메서드들과 달리 AI 호출 없이 곧바로 이어지지만) 다른 요청이
+    UserService.delete_account()로 이 계정을 지워버리면(StudySession.user_id는
+    nullable=False FK) IntegrityError로 실패할 수 있다 - 143~146라운드가 고친
+    것과 같은 종류의 경쟁이다. StudySessionRepository.create가 실제 INSERT를
+    하기 "직전" 별도 세션에서 이 계정을 완전히 지우도록 만들어서 이 좁은
+    타이밍을 결정적으로 재현한다."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            class FakeOllamaService:
+                async def chat(self, messages, model):
+                    return "안 씀"
+
+                async def chat_stream(self, messages, model):
+                    yield "안 씀"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0, 0.0]
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            original_create = StudySessionRepository.create
+
+            async def _deleting_create(self, user_id, title, model):
+                async with db_session_factory() as session_b:
+                    users_b = UserRepository(session_b)
+                    target = await users_b.get_by_id(user_id)
+                    await users_b.delete(target)
+                    await session_b.commit()
+                return await original_create(self, user_id, title, model)
+
+            monkeypatch.setattr(StudySessionRepository, "create", _deleting_create)
+
+            try:
+                await service.create_session(user_id=user_id, title="세션", model="qwen2.5:3b")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+
+
 def test_create_and_list_sessions(client):
     token = _signup_and_get_token(client)
 

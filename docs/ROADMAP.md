@@ -4907,3 +4907,58 @@
       응답/기존 에러 형식은 그대로라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (147라운드)
+
+- [x] 171. `StudyService.create_session()`도 143~146라운드가 고친 것과
+      같은 "계정 삭제 경쟁"에 노출돼 있던 문제 해소 - 4라운드째 이어온
+      이 취약점 계열이 이제 실제로 소진됐는지 전수 재점검하다가 발견한
+      마지막 한 곳이다.
+
+      점검 결과 대부분은 이미 안전했다: `quiz_service.submit_answers`/
+      `interview_practice_service.submit_answer`/`complete_session`은
+      `get_for_user_locked`(`SELECT ... FOR UPDATE`)로 부모 행을 잠그고
+      있어, Postgres에서 `ON DELETE CASCADE`가 실제로는 그 잠긴 행을
+      지우는 `DELETE`이므로 우리 트랜잭션이 커밋할 때까지 막혀
+      경쟁이 성립하지 않는다(이번에 처음 명시적으로 확인한 사실).
+      `rag_service.index_content`는 원래도 실패를 통째로 삼키도록
+      설계돼 있어 무관하다. `user_service`의 `update_profile`/
+      `upgrade_guest`는 이미 보호돼 있다.
+
+      다만 `create_session()`만은 `IntegrityError`를 전혀 처리하지
+      않고 있었다 - `StudySession.user_id`는 `nullable=False,
+      ondelete=CASCADE` FK인데, `get_current_user` 인증 확인과 이
+      INSERT 사이(다른 create류 메서드들과 달리 사이에 AI 호출이 없어
+      매우 좁은 창)에 다른 요청이 `delete_account()`로 계정을 지우면
+      IntegrityError가 새어나간다. 이 파일의 형제 메서드(`send_message`/
+      `stream_message`의 `user_message` INSERT, 144라운드)와
+      `signup()`(그 자체로도 bcrypt 해싱만큼 좁은 창을 이미 방어 중)이
+      이미 지키고 있는 것과 같은 일관성을 위해, 창이 좁다는 이유로
+      건너뛰지 않고 막았다.
+
+      `app/services/study_service.py`에 146라운드와 동일한
+      `_ACCOUNT_GONE`(401,
+      `{"code": "invalid_token", "message": "Could not validate credentials"}`)
+      상수를 추가하고, `create_session()`의 생성+커밋을 `try/except
+      IntegrityError: rollback() + raise _ACCOUNT_GONE`으로 감쌌다.
+
+      `tests/test_study.py`에
+      `test_create_session_returns_401_when_account_deleted_during_creation`
+      을 추가했다 - 이 메서드는 AI 호출이 없어 기존 테스트들의 "가짜
+      Ollama가 응답 직전에 계정을 지운다" 기법을 못 쓰므로,
+      `StudySessionRepository.create`를 직접 패치해 실제 INSERT
+      호출 "직전" 별도 세션에서 계정을 지우도록 만들어 이 좁은
+      타이밍을 결정적으로 재현했다. `git stash`로
+      `app/services/study_service.py` 수정만 되돌리면 정확히
+      `IntegrityError`(FOREIGN KEY constraint failed)로 실패하는
+      것까지 확인했다.
+
+      전체 492개 테스트 통과, `app/services/study_service.py` 100%
+      커버리지, `mypy app tests scripts` 클린. `POST /study/sessions`의
+      정상 응답/기존 에러 형식은 그대로라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+
+      이것으로 143라운드에서 시작된 "check-then-act 중 참조 대상이
+      동시에 지워지면 나중 INSERT가 처리되지 않은 예외로 새어나간다"
+      취약점 계열은 전수 재점검을 통해 실질적으로 소진됐다고 판단한다
+      - 다음 라운드부터는 다른 영역을 조사한다.
+

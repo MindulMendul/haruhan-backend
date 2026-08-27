@@ -25,6 +25,16 @@ _SESSION_NOT_FOUND = HTTPException(
 _GENERATION_FAILED = HTTPException(
     status_code=status.HTTP_502_BAD_GATEWAY, detail="답변 생성에 실패했습니다. 다시 시도해주세요."
 )
+# get_current_user가 검증한 시점과 이 요청이 실제로 쓰는 시점 사이에 계정이
+# 지워지면(아래 create_session 참고) core/dependencies.py의 get_current_user가
+# "존재하지 않는 사용자"에 쓰는 것과 같은 코드/메시지로 응답한다 - 재시도하면
+# 그 의존성이 어차피 이 코드로 401을 낼 상황이라 클라이언트 입장에서 동일하게
+# 다뤄야 한다(docs/FRONTEND_INTEGRATION.md에 이미 문서화된 코드, 146라운드가
+# interview_practice_service/interview_review_service에 쓴 것과 같은 상수).
+_ACCOUNT_GONE = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_token", "message": "Could not validate credentials"},
+)
 
 _GROUNDING_HEADER = (
     "[참고자료] 섹션은 이 사용자가 과거에 나눈 학습 대화나 면접 복기에서 가져온 내용입니다. "
@@ -54,8 +64,19 @@ class StudyService:
         self._settings = settings
 
     async def create_session(self, user_id: uuid.UUID, title: str, model: str) -> StudySession:
-        study_session = await self._sessions.create(user_id=user_id, title=title, model=model)
-        await self._session.commit()
+        # get_current_user 인증 확인과 여기 사이에 다른 요청이
+        # UserService.delete_account()로 이 계정을 지워버리면(StudySession.user_id는
+        # nullable=False FK), 이 INSERT가 IntegrityError로 실패한다 - 143~146라운드가
+        # 고친 것과 같은 종류의 경쟁이다(이 메서드는 그 사이 AI 호출이 없어 창이
+        # 훨씬 좁지만, signup()의 bcrypt 해싱만큼 좁은 창도 이미 같은 이유로
+        # 방어하고 있어 이 파일의 다른 create류 메서드들과의 일관성을 위해 막는다).
+        # 잡지 않으면 처리되지 않은 예외(500)로 새어나간다.
+        try:
+            study_session = await self._sessions.create(user_id=user_id, title=title, model=model)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
         return study_session
 
     async def list_sessions(
