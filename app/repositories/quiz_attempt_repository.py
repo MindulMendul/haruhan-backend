@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.quiz_answer import QuizAnswer
 from app.db.models.quiz_attempt import QuizAttempt
+from app.db.models.quiz_question import QuizQuestion
 
 
 class QuizAttemptRepository:
@@ -85,8 +86,19 @@ class QuizAnswerRepository:
         return answer
 
     async def list_for_attempt(self, attempt_id: uuid.UUID) -> list[QuizAnswer]:
+        """quiz_service.py의 submit_answers()는 클라이언트가 보낸 answers 배열
+        순서 그대로 QuizAnswer 행을 INSERT한다 - 요청 스키마(QuizSubmitRequest)는
+        클라이언트가 문항 순서(order_index)대로 제출하도록 강제하지 않으므로,
+        이 순서는 실제로는 임의다. ORDER BY 없이 조회하면 결과 순서가 SQL
+        표준상 정의되어 있지 않아, 문항을 순서 안 맞게 제출한 클라이언트의
+        경우 GET /quizzes/{id}로 보는 퀴즈 문항 순서(order_index)와
+        POST /submit·GET /result의 답안 순서가 서로 어긋나 보일 수 있었다.
+        QuizQuestion과 조인해 그 문항의 order_index로 정렬한다."""
         result = await self._session.execute(
-            select(QuizAnswer).where(QuizAnswer.attempt_id == attempt_id)
+            select(QuizAnswer)
+            .join(QuizQuestion, QuizAnswer.question_id == QuizQuestion.id)
+            .where(QuizAnswer.attempt_id == attempt_id)
+            .order_by(QuizQuestion.order_index)
         )
         return list(result.scalars().all())
 

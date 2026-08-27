@@ -514,6 +514,53 @@ def test_submit_and_get_result(client):
     assert result.json()["score"] == 1
 
 
+def test_submit_answers_out_of_order_returns_result_in_question_order(client):
+    """요청 스키마(QuizSubmitRequest)는 클라이언트가 문항 순서(order_index)대로
+    답을 제출하도록 강제하지 않는다 - 문항을 건너뛰며 답하는 UI나 배열 순서를
+    안 지키는 클라이언트라면 흔히 생기는 상황이다. POST /submit의 즉시 응답과
+    이후 GET /result 조회 둘 다, 실제 저장 순서나 클라이언트가 보낸 순서가
+    아니라 GET /quizzes/{id}가 보여주는 문항 순서(order_index) 그대로 answers를
+    돌려주는지 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/quizzes",
+        json={"title": "순서 뒤바뀐 제출 테스트", "source_text": "내용"},
+        headers=_auth_headers(token),
+    )
+    quiz_id = create.json()["id"]
+
+    detail = client.get(f"/api/v1/quizzes/{quiz_id}", headers=_auth_headers(token))
+    questions = detail.json()["questions"]
+    first_question_id = questions[0]["id"]
+    second_question_id = questions[1]["id"]
+
+    # 두 번째 문항을 먼저, 첫 번째 문항을 나중에 보낸다 - order_index와 반대 순서.
+    answers = [
+        {"question_id": second_question_id, "selected_index": 0},
+        {"question_id": first_question_id, "selected_index": 1},
+    ]
+    submit = client.post(
+        f"/api/v1/quizzes/{quiz_id}/submit",
+        json={"answers": answers},
+        headers=_auth_headers(token),
+    )
+    assert submit.status_code == 200
+    submit_body = submit.json()
+    assert [a["question_id"] for a in submit_body["answers"]] == [
+        first_question_id,
+        second_question_id,
+    ]
+
+    result = client.get(f"/api/v1/quizzes/{quiz_id}/result", headers=_auth_headers(token))
+    assert result.status_code == 200
+    result_body = result.json()
+    assert [a["question_id"] for a in result_body["answers"]] == [
+        first_question_id,
+        second_question_id,
+    ]
+
+
 def test_resubmitting_identical_answers_quickly_returns_same_attempt(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

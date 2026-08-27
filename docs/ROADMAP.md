@@ -4168,3 +4168,46 @@
       기존 컬럼(`topic`)을 수정하는 새 API 경로 추가라 마이그레이션은
       필요 없었다.
 
+## 백로그 (130라운드)
+
+- [x] 154. 퀴즈 제출 응답(`POST /quizzes/{id}/submit`)과 결과 조회
+      (`GET /quizzes/{id}/result`)의 `answers` 배열이 실제 문항 순서
+      (`order_index`)와 다르게 나올 수 있던 문제 수정. 요청 스키마
+      (`QuizSubmitRequest.answers`)는 클라이언트가 문항 순서대로 답을
+      제출하도록 강제하지 않는데, `quiz_service.submit_answers`는 채점
+      결과(`graded`)를 클라이언트가 보낸 `answers` 순서 그대로 만들고,
+      `QuizAnswer` 행도 그 순서 그대로 INSERT했다 - `GET /quizzes/{id}`
+      가 보여주는 문항 순서와 다르게 답을 제출하는 클라이언트(문항을
+      건너뛰며 답하는 UI, 배열 순서를 안 지키는 클라이언트 등)라면
+      실제로 마주치는 상황이다. `quiz_attempt_repository.py`의
+      `QuizAnswerRepository.list_for_attempt`도 `ORDER BY` 자체가 아예
+      없어서(94/116라운드가 다룬 "2차 정렬 키 누락"과는 다른, 정렬
+      자체가 없는 별개의 문제), `GET /result`가 다시 조회할 때도 SQL
+      표준상 정의되지 않은 순서로 나왔다 - 즉시 응답(`POST /submit`)과
+      나중 조회(`GET /result`) 둘 다에서 문항 표시 순서와 답안 순서가
+      어긋나 보일 수 있었다.
+
+      두 곳을 고쳤다: (1) `submit_answers`의 채점 루프를 `answers`(클라
+      이언트 순서)가 아니라 `questions`(`list_for_quiz`가 이미
+      `order_index`로 정렬해서 줌) 순서로 순회하도록 바꿔, 클라이언트가
+      보낸 순서와 무관하게 채점 결과·INSERT 순서 모두 문항 순서를
+      따르게 했다. (2) `QuizAnswerRepository.list_for_attempt`가
+      `QuizQuestion`과 조인해 그 `order_index`로 정렬하도록 고쳐,
+      `GET /result`(및 같은 메서드를 쓰는 `_find_recent_duplicate_attempt`
+      의 중복 제출 캐시 응답 경로)도 항상 문항 순서로 나오게 했다 -
+      리포지토리 레벨에서 한 번 고쳐 두 호출부를 동시에 해결했다.
+
+      `tests/test_quiz.py`에
+      `test_submit_answers_out_of_order_returns_result_in_question_order`
+      를 추가해, 두 번째 문항을 먼저·첫 번째 문항을 나중에 제출해도
+      `POST /submit` 응답과 `GET /result` 조회 둘 다 `answers` 배열이
+      실제 문항 순서(첫 번째, 두 번째)로 나오는지 확인했다. `git stash`
+      로 `quiz_service.py`/`quiz_attempt_repository.py` 수정만
+      되돌리면 정확히 실패(두 응답 모두 문항 순서가 아니라 제출 순서
+      그대로 나옴)하는 것까지 확인했다. 전체 450개 테스트 통과, 전체
+      커버리지 99%(`quiz_service.py`/`quiz_attempt_repository.py` 둘
+      다 100% 포함), `mypy app tests scripts` 클린. 채점 결과(점수/정답
+      여부)나 응답 스키마 자체는 그대로고 배열 순서만 바뀐 것이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
+      없었다.
+

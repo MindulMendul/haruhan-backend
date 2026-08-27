@@ -319,10 +319,17 @@ class QuizService:
         if duplicate is not None:
             return duplicate
 
+        # 채점 결과(graded)를 answers(클라이언트가 보낸 순서 그대로 - 요청 스키마는
+        # 문항 순서(order_index)대로 제출하도록 강제하지 않는다)가 아니라 questions
+        # (list_for_quiz가 이미 order_index로 정렬해서 줌) 순서로 만든다 - 안 그러면
+        # 문항을 순서 안 맞게 제출한 클라이언트가 받는 이 응답과, QuizAnswer가 그대로
+        # 그 순서로 INSERT돼 나중에 GET /result에서 다시 조회할 때의 순서가, 둘 다
+        # GET /quizzes/{id}가 보여주는 실제 문항 순서와 어긋나 보일 수 있었다.
+        selected_index_by_question_id = dict(answers)
         graded: list[tuple[QuizQuestion, int, bool]] = []
         score = 0
-        for question_id, selected_index in answers:
-            question = questions_by_id[question_id]
+        for question in questions:
+            selected_index = selected_index_by_question_id[question.id]
             is_correct = question.choices[selected_index] == question.correct_answer
             if is_correct:
                 score += 1
