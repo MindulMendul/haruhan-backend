@@ -5068,3 +5068,53 @@
       문서화된 502로 바뀜) `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
       스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (150라운드)
+
+- [x] 174. `OllamaService`의 모든 메서드(`generate`/`chat`/`chat_stream`/
+      `embed`/`list_models`/`generate_json`)가 Ollama 응답의 값이
+      "키 자체가 없음"이 아니라 "키는 있는데 값이 명시적 JSON
+      `null`"인 경우를 놓치고 있던 문제 해소 - 152/172/173라운드가
+      쌓아온 "AI가 빈 텍스트를 뱉어도 예외 없이 조용히 넘어간다"는
+      전제를 한 단계 아래(HTTP 응답 파싱 자체)에서 다시 점검하다가
+      발견했다.
+
+      `dict.get(key, default)`는 key가 아예 없을 때만 default를 쓴다 -
+      `{"response": null}`처럼 key는 있는데 값이 JSON `null`이면 그대로
+      `None`이 반환된다(`response.json().get("response", "")` 같은
+      패턴이 이 파일의 6곳 전부에 있었음). 이 서비스의 모든 메서드는
+      반환 타입을 `str`/`list`로 선언해뒀고, 152/172/173라운드가 그
+      선언을 믿고 만든 재시도+공백 검증 로직(`.strip()`)들은 전부
+      "항상 str이 온다"는 전제 위에 있다 - `None`이 새어나가면
+      `AttributeError`가 재시도 없이 바로 터진다. 직접 재현해 확인:
+      `generate()`가 `{"response": None}`을 받으면 `None`을 반환하고,
+      호출부의 `.strip()`이 곧바로 `AttributeError`로 죽는다.
+
+      영향은 호출부마다 달랐다 - `interview_practice_service.py`의 세
+      재시도 헬퍼는 재시도 없이 바로 처리되지 않은 예외(500)로 죽고(502가
+      아님), `study_service.py`의 `send_message`/`stream_message`는
+      `reply=None`이 `StudyMessage.content`(`nullable=False`)에 그대로
+      들어가 `IntegrityError`가 나는데, 168라운드가 세션 삭제 경쟁용으로
+      추가해둔 `except IntegrityError: raise _SESSION_NOT_FOUND`가 이걸
+      엉뚱하게 "세션 없음"(404)으로 잘못 보고하고, `interview_review_
+      service._generate_feedback`은 `ai_feedback`이 nullable이라 아예
+      크래시 없이 `NULL`이 조용히 저장되는 데이터 품질 문제였다.
+
+      `app/services/ollama_service.py`의 여섯 곳 모두
+      `.get(key) or default` 형태로 바꿔, 값이 없을 때뿐 아니라 명시적
+      `null`일 때도 항상 선언된 타입(`str`/`list`)을 반환하도록 했다
+      (`chat_stream`의 `chunk.get("message") or {}`도 같은 이유).
+
+      `tests/test_ollama_service.py`에 여섯 메서드 각각에 대해
+      `..._is_explicit_null` 테스트를 추가했다 - `chat()`은 `content`가
+      null인 경우와 `message` 자체가 null인 경우 둘 다, `chat_stream()`은
+      두 청크(`content: null`, `message: null`) 모두에서 아무것도
+      yield하지 않는지 확인한다. `git stash`로
+      `app/services/ollama_service.py` 수정만 되돌리면 일곱 테스트
+      전부 정확히 `AttributeError`로 실패하는 것까지 확인했다.
+
+      전체 502개 테스트 통과, `app/services/ollama_service.py` 100%
+      커버리지, `mypy app tests scripts` 클린. 정상 응답(키가 있고
+      값이 있는 경우)의 동작은 완전히 그대로라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+

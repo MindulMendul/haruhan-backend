@@ -223,3 +223,99 @@ def test_chat_stream_raises_ollama_service_error_on_malformed_json_line(monkeypa
 
     with pytest.raises(OllamaServiceError):
         asyncio.run(_drain())
+
+
+# dict.get(key, default)는 key가 아예 없을 때만 default를 쓴다 - Ollama가(혹은
+# 앞단 프록시가) `{"response": null}`처럼 key는 있는데 값이 JSON null인 응답을
+# 주면 그대로 None이 반환되는 버그였다. 이 서비스의 반환 타입은 전부 str/list로
+# 선언돼 있고 호출부(interview_practice_service.py 등)는 그 선언을 믿고
+# `.strip()`을 곧바로 호출하므로, None이 새어나가면 AttributeError로 재시도 없이
+# 그대로 죽어버린다.
+def test_generate_returns_empty_string_when_response_is_explicit_null(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"response": None})
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    result = asyncio.run(service.generate(prompt="안녕", model="qwen2.5:3b"))
+    assert result == ""
+
+
+def test_chat_returns_empty_string_when_content_is_explicit_null(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": None}})
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    result = asyncio.run(
+        service.chat(messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b")
+    )
+    assert result == ""
+
+
+def test_chat_returns_empty_string_when_message_itself_is_explicit_null(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"message": None})
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    result = asyncio.run(
+        service.chat(messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b")
+    )
+    assert result == ""
+
+
+def test_embed_returns_empty_list_when_embedding_is_explicit_null(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"embedding": None})
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    result = asyncio.run(service.embed(text="텍스트", model="nomic-embed-text"))
+    assert result == []
+
+
+def test_generate_json_returns_empty_string_when_response_is_explicit_null(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"response": None})
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    result = asyncio.run(
+        service.generate_json(prompt="프롬프트", model="qwen2.5:3b", schema={"type": "object"})
+    )
+    assert result == ""
+
+
+def test_list_models_returns_empty_list_when_models_is_explicit_null(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"models": None})
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+    result = asyncio.run(service.list_models())
+    assert result == []
+
+
+def test_chat_stream_yields_nothing_when_content_is_explicit_null(monkeypatch):
+    lines = [
+        json.dumps({"message": {"content": None}, "done": False}),
+        json.dumps({"message": None, "done": True}),
+    ]
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+
+    def handler(request):
+        return httpx.Response(200, content=body)
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+
+    async def _collect():
+        return [
+            chunk
+            async for chunk in service.chat_stream(
+                messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b"
+            )
+        ]
+
+    assert asyncio.run(_collect()) == []

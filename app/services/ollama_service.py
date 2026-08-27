@@ -31,7 +31,16 @@ class OllamaService:
                 json={"model": model, "prompt": prompt, "stream": False},
             )
             response.raise_for_status()
-            return response.json().get("response", "")
+            # dict.get(key, default)는 key가 아예 없을 때만 default를 쓴다 - Ollama가
+            # (혹은 앞단 프록시가) `{"response": null}`처럼 key는 있는데 값이 JSON
+            # null인 응답을 주면 그대로 None이 반환된다. 이 메서드의 반환 타입은
+            # `str`로 선언돼 있고 호출부(interview_practice_service.py 등)는
+            # `.strip()`으로 공백 여부만 확인하지 None 여부는 확인하지 않아
+            # (rounds 172/173이 만든 재시도+공백 검증 전제 자체가 "항상 str"이므로),
+            # None이 그대로 새어나가면 AttributeError로 재시도 없이 바로 죽는다 -
+            # `or ""`로 None도 빈 문자열로 접어서 이 메서드가 항상 실제로 `str`을
+            # 반환한다는 반환 타입 선언의 약속을 지킨다.
+            return response.json().get("response") or ""
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             # HTTP 상태 에러뿐 아니라, 200을 받았어도 본문이 JSON이 아닌 경우
             # (Ollama 앞단 프록시 오작동, 응답이 중간에 끊기는 경우 등)도 같은
@@ -49,7 +58,9 @@ class OllamaService:
                 json={"model": model, "messages": messages, "stream": False},
             )
             response.raise_for_status()
-            return response.json().get("message", {}).get("content", "")
+            # generate()와 같은 이유(위 주석 참고) - message나 message.content가
+            # 명시적 null이어도 None이 아니라 항상 str을 반환하도록 접는다.
+            return (response.json().get("message") or {}).get("content") or ""
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             logger.error("Ollama API 호출 에러: %s", exc)
             raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
@@ -71,7 +82,7 @@ class OllamaService:
                     if not line:
                         continue
                     chunk = json.loads(line)
-                    content = chunk.get("message", {}).get("content", "")
+                    content = (chunk.get("message") or {}).get("content") or ""
                     if content:
                         yield content
                     if chunk.get("done"):
@@ -88,7 +99,9 @@ class OllamaService:
                 json={"model": model, "prompt": text},
             )
             response.raise_for_status()
-            return response.json().get("embedding", [])
+            # generate()와 같은 이유(그 메서드의 주석 참고) - embedding이 명시적
+            # null이어도 None이 아니라 항상 list를 반환하도록 접는다.
+            return response.json().get("embedding") or []
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             logger.error("Ollama API 호출 에러: %s", exc)
             raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
@@ -98,7 +111,9 @@ class OllamaService:
         try:
             response = await self._client.get(f"{self._base_url}/api/tags")
             response.raise_for_status()
-            return response.json().get("models", [])
+            # generate()와 같은 이유(그 메서드의 주석 참고) - models가 명시적
+            # null이어도 None이 아니라 항상 list를 반환하도록 접는다.
+            return response.json().get("models") or []
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             logger.error("Ollama API 호출 에러: %s", exc)
             raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
@@ -115,7 +130,9 @@ class OllamaService:
                 json={"model": model, "prompt": prompt, "stream": False, "format": schema},
             )
             response.raise_for_status()
-            return response.json().get("response", "")
+            # generate()와 같은 이유(그 메서드의 주석 참고) - response가 명시적
+            # null이어도 None이 아니라 항상 str을 반환하도록 접는다.
+            return response.json().get("response") or ""
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             logger.error("Ollama API 호출 에러: %s", exc)
             raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
