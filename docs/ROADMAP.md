@@ -4255,3 +4255,33 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
       없었다.
 
+## 백로그 (132라운드)
+
+- [x] 156. CI 워크플로의 mypy 스텝이 `scripts/` 디렉터리를 한 번도 타입
+      체크하지 않고 있던 문제 수정. 119번 라운드가
+      `scripts/backfill_knowledge_chunks.py`에 새 의존성(PyYAML)을
+      추가하면서 겪었던 실제 사고(로컬에서 `mypy app`만 돌려 통과를
+      확인했는데, CI가 실제로 돌리는 명령은 그보다 넓어서 로컬에서는
+      안 걸리던 오류가 났던 일)를 계기로 "앞으로 CI와 정확히 같은
+      `mypy app tests scripts`를 로컬에서도 돌린다"는 검증 습관을 그
+      라운드 이후 계속 지켜왔는데, 정작 CI 워크플로
+      (`.github/workflows/ci.yml`) 자체는 여전히 `mypy app tests`만
+      실행하고 있었다 - `git log`로 이 줄이 9번 라운드 이후 한 번도
+      바뀐 적이 없다는 것까지 확인했다. 즉 `scripts/`의 타입 회귀는
+      로컬에서 그 습관을 실제로 지켰을 때만 잡히고, CI 자체는 전혀
+      못 잡는 사각지대였다 - 113~120라운드가 CI 자체를 집중적으로
+      다뤘는데도 놓친, 이번에 새로 발견한 인스턴스다.
+
+      `.github/workflows/ci.yml`의 mypy 스텝을 `mypy app tests scripts`
+      로 바꿨다(로컬에서 클린한 것과 동일하게 확인). `tests/
+      test_ci_workflow.py`에 `test_ci_type_checks_scripts_directory`를
+      추가해 워크플로 파일에 그 정확한 명령 문자열이 있는지 확인했다 -
+      113/114라운드가 `docker-compose.yml`/`Caddyfile` 검증 스텝이
+      조용히 빠지는 회귀를 막기 위해 이미 같은 파일에 쓴 것과 같은
+      텍스트 검증 패턴이다. `git stash`로 `ci.yml` 수정만 되돌리면
+      정확히 실패하는 것까지 확인했다. 전체 456개 테스트 통과, 전체
+      커버리지 99%, `mypy app tests scripts` 클린(이제 CI가 실제로
+      돌리는 것과 정확히 같은 명령). 순수 CI 설정 변경이라 애플리케이션
+      코드/API 응답 형태에 영향이 없어 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, 마이그레이션도 필요 없었다.
+
