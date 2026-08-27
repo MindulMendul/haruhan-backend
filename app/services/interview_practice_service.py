@@ -145,12 +145,7 @@ class InterviewPracticeService:
         relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=topic)
         grounding = _build_grounding_section(relevant_chunks)
 
-        try:
-            first_question = await self._ollama.generate(
-                prompt=_build_first_question_prompt(topic, grounding), model=model
-            )
-        except OllamaServiceError as exc:
-            raise _GENERATION_FAILED from exc
+        first_question = await self._generate_first_question(topic, grounding, model)
 
         # get_current_user 인증 확인과 여기 사이에(특히 위 RAG 조회 + Ollama 호출로
         # 늘어난 시간차 동안) 다른 요청이 UserService.delete_account()로 이 계정을
@@ -207,6 +202,35 @@ class InterviewPracticeService:
         await self._rag.forget_content_bulk(
             source_type="interview_practice_turn", source_ids=[turn.id for turn in turns]
         )
+
+    async def _generate_first_question(self, topic: str, grounding: str, model: str) -> str:
+        """`generate()`(JSON 스키마를 강제하지 않는 자유 텍스트 생성)는 Ollama가
+        200을 응답해도 본문에 `response` 키가 없거나 모델이 빈/공백 텍스트만
+        뱉으면 `OllamaServiceError`를 던지지 않고 그냥 빈 문자열을 돌려준다
+        (ollama_service.py의 `generate()` 참고) - 재시도 없이 그대로 저장하면
+        새로 만든 세션의 첫 턴(`InterviewPracticeTurn.question`, order_index=0)이
+        빈 질문이 되어, 사용자가 답할 내용이 아예 없는 채로 세션이 시작부터
+        조용히 멈춰버린다. `_generate_feedback_and_next_question`이 같은 증상의
+        `next_question`을 재시도+공백 검증으로 막고 있는 것과 같은 이유지만,
+        이쪽은 세션의 *첫* 턴이라 한 턴 더 들어간 뒤가 아니라 시작부터 막혀
+        영향이 더 크다."""
+        for attempt in range(1, _MAX_FEEDBACK_GENERATION_ATTEMPTS + 1):
+            try:
+                first_question = await self._ollama.generate(
+                    prompt=_build_first_question_prompt(topic, grounding), model=model
+                )
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+
+            if first_question.strip():
+                return first_question
+            logger.warning(
+                "면접 연습 첫 질문 생성 검증 실패 (시도 %d/%d): 공백뿐임",
+                attempt,
+                _MAX_FEEDBACK_GENERATION_ATTEMPTS,
+            )
+
+        raise _GENERATION_FAILED
 
     async def _generate_feedback_and_next_question(
         self, prompt: str, model: str

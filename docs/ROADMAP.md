@@ -4962,3 +4962,54 @@
       취약점 계열은 전수 재점검을 통해 실질적으로 소진됐다고 판단한다
       - 다음 라운드부터는 다른 영역을 조사한다.
 
+## 백로그 (148라운드)
+
+- [x] 172. `InterviewPracticeService.create_session()`이 AI가 뱉은 첫
+      질문이 공백뿐이어도 그대로 세션의 첫 턴으로 저장해버리던 문제
+      해소 - 지시대로 계정 삭제 경쟁 계열을 벗어나 다른 영역을 조사한
+      결과, 152라운드가 고친 것과 판박이인 증상을 그 라운드가 놓친
+      한 곳에서 찾았다.
+
+      `OllamaService.generate()`(JSON 스키마를 강제하지 않는 자유 텍스트
+      생성)는 응답 본문에 `response` 키가 없거나 모델이 빈/공백 텍스트만
+      내보내도 `OllamaServiceError`를 던지지 않고 그냥 빈 문자열을
+      돌려준다. `create_session()`은 이 반환값을 검증/재시도 없이 곧바로
+      `InterviewPracticeTurn.question`(order_index=0, 세션의 *첫* 턴)으로
+      저장하고 있었다 - 152라운드가 `_generate_feedback_and_next_question`의
+      `next_question`에 이미 고친 것과 완전히 같은 증상이지만, 그 라운드는
+      스스로 "`generate_json()`을 쓰는 두 호출 지점"으로 범위를 명시했고
+      `create_session`은 `generate()`(JSON 아님)를 쓰는 별개 호출부라
+      그 범위 밖에 있었다. 영향은 오히려 더 크다 - 한 턴 답한 뒤가 아니라
+      세션이 시작부터 빈 질문으로 조용히 멈춘다.
+
+      `app/services/interview_practice_service.py`에
+      `_generate_first_question()`을 새로 추가해(기존
+      `_MAX_FEEDBACK_GENERATION_ATTEMPTS = 2`를 재사용) `_generate_feedback_
+      and_next_question`과 같은 형태로 재시도+공백 검증을 하도록 하고,
+      `create_session()`이 이를 쓰도록 바꿨다.
+
+      `tests/test_interview_practice.py`에
+      `AlwaysBlankFirstQuestionOllamaService`(기존
+      `AlwaysBlankNextQuestionOllamaService`와 같은 패턴)와
+      `test_create_session_returns_502_when_first_question_is_blank`를
+      추가했다 - 재시도 2회를 소진한 뒤 502로 실패 처리되는지, `generate()`가
+      정확히 2번 불렸는지 확인한다. `git stash`로
+      `app/services/interview_practice_service.py` 수정만 되돌리면 이
+      테스트가 정확히 실패(201로 성공 처리되며 빈 질문이 그대로 저장됨)
+      하는 것까지 확인했다.
+
+      전체 493개 테스트 통과, `app/services/interview_practice_service.py`
+      100% 커버리지, `mypy app tests scripts` 클린. `POST /interview/
+      practice-sessions`의 정상 응답 형식은 그대로라(실패 시에만 502로
+      바뀜, 이미 문서화된 코드) `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+
+      (조사 중 같은 성격의 "공백 텍스트가 검증 없이 그대로 저장됨" 패턴이
+      `complete_session`의 최종 피드백(`interview_practice_service.py`)과
+      `interview_review_service._generate_feedback`(면접복기 생성/수정)
+      에도 남아있는 것을 발견했다 - 다만 이들은 이미 성공한 상호작용에
+      부가되는 정보성 텍스트라 다음 단계를 막는 차단 요소가 아니어서
+      (study_service의 채팅 답변처럼 지금까지 감수해온 위험과 비슷한
+      성격), 이번 라운드 범위에는 넣지 않고 다음 라운드를 위한 메모로
+      남겨둔다.)
+
