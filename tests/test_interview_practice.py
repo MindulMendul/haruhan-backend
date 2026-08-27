@@ -117,6 +117,30 @@ class AlwaysBlankNextQuestionOllamaService:
         return [1.0, 0.0, 0.0]
 
 
+class AlwaysBlankChatOllamaService:
+    """chat()이 매번 빈 문자열을 뱉는다 - submit_answer()의 마지막 문항 피드백이나
+    complete_session()의 총평에 그대로 저장되면, 둘 다 한 번 기록되면 다시
+    되돌릴 방법이 없는 상태(마지막 문항은 mark_answered_if_pending()의 단발성
+    CAS로, 세션 총평은 status를 completed로 바꾸는 동시에)로 조용히 굳어버릴
+    수 있었다."""
+
+    def __init__(self):
+        self.chat_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        return json.dumps({"feedback": "좋은 답변입니다.", "next_question": "다음 면접 질문입니다."})
+
+    async def chat(self, messages, model):
+        self.chat_call_count += 1
+        return "   "
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
 class RecoversOnRetryOllamaService:
     """generate_json() 첫 호출은 깨진 JSON을 뱉고, 두 번째 호출부터는 정상
     응답을 준다(tests/test_quiz.py의 RecoversOnRetryOllamaService와 같은
@@ -723,6 +747,40 @@ def test_submit_answer_at_final_turn_ai_failure_returns_502(client, monkeypatch)
     assert response.status_code == 502
 
 
+def test_submit_answer_at_final_turn_returns_502_when_feedback_is_blank(client, monkeypatch):
+    """공백뿐인 마지막 문항 피드백이 mark_answered_if_pending()으로 그대로
+    기록되지 않고(한 번 기록되면 되돌릴 방법이 없는 단발성 CAS), 재시도(2회)까지
+    소진한 뒤 502로 실패 처리되는지 확인한다. 이 턴이 여전히 미답변 상태로
+    남아 있어(=CAS가 아예 호출되지 않아) 나중에 다시 제출할 수 있어야 한다."""
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "마지막 답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+    assert fake.chat_call_count == 2
+
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    last_turn = detail.json()["turns"][-1]
+    assert last_turn["answer"] is None
+    assert last_turn["feedback"] is None
+
+
 def test_complete_session_404_for_nonexistent_session(client):
     token = _signup_and_get_token(client)
     response = client.post(
@@ -752,6 +810,40 @@ def test_complete_session_ai_failure_returns_502(client):
         f"/api/v1/interview/practice-sessions/{session_id}/complete", headers=_auth_headers(token)
     )
     assert response.status_code == 502
+
+
+def test_complete_session_returns_502_when_overall_feedback_is_blank(client):
+    """공백뿐인 총평이 status를 completed로 바꾸며 그대로 저장되지 않고,
+    재시도(2회)까지 소진한 뒤 502로 실패 처리되는지 확인한다. complete_session()
+    자신도 completed 세션을 다시 안 건드리므로(_ALREADY_FINISHED), 세션이
+    여전히 in_progress로 남아 있어야 나중에 다시 종료를 시도할 수 있다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/complete", headers=_auth_headers(token)
+    )
+    assert response.status_code == 502
+    assert fake.chat_call_count == 2
+
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert detail.json()["status"] == "in_progress"
+    assert detail.json()["overall_feedback"] is None
 
 
 def test_complete_session_generates_overall_feedback(client):

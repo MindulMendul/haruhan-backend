@@ -232,6 +232,34 @@ class InterviewPracticeService:
 
         raise _GENERATION_FAILED
 
+    async def _generate_feedback_text(self, prompt: str, model: str) -> str:
+        """`chat()`도 `generate()`와 같은 이유(ollama_service.py 참고)로 빈/공백
+        텍스트를 예외 없이 그냥 돌려줄 수 있다. 이 헬퍼를 쓰는 두 호출부
+        (submit_answer의 마지막 문항 피드백, complete_session의 총평)는 둘 다
+        한 번 기록되면 다시 되돌릴 방법이 없는 종료 상태를 만든다 - 마지막
+        문항 피드백은 mark_answered_if_pending()의 `WHERE answer IS NULL` CAS로
+        한 번만 기록되는 단발성 UPDATE이고(재제출 엔드포인트 없음), 총평은
+        기록과 동시에 status를 completed로 바꾸는데 complete_session() 자신도
+        포함해 어떤 경로도 completed 세션을 다시 건드리지 않는다. 그래서
+        `_generate_first_question`과 같은 이유로 재시도+공백 검증이 필요하다."""
+        for attempt in range(1, _MAX_FEEDBACK_GENERATION_ATTEMPTS + 1):
+            try:
+                feedback_text = await self._ollama.chat(
+                    messages=[{"role": "user", "content": prompt}], model=model
+                )
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+
+            if feedback_text.strip():
+                return feedback_text
+            logger.warning(
+                "면접 연습 피드백 생성 검증 실패 (시도 %d/%d): 공백뿐임",
+                attempt,
+                _MAX_FEEDBACK_GENERATION_ATTEMPTS,
+            )
+
+        raise _GENERATION_FAILED
+
     async def _generate_feedback_and_next_question(
         self, prompt: str, model: str
     ) -> _FeedbackWithNextQuestion:
@@ -351,12 +379,7 @@ class InterviewPracticeService:
             )
         else:
             prompt = _build_final_feedback_prompt(practice_session.topic, current_turn.question, answer, grounding)
-            try:
-                feedback = await self._ollama.chat(
-                    messages=[{"role": "user", "content": prompt}], model=practice_session.model
-                )
-            except OllamaServiceError as exc:
-                raise _GENERATION_FAILED from exc
+            feedback = await self._generate_feedback_text(prompt, practice_session.model)
 
             if not await self._turns.mark_answered_if_pending(current_turn.id, answer, feedback):
                 raise _NO_PENDING_QUESTION
@@ -400,12 +423,7 @@ class InterviewPracticeService:
         prompt = _build_overall_feedback_prompt(
             practice_session.topic, [_as_answered_qa(t) for t in answered_turns], grounding
         )
-        try:
-            overall_feedback = await self._ollama.chat(
-                messages=[{"role": "user", "content": prompt}], model=practice_session.model
-            )
-        except OllamaServiceError as exc:
-            raise _GENERATION_FAILED from exc
+        overall_feedback = await self._generate_feedback_text(prompt, practice_session.model)
 
         practice_session.status = "completed"
         practice_session.overall_feedback = overall_feedback

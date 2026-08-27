@@ -5013,3 +5013,58 @@
       성격), 이번 라운드 범위에는 넣지 않고 다음 라운드를 위한 메모로
       남겨둔다.)
 
+## 백로그 (149라운드)
+
+- [x] 173. 148라운드가 메모로 남긴 후보 셋(`submit_answer`의 마지막
+      문항 피드백, `complete_session`의 총평, `interview_review_
+      service._generate_feedback`) 중 두 곳을 재조사해 실제로
+      고쳤다 - "이미 성공한 상호작용에 부가되는 정보성 텍스트"라는
+      148라운드의 판단이 맞는지 회수 가능성(recoverability) 관점에서
+      다시 검증했다.
+
+      `OllamaService.chat()`도 `generate()`와 같은 이유로 응답에
+      `message.content`가 없거나 모델이 빈 텍스트만 내보내도 예외 없이
+      빈 문자열을 돌려준다(`ollama_service.py:44-55`, 직접 확인). 세
+      곳 모두 이 위험에 노출돼 있었지만, 회수 가능성은 서로 달랐다:
+      - `interview_review_service._generate_feedback`(면접복기
+        `ai_feedback`)은 `update_review()`가 content가 바뀔 때마다
+        다시 생성하는 정상 경로가 이미 있어, 사용자가 (무의미한 수정
+        하나로도) 스스로 재생성할 수 있다 - 148라운드의 판단이 맞아
+        이번에도 그대로 둔다.
+      - `submit_answer`의 마지막 문항 피드백은
+        `mark_answered_if_pending()`의 `WHERE answer IS NULL` CAS로
+        한 번만 기록되는 단발성 UPDATE라 재제출 엔드포인트가 없고,
+        `complete_session`의 총평은 기록과 동시에 `status`를
+        `completed`로 바꾸는데 `complete_session` 자신을 포함해 그
+        상태를 다시 건드리는 경로가 전혀 없다 - 둘 다 "정보성"이
+        아니라 한 번 빈 채로 굳으면 사용자도 시스템도 영원히 되돌릴
+        방법이 없는 종료 상태였다. 148/152라운드가 이미 확립한
+        재시도+공백 검증 기준(recoverability가 없으면 고친다)에
+        따라 이 둘은 판단을 뒤집어 고쳤다.
+
+      `app/services/interview_practice_service.py`에
+      `_generate_feedback_text()`를 새로 추가해(기존
+      `_MAX_FEEDBACK_GENERATION_ATTEMPTS = 2`를 재사용) `_generate_first_
+      question`/`_generate_feedback_and_next_question`과 같은 형태로
+      재시도+공백 검증을 하도록 하고, `submit_answer`의 마지막 문항
+      분기와 `complete_session` 양쪽이 이를 쓰도록 바꿨다.
+
+      `tests/test_interview_practice.py`에
+      `AlwaysBlankChatOllamaService`(기존 `AlwaysBlank*` 패턴)와
+      `test_submit_answer_at_final_turn_returns_502_when_feedback_is_blank`,
+      `test_complete_session_returns_502_when_overall_feedback_is_blank`를
+      추가했다 - 재시도 2회를 소진한 뒤 502로 실패 처리되는지, 그리고
+      회수 가능성이 실제로 보존되는지(전자는 해당 턴이 여전히
+      미답변으로 남아 나중에 다시 제출 가능함을, 후자는 세션이 여전히
+      `in_progress`로 남아 나중에 다시 종료 시도 가능함을 확인)까지
+      검증한다. `git stash`로 `app/services/interview_practice_
+      service.py` 수정만 되돌리면 두 테스트 모두 정확히 실패(200으로
+      성공 처리되며 빈 피드백/총평이 그대로 저장됨)하는 것까지
+      확인했다.
+
+      전체 495개 테스트 통과, `app/services/interview_practice_
+      service.py` 100% 커버리지, `mypy app tests scripts` 클린. 두
+      엔드포인트의 정상 응답 형식은 그대로라(실패 시에만 이미
+      문서화된 502로 바뀜) `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
+      스키마 변경이 없어 마이그레이션도 필요 없었다.
+
