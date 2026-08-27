@@ -234,6 +234,26 @@ class Settings(BaseSettings):
             ) from exc
         return value
 
+    @field_validator("max_quiz_choice_count")
+    @classmethod
+    def _validate_max_quiz_choice_count(cls, value: int) -> int:
+        """`_build_quiz_prompt()`(quiz_service.py)는 모델에게 항상 "각 문항은
+        4개의 보기를 가지고"라고 고정으로 요청한다 - `MAX_QUIZ_CHOICE_COUNT`와
+        무관하게 정상적으로 동작하는 모델은 매번 보기 4개를 뱉는다는 뜻이다.
+        그런데 이 값을 4 미만(예: "문항당 보기 수"로 오해해 2나 3으로 설정)으로
+        두면, 모델이 시키는 대로 4개를 뱉을 때마다 `len(q.choices) <=
+        max_quiz_choice_count` 검증에 매번 걸려 재시도(`_MAX_QUIZ_GENERATION_
+        ATTEMPTS`)까지 전부 소진하고 502로 끝난다 - `POST /quizzes`(퀴즈 생성)
+        기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속 실패하게
+        된다. 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value < 4:
+            raise ValueError(
+                f"MAX_QUIZ_CHOICE_COUNT({value})는 4 이상이어야 합니다 - 퀴즈 생성 "
+                "프롬프트가 모델에게 항상 보기 4개를 요청하므로, 4 미만이면 정상적인 "
+                "생성 결과도 검증에 걸려 퀴즈 생성 자체가 계속 실패합니다."
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_quiz_question_count_defaults(self) -> "Settings":
         """`QuizCreateRequest`는 `question_count`를 안 보낸 요청에는

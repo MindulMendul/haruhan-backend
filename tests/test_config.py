@@ -120,3 +120,22 @@ def test_settings_rejects_non_positive_token_expiry(field, bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, **{field: bad_value})
     assert field.upper() in str(exc_info.value)
+
+
+def test_settings_accepts_max_quiz_choice_count_of_four_or_more():
+    settings = Settings(jwt_secret_key="a" * 32, max_quiz_choice_count=4)
+    assert settings.max_quiz_choice_count == 4
+
+
+@pytest.mark.parametrize("bad_value", [0, 1, 2, 3])
+def test_settings_rejects_max_quiz_choice_count_below_four(bad_value):
+    """quiz_service.py의 _build_quiz_prompt()는 MAX_QUIZ_CHOICE_COUNT와 무관하게
+    모델에게 항상 "각 문항은 4개의 보기를 가지고"라고 고정으로 요청한다 - 정상
+    동작하는 모델은 매번 보기 4개를 뱉는다는 뜻이다. MAX_QUIZ_CHOICE_COUNT를
+    4 미만으로 설정하면, 모델이 시키는 대로 4개를 뱉을 때마다 검증(len(choices)
+    <= max_quiz_choice_count)에 매번 걸려 재시도까지 전부 소진하고 502로
+    끝난다 - 퀴즈 생성 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로
+    계속 실패하게 된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, max_quiz_choice_count=bad_value)
+    assert "MAX_QUIZ_CHOICE_COUNT" in str(exc_info.value)

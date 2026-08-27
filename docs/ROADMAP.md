@@ -4359,3 +4359,40 @@
       정상 범위(72자 이하) 비밀번호 확인 동작은 그대로라 `docs/
       FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (135라운드)
+
+- [x] 159. `MAX_QUIZ_CHOICE_COUNT`에 하한 검증이 없어, 4 미만으로 설정하면
+      퀴즈 생성 기능 전체가 시작 시점엔 전혀 티가 안 나는 상태로 계속
+      실패(매 요청 502)하던 문제 수정. `quiz_service.py`의
+      `_build_quiz_prompt()`는 `MAX_QUIZ_CHOICE_COUNT`와 무관하게 모델에게
+      항상 "각 문항은 4개의 보기를 가지고"라고 고정으로 요청한다 - 정상
+      동작하는 모델은 매번 보기 4개를 뱉는다는 뜻이다. 그런데 108라운드가
+      추가한 이 값(AI 출력 검증용 안전장치, 기본값 8)에는 여태 하한
+      검증이 없어서, 운영자가 "문항당 보기 수를 이 값으로 강제한다"고
+      오해해 2나 3으로 설정하면(자연스러운 오해다 - 실제로는 검증
+      상한일 뿐 요청 개수가 아님), 모델이 시키는 대로 4개를 뱉을
+      때마다 `len(q.choices) <= max_quiz_choice_count` 검증에 매번 걸려
+      재시도(`_MAX_QUIZ_GENERATION_ATTEMPTS`)까지 전부 소진하고 502로
+      끝난다. `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로,
+      `JWT_SECRET_KEY` 길이/`LOG_LEVEL`/`ENVIRONMENT`/레이트리밋 문자열/
+      토큰 만료 시간(127라운드)/퀴즈 문항 수 기본값(108라운드)처럼 이미
+      여러 라운드가 막아온 "Settings 필드 하나가 시작 시점 검증 없이
+      조용히 앱을 망가진 상태로 띄우는" 클래스의, 이 파일에 남아있던
+      마지막 미검증 숫자 필드였다.
+
+      `app/core/config.py`에 `max_quiz_choice_count`용 `field_validator`
+      를 추가해 `< 4`면 거부하도록 했다 - 프롬프트가 실제로 요청하는
+      고정 개수(4)와 맞춰, 스키마가 구조적으로 보장하는 최소값(2,
+      `_GeneratedQuestion.choices`의 `min_length=2`)이 아니라 이 앱이
+      실제로 정상 동작하는 데 필요한 진짜 하한을 검증하도록 했다.
+      `tests/test_config.py`에
+      `test_settings_accepts_max_quiz_choice_count_of_four_or_more`와
+      `test_settings_rejects_max_quiz_choice_count_below_four`
+      (0/1/2/3 parametrize)를 추가했다. `git stash`로
+      `app/core/config.py` 수정만 되돌리면 4개 케이스 전부 정확히
+      실패(`ValidationError`가 안 남)하는 것까지 확인했다. 전체 464개
+      테스트 통과, 전체 커버리지 99%(`app/core/config.py` 100% 포함),
+      `mypy app tests scripts` 클린. 정상 범위(4 이상) 설정의 동작은
+      그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
+      필요 없었다.
+
