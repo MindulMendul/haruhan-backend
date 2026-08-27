@@ -209,3 +209,21 @@ def test_settings_rejects_non_positive_max_review_content_length(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, max_review_content_length=bad_value)
     assert "MAX_REVIEW_CONTENT_LENGTH" in str(exc_info.value)
+
+
+def test_settings_accepts_positive_max_quiz_source_length():
+    settings = Settings(jwt_secret_key="a" * 32, max_quiz_source_length=1)
+    assert settings.max_quiz_source_length == 1
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_max_quiz_source_length(bad_value):
+    """이 값은 두 곳에서 서로 다르게 깨진다: QuizCreateRequest(직접 붙여넣기)는
+    len(source_text) > max_length로 검사해서 0 이하면 빈 문자열이 아닌
+    어떤 source_text도 항상 거부되고, quiz_service.py(학습 세션 소스)는
+    source_text[-max_length:]로 자르는데 0에서는 파이썬 슬라이싱 특성상
+    (-0 == 0) source_text[-0:]가 전체 문자열이 되어버려 truncate
+    안전장치가 조용히 무력화된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, max_quiz_source_length=bad_value)
+    assert "MAX_QUIZ_SOURCE_LENGTH" in str(exc_info.value)

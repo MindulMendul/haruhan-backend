@@ -339,6 +339,39 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("max_quiz_source_length")
+    @classmethod
+    def _validate_max_quiz_source_length_is_positive(cls, value: int) -> int:
+        """이 값은 두 경로에서 서로 다른 방식으로 소비되는데, 둘 다 0 이하에서
+        깨진다.
+
+        (1) `QuizCreateRequest`(schemas/quiz.py)의 직접 붙여넣기 경로:
+        `len(source_text) > max_quiz_source_length`로 검사한다 - 0 이하면
+        `min_length=1`을 통과한(=빈 문자열이 아닌) 어떤 `source_text`도 항상
+        이 조건을 만족해 거부된다(`MAX_PROMPT_LENGTH`/`MAX_REVIEW_CONTENT_
+        LENGTH`와 같은 "항상 거부" 형태의 버그).
+
+        (2) `quiz_service.py`의 학습 세션 소스 경로: 상한을 넘으면
+        `source_text[-max_quiz_source_length:]`로 뒤쪽(최근)만 남긴다 - 그런데
+        0에서는 파이썬 슬라이싱 특성상 `-0 == 0`이라 `source_text[-0:]`가
+        `source_text[0:]`(전체 문자열)이 되어버려, 잘라내기는커녕 오히려
+        아무것도 안 자른 것과 같아진다. 즉 이 truncate 안전장치(Ollama 호출
+        지연/타임아웃/컨텍스트 윈도우 초과 방지용)가 조용히 무력화된다 -
+        (1)과 달리 요청이 거부되지 않고 그냥 넘어가버려서 더 알아채기 어렵다.
+
+        `max_chat_history_messages`처럼 "0 이하 = 특수 모드"가 문서화된
+        필드도 이 파일에 있지만, 이 필드는 그런 의미가 문서화되어 있지 않고
+        순수하게 AI 입력 길이를 제한하는 안전장치라 `MAX_PROMPT_LENGTH`와
+        같은 성격이다 - "무제한"으로 취급하지 않고 같은 이유로 시작 시점에
+        미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_QUIZ_SOURCE_LENGTH({value})는 0보다 커야 합니다 - 0 이하면 "
+                "직접 붙여넣은 source_text는 항상 길이 초과로 거부되고, 학습 "
+                "세션 소스는 truncate 안전장치가 조용히 무력화됩니다."
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_quiz_question_count_defaults(self) -> "Settings":
         """`QuizCreateRequest`는 `question_count`를 안 보낸 요청에는

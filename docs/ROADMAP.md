@@ -4641,3 +4641,51 @@
       선례가 갈릴 수 있음) 이번 라운드 범위에는 넣지 않고, 다음
       라운드를 위한 메모로 남겨둔다.)
 
+## 백로그 (142라운드)
+
+- [x] 166. `MAX_QUIZ_SOURCE_LENGTH`에 양수 검증 추가 - 141라운드가
+      설계 판단이 필요하다는 이유로 메모만 남기고 미룬 항목을
+      이어받아 판단하고 구현했다.
+
+      이 값은 서로 다른 두 곳에서 서로 다른 방식으로 소비되는데, 둘
+      다 0 이하에서 깨진다. (1) `QuizCreateRequest`(schemas/quiz.py)의
+      직접 붙여넣기 경로는 `len(source_text) > max_length`로 검사한다 -
+      0 이하면 `min_length=1`을 통과한(=빈 문자열이 아닌) 어떤
+      `source_text`도 항상 이 조건을 만족해 거부된다(`MAX_PROMPT_
+      LENGTH`/`MAX_REVIEW_CONTENT_LENGTH`와 같은 "항상 거부" 형태).
+      (2) `quiz_service.py`의 학습 세션 소스 경로는 상한을 넘으면
+      `source_text[-max_length:]`로 뒤쪽(최근)만 남기는데, 0에서는
+      파이썬 슬라이싱 특성상 `-0 == 0`이라 `source_text[-0:]`가
+      `source_text[0:]`(전체 문자열)이 되어버려 잘라내기는커녕
+      아무것도 안 자른 것과 같아진다 - `git diff` 없이 파이썬
+      REPL에서 직접 재현해(`"abc"[-0:]` → `"abc"`, `"abc"[-3:]` →
+      `"abc"`이지만 `[-2:]` → `"bc"`) 확인했다. (1)과 달리 요청이
+      거부되지 않고 그냥 넘어가버려서(Ollama 호출 지연/타임아웃/
+      컨텍스트 윈도우 초과 방지용 안전장치가 조용히 무력화됨) 더
+      알아채기 어렵다.
+
+      설계 판단: 이 파일에는 `max_chat_history_messages`처럼 "0
+      이하 = 특수 모드"가 명시적으로 문서화된 필드도 있지만,
+      `max_quiz_source_length`는 그런 의미가 문서화되어 있지 않고
+      순수하게 AI 입력 길이를 제한하는 안전장치라는 점에서
+      `MAX_PROMPT_LENGTH`와 같은 성격이다(둘 다 두 소비처 중
+      어느 쪽도 "0 = 무제한"을 기대하지 않고, 둘 다 AI 호출
+      지연/타임아웃/컨텍스트 윈도우 초과를 막는 게 유일한 목적).
+      "무제한"으로 특별 취급하지 않고, 같은 이유로 시작 시점에
+      미리 거부하기로 했다.
+
+      `app/core/config.py`에
+      `_validate_max_quiz_source_length_is_positive` field_validator를
+      추가했다(`value <= 0`이면 거부, 두 소비처의 서로 다른 실패
+      양상을 모두 docstring에 남김). `tests/test_config.py`에
+      `test_settings_accepts_positive_max_quiz_source_length`와
+      `test_settings_rejects_non_positive_max_quiz_source_length`
+      (0/-1 parametrize)를 추가했다. `git stash`로
+      `app/core/config.py` 수정만 되돌리면 두 케이스 모두 정확히
+      실패(`ValidationError`가 안 남)하는 것까지 확인했다.
+
+      전체 482개 테스트 통과, 전체 커버리지 99%(`app/core/config.py`
+      100% 포함), `mypy app tests scripts` 클린. 정상 범위(양수) 설정의
+      동작은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+
