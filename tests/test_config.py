@@ -175,3 +175,20 @@ def test_settings_rejects_non_positive_max_body_size_bytes(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, max_body_size_bytes=bad_value)
     assert "MAX_BODY_SIZE_BYTES" in str(exc_info.value)
+
+
+def test_settings_accepts_positive_max_concurrent_ws_connections():
+    settings = Settings(jwt_secret_key="a" * 32, max_concurrent_ws_connections=1)
+    assert settings.max_concurrent_ws_connections == 1
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_max_concurrent_ws_connections(bad_value):
+    """limit_ws_connections(core/dependencies.py)는 0에서 시작하는
+    _active_ws_connections 카운터가 이 값 이상이면 연결을 거부한다. 0 이하면
+    카운터의 초기값(0)만으로 이미 그 조건을 만족해 첫 WebSocket 연결
+    시도부터 매번 거부되어, 학습챗/면접복기 스트리밍 기능 전체가 시작
+    시점에는 전혀 티가 안 나는 상태로 계속 막히게 된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, max_concurrent_ws_connections=bad_value)
+    assert "MAX_CONCURRENT_WS_CONNECTIONS" in str(exc_info.value)

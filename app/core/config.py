@@ -298,6 +298,26 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("max_concurrent_ws_connections")
+    @classmethod
+    def _validate_max_concurrent_ws_connections_is_positive(cls, value: int) -> int:
+        """`limit_ws_connections`(core/dependencies.py)는 `_active_ws_connections
+        >= max_concurrent_ws_connections`면 `accept()` 전에 연결을 거부한다.
+        `_active_ws_connections`는 0에서 시작하므로, 이 값이 0이면 `0 >= 0`이
+        항상 참이 되어 첫 연결 시도부터 매번 거부되고, 음수라면 두말할 것도
+        없다 - 학습챗/면접복기 WebSocket 스트리밍(139라운드가 예외 처리를
+        보강한 바로 그 두 경로) 전체가 시작 시점에는 전혀 티가 안 나는 상태로
+        계속 막히게 된다(REST 엔드포인트는 이 검사를 거치지 않아 영향이 없다).
+        `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로, 다른 숫자
+        설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value < 1:
+            raise ValueError(
+                f"MAX_CONCURRENT_WS_CONNECTIONS({value})는 1 이상이어야 합니다 - "
+                "0 이하면 활성 연결 수 카운터가 0에서 시작하므로 첫 WebSocket 연결"
+                "시도부터 매번 거부되어 학습챗/면접복기 스트리밍 전체가 막힙니다."
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_quiz_question_count_defaults(self) -> "Settings":
         """`QuizCreateRequest`는 `question_count`를 안 보낸 요청에는

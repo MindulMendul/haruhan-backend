@@ -4564,3 +4564,37 @@
       형식(`{"type": "error", "detail": "..."}`)과도 일치하고, DB
       스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (140라운드)
+
+- [x] 164. `MAX_CONCURRENT_WS_CONNECTIONS`에 양수 검증 추가 - 159~161라운드가
+      고친 `MAX_QUIZ_CHOICE_COUNT`/`MAX_PROMPT_LENGTH`/`MAX_BODY_SIZE_BYTES`와
+      같은 성격의, "`Settings()` 생성은 성공해 앱이 정상적으로 뜨지만 특정
+      기능 전체가 시작 시점엔 티가 안 나게 막히는" 부류의 설정 검증 공백을
+      계속 훑다가 발견했다.
+
+      `core/dependencies.py`의 `limit_ws_connections`는
+      `_active_ws_connections >= settings.max_concurrent_ws_connections`면
+      `accept()` 전에 연결을 거부한다. `_active_ws_connections`는 모듈
+      레벨에서 `0`으로 시작하는 카운터라, 이 설정값을 `0`으로 두면(예:
+      "아직 예약된 연결 없음"으로 오해, 또는 이 파일의 다른 필드처럼
+      "0 이하 = 무제한/비활성"이라는 관례를 착각해 적용) `0 >= 0`이 첫
+      연결 시도부터 항상 참이 되어, 학습챗/면접복기 WebSocket 스트리밍
+      (139라운드가 예외 처리를 보강한 바로 그 두 경로) 전체가 매번
+      `WS_1013_TRY_AGAIN_LATER`로 거부된다. REST 엔드포인트는 이 검사를
+      거치지 않아 영향이 없어, 겉보기엔 앱 전체가 멀쩡해 보인다는 점도
+      기존에 고친 항목들과 같다.
+
+      `app/core/config.py`에 `_validate_max_concurrent_ws_connections_is_
+      positive` field_validator를 추가했다(`value < 1`이면 거부, 기존
+      필드들과 동일한 위치/스타일). `tests/test_config.py`에
+      `test_settings_accepts_positive_max_concurrent_ws_connections`와
+      `test_settings_rejects_non_positive_max_concurrent_ws_connections`
+      (0/-1 parametrize)를 추가했다. `git stash`로 `app/core/config.py`
+      수정만 되돌리면 두 케이스 모두 정확히 실패(`ValidationError`가
+      안 남)하는 것까지 확인했다.
+
+      전체 476개 테스트 통과, 전체 커버리지 99%(`app/core/config.py`
+      100% 포함), `mypy app tests scripts` 클린. 정상 범위(양수) 설정의
+      동작은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
+      필요 없었다.
+
