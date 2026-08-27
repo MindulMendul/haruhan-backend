@@ -4510,3 +4510,57 @@
       올바르게 존재), `docs/FRONTEND_INTEGRATION.md` 갱신도,
       마이그레이션도 필요 없었다.
 
+## 백로그 (139라운드)
+
+- [x] 163. WebSocket 스트리밍 라우트(학습챗 `stream_message`, 면접복기
+      `stream_create_review`) 두 곳 모두, `HTTPException`이 아닌
+      예외가 나면 로그 한 줄 없이, 클라이언트에게 에러 이벤트도 없이
+      연결만 뚝 끊기던 문제 해소.
+
+      `app/main.py`의 `@app.exception_handler(Exception)`(모든
+      처리되지 않은 예외를 `logger.exception()`으로 로그 남기고 500을
+      반환하는 앱의 유일한 안전망)은 실제로는 Starlette의
+      `ServerErrorMiddleware`에만 걸리는데, 이 미들웨어는
+      `scope["type"] != "http"`이면(즉 websocket이면) 그냥
+      통과시키기만 하고 아무 것도 안 한다 - 순정 Starlette 소스를 직접
+      확인하고, 임시 테스트로 `RuntimeError`를 실제로 던져 로그 한
+      줄도 안 남고 에러 이벤트도 없이 연결만 끊기는 것까지 재현해서
+      검증했다. 두 라우트 모두 지금까지는 `except HTTPException`만
+      잡고 있었다 - 예상된 실패(AI 서비스 오류, 세션 없음, 잘못된
+      JSON, 레이트리밋)는 전부 이미 `HTTPException`으로 변환되어
+      들어오므로 기존 테스트는 이 빈틈을 전혀 건드리지 않았다. 실제로는
+      DB 커넥션이 순간적으로 끊기거나 임베딩/RAG 쪽에서 예상 못 한
+      타입의 예외가 올라오는 경우처럼, 이 두 엔드포인트(앱에서 가장
+      AI 연산이 무거운 두 경로)에서 언젠가 실제로 벌어질 수 있는
+      시나리오다.
+
+      `app/api/v1/routes/study.py`와
+      `app/api/v1/routes/interview_review.py`의 `stream_message`/
+      `stream_create_review`에 각각 `except HTTPException` 다음에
+      `except Exception` 절을 추가했다 - 모듈 레벨
+      `logger = logging.getLogger(__name__)`로 `logger.exception(...)`
+      호출해 로그를 남기고, `{"type": "error", "detail": "..."}`
+      프레임을 보낸 뒤 `status.WS_1011_INTERNAL_ERROR`로 연결을 닫는다
+      (루프를 계속 돌리지 않고 닫는 이유: 부분 flush 도중 실패했을 수
+      있어 그 `AsyncSession`의 트랜잭션 상태가 깨끗하다고 보장할 수
+      없으므로, 계속 재사용하기보다 연결을 끝내는 쪽이 안전하다).
+
+      `tests/test_study.py`/`tests/test_interview_review.py`에 각각
+      `CrashingOllamaService`(`OllamaServiceError`가 아닌
+      `RuntimeError`를 던지는 페이크)를 추가하고,
+      `test_stream_message_unexpected_exception_sends_error_event_and_logs`/
+      `test_stream_create_review_unexpected_exception_sends_error_event_and_logs`를
+      새로 작성했다 - 클라이언트가 에러 이벤트를 받는지, `caplog`로
+      실제로 로그가 남는지, 그 다음 연결이 끊기는지(`WebSocketDisconnect`)까지
+      확인한다. `git stash`로 두 라우트 파일 수정만 되돌리면 두
+      테스트 모두 정확히 실패(`RuntimeError`가 그대로 새어나와 테스트
+      러너까지 전파됨)하는 것까지 확인했다.
+
+      전체 473개 테스트 통과, `app/api/v1/routes/study.py`/
+      `app/api/v1/routes/interview_review.py` 100% 커버리지,
+      `mypy app tests scripts` 클린(전체 커버리지 99%, 나머지 미커버
+      2줄은 이번 라운드와 무관한 기존 갭). 두 라우트의 정상/기존
+      에러 흐름은 그대로라 `docs/FRONTEND_INTEGRATION.md`의 에러 이벤트
+      형식(`{"type": "error", "detail": "..."}`)과도 일치하고, DB
+      스키마 변경이 없어 마이그레이션도 필요 없었다.
+

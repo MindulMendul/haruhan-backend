@@ -32,6 +32,15 @@ class FailingOllamaService:
         yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
 
 
+class CrashingOllamaService:
+    """OllamaServiceError가 아닌, 라우트가 예상하지 못한 예외를 흉내낸다
+    (예: 임베딩 응답 파싱 실패, DB 커넥션 끊김 등)."""
+
+    async def chat_stream(self, messages, model):
+        raise RuntimeError("boom")
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
+
+
 def _signup_and_get_token(client, email="review@example.com"):
     response = client.post(
         "/api/v1/auth/signup", json={"email": email, "password": "supersecret"}
@@ -643,6 +652,29 @@ def test_stream_create_review_ai_failure_sends_error_event(client):
         ws.send_json(_create_payload())
         error_event = ws.receive_json()
         assert error_event["type"] == "error"
+
+
+def test_stream_create_review_unexpected_exception_sends_error_event_and_logs(client, caplog):
+    """OllamaServiceError가 아닌 예외는 main.py의 전역 unhandled_exception_handler로
+    안 잡힌다 - 그 핸들러가 걸리는 Starlette ServerErrorMiddleware는 websocket
+    scope를 그냥 통과시키기만 한다. 라우트가 직접 잡아서 에러 이벤트를 보내고
+    로그도 남기는지 확인한다 (학습챗 스트리밍과 같은 패턴)."""
+    import pytest
+    from starlette.testclient import WebSocketDisconnect
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: CrashingOllamaService()
+    token = _signup_and_get_token(client, email="stream-review-crash@example.com")
+
+    with caplog.at_level("ERROR", logger="app.api.v1.routes.interview_review"):
+        with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+            ws.send_json(_create_payload())
+            error_event = ws.receive_json()
+            assert error_event["type"] == "error"
+
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+
+    assert "처리되지 않은 예외" in caplog.text
 
 
 def test_stream_create_review_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):

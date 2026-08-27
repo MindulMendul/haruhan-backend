@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import uuid
 
 from fastapi import (
@@ -36,6 +37,8 @@ from app.schemas.interview_review import (
 from app.services.interview_review_service import InterviewReviewService
 from app.services.ollama_service import OllamaService
 from app.services.rag_service import RagService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/interview/reviews", tags=["interview-review"])
 
@@ -215,5 +218,17 @@ async def stream_create_review(
                         )
             except HTTPException as exc:
                 await websocket.send_json({"type": "error", "detail": exc.detail})
+            except Exception:
+                # main.py의 전역 unhandled_exception_handler(app.exception_handler(Exception))는
+                # Starlette의 ServerErrorMiddleware에만 걸리는데, 이 미들웨어는 websocket
+                # scope에서는 그대로 통과시키기만 하고 아무 일도 하지 않는다 - 즉 HTTPException이
+                # 아닌 예외(DB 커넥션 끊김, 예상 못 한 임베딩/RAG 오류 등)는 이 라우트에서 직접
+                # 잡지 않으면 로그 한 줄 없이, 클라이언트에게 에러 이벤트도 못 보낸 채 연결만
+                # 뚝 끊긴다. 트랜잭션 상태가 이미 깨졌을 수 있어(부분 flush 도중 실패) 세션을
+                # 계속 재사용하지 않고 연결을 닫는다.
+                logger.exception("스트리밍 중 처리되지 않은 예외 발생: user_id=%s", current_user.id)
+                await websocket.send_json({"type": "error", "detail": "면접복기 생성 중 오류가 발생했습니다."})
+                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                return
     except WebSocketDisconnect:
         pass

@@ -26,6 +26,15 @@ class FailingOllamaService:
         yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
 
 
+class CrashingOllamaService:
+    """OllamaServiceError가 아닌, 라우트가 예상하지 못한 예외를 흉내낸다
+    (예: 임베딩 응답 파싱 실패, DB 커넥션 끊김 등)."""
+
+    async def chat_stream(self, messages, model):
+        raise RuntimeError("boom")
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
+
+
 def _signup_and_get_token(client, email="study@example.com"):
     response = client.post(
         "/api/v1/auth/signup", json={"email": email, "password": "supersecret"}
@@ -931,6 +940,36 @@ def test_stream_message_ai_failure_sends_error_event(client):
     messages = detail.json()["messages"]
     assert len(messages) == 1
     assert messages[0]["content"] == "실패해라"
+
+
+def test_stream_message_unexpected_exception_sends_error_event_and_logs(client, caplog):
+    """OllamaServiceError가 아닌 예외(예: 임베딩/DB 계층에서 올라오는 예상 못 한
+    예외)는 main.py의 전역 unhandled_exception_handler로 안 잡힌다 - 그 핸들러가
+    걸리는 Starlette ServerErrorMiddleware는 websocket scope를 그냥 통과시키기만
+    한다. 라우트가 직접 잡아서 에러 이벤트를 보내고 로그도 남기는지 확인한다."""
+    from starlette.testclient import WebSocketDisconnect
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: CrashingOllamaService()
+    token = _signup_and_get_token(client, email="stream-crash@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "예상 못 한 예외"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with caplog.at_level("ERROR", logger="app.api.v1.routes.study"):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.send_json({"content": "터져라"})
+            user_event = ws.receive_json()
+            assert user_event["type"] == "user_message"
+            error_event = ws.receive_json()
+            assert error_event["type"] == "error"
+
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+
+    assert "처리되지 않은 예외" in caplog.text
 
 
 def test_stream_message_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):
