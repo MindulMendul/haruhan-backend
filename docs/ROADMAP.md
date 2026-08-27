@@ -4857,3 +4857,53 @@
       정상 응답 형식은 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (146라운드)
+
+- [x] 170. `InterviewPracticeService.create_session()`/
+      `InterviewReviewService.create_review()`/`stream_create_review()`가
+      145라운드가 고친 것과 같은 종류의 "계정 삭제 경쟁"에 노출돼
+      있던 문제 해소 - 145라운드 조사가 남긴 구체적인 후속 단서(같은
+      취약점이 AI 생성이 무거운 다른 생성 경로에도 있을 수 있다는
+      추정)를 직접 코드를 다시 읽어 검증한 뒤 구현했다.
+
+      두 서비스 모두 `IntegrityError`를 아예 import조차 안 하고
+      있었다 - `create_session()`은 RAG 조회 + Ollama `generate()`
+      호출을, `create_review()`/`stream_create_review()`는 Ollama
+      `chat()`/`chat_stream()` 호출을 거쳐서야 각각
+      `InterviewPracticeSession`/`InterviewReview`를 만드는데
+      (둘 다 `user_id`가 `nullable=False, ondelete=CASCADE` FK), 그
+      사이 다른 요청(같은 계정의 다른 탭/기기에서 온
+      `UserService.delete_account()`)이 이 계정을 지워버리면 그
+      INSERT가 `IntegrityError`로 실패한다 - 145라운드가 이미 같은
+      계정으로 실제 재현한 것과 동일한 시나리오다. 잡지 않으면 REST는
+      처리되지 않은 예외(500)로, WS(`stream_create_review`)는 139라운드가
+      추가한 `except Exception`에 걸려 "처리되지 않은 예외"로 잘못
+      로깅되며 뭉뚱그린 에러 메시지로 응답한다.
+
+      `app/services/interview_practice_service.py`/`app/services/
+      interview_review_service.py` 양쪽에 `IntegrityError` import와
+      `_ACCOUNT_GONE`(401,
+      `{"code": "invalid_token", "message": "Could not validate credentials"}`
+      - `core/dependencies.py`의 `get_current_user`가 "존재하지 않는
+      사용자"에 이미 쓰는 것과 같은 코드/메시지이자
+      `docs/FRONTEND_INTEGRATION.md`에 이미 문서화된 코드라 재사용함)를
+      추가하고, 세 메서드 각각의 row 생성+커밋을 `try/except
+      IntegrityError: rollback() + raise _ACCOUNT_GONE`으로 감쌌다.
+
+      `tests/test_interview_practice.py`에
+      `test_create_session_returns_401_when_account_deleted_during_generation`을,
+      `tests/test_interview_review.py`에
+      `test_create_review_returns_401_when_account_deleted_during_generation`
+      과 그 스트리밍 버전을 추가했다 - 가짜 Ollama 서비스가 응답을
+      반환하기 "직전" 별도 세션에서 그 계정을 실제로 지우도록 만들어
+      재현한다(143~145라운드가 확립한 패턴 그대로). `git stash`로
+      두 서비스 파일 수정만 되돌리면 세 테스트 모두 정확히
+      `IntegrityError`(FOREIGN KEY constraint failed)로 실패하는
+      것까지 확인했다.
+
+      전체 491개 테스트 통과, `app/services/interview_practice_
+      service.py`/`app/services/interview_review_service.py` 100%
+      커버리지, `mypy app tests scripts` 클린. 세 엔드포인트의 정상
+      응답/기존 에러 형식은 그대로라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

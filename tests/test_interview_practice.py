@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
@@ -1398,3 +1399,49 @@ def test_submit_answer_rejects_stale_retry_on_final_turn_without_wasting_ai_call
     # 걸러냈어야 한다 - chat()이 두 번(먼저 도착한 요청 몫 + 뒤늦은 요청이
     # 낭비한 몫) 호출됐다면 이 재확인이 무력화된 것이다.
     assert chat_calls == 1
+
+
+def test_create_session_returns_401_when_account_deleted_during_generation(db_session_factory):
+    """create_session()은 RAG 조회 + 첫 질문 생성을 위한 Ollama 호출을 거쳐서야
+    InterviewPracticeSession을 만든다(user_id는 nullable=False FK) - 그 사이
+    다른 요청이 UserService.delete_account()로 이 계정을 지워버리면, 이 INSERT가
+    IntegrityError로 실패한다. 143~145라운드가 고친 것과 같은 종류의 경쟁이다 -
+    잡지 않으면 처리되지 않은 예외(500)로 새어나간다. 가짜 Ollama가 첫 질문을
+    반환하기 "직전"에 별도 세션에서 이 계정을 완전히 지우도록 만들어서 이
+    타이밍을 결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            class DeletingOllamaService:
+                async def generate(self, prompt, model):
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    return "늦게 도착한 질문"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0, 0.0]
+
+            settings = get_settings()
+            ollama = DeletingOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = InterviewPracticeService(
+                session=session, ollama_service=ollama, settings=settings, rag_service=rag
+            )
+
+            try:
+                await service.create_session(user_id=user_id, topic="백엔드 개발자", model="qwen2.5:3b")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401

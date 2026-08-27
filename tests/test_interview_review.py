@@ -812,3 +812,119 @@ def test_update_review_persists_content_edit_even_if_rag_reindex_fails(db_sessio
 
     persisted_content = asyncio.run(_refetch())
     assert persisted_content == "수정된 내용"
+
+
+def test_create_review_returns_401_when_account_deleted_during_generation(db_session_factory):
+    """create_review()는 AI 피드백 생성을 위한 Ollama 호출을 거쳐서야
+    InterviewReview를 만든다(user_id는 nullable=False FK) - 그 사이 다른 요청이
+    UserService.delete_account()로 이 계정을 지워버리면, 이 INSERT가
+    IntegrityError로 실패한다. 143~145라운드가 고친 것과 같은 종류의 경쟁이다 -
+    잡지 않으면 처리되지 않은 예외(500)로 새어나간다. 가짜 Ollama가 피드백을
+    반환하기 "직전"에 별도 세션에서 이 계정을 완전히 지우도록 만들어서 이
+    타이밍을 결정적으로 재현한다."""
+    import asyncio
+    from datetime import date
+
+    from fastapi import HTTPException
+
+    from app.repositories.user_repository import UserRepository
+    from app.services.interview_review_service import InterviewReviewService
+    from app.services.rag_service import RagService
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            class DeletingOllamaService:
+                async def chat(self, messages, model):
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    return "늦게 도착한 피드백"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0, 0.0]
+
+            settings = get_settings()
+            ollama = DeletingOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = InterviewReviewService(session=session, ollama_service=ollama, rag_service=rag)
+
+            try:
+                await service.create_review(
+                    user_id=user_id,
+                    company="하루한",
+                    position="백엔드 개발자",
+                    interview_date=date(2024, 1, 1),
+                    content="자기소개를 했습니다.",
+                    model="qwen2.5:3b",
+                )
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+
+
+def test_stream_create_review_returns_401_when_account_deleted_during_generation(db_session_factory):
+    """stream_create_review()도 create_review()와 같은 이유로 취약하다 - 스트리밍
+    도중(chat_stream이 마지막 조각을 내보내기 직전) 계정이 지워지면 같은
+    IntegrityError가 새어나갈 수 있다."""
+    import asyncio
+    from datetime import date
+
+    from fastapi import HTTPException
+
+    from app.repositories.user_repository import UserRepository
+    from app.services.interview_review_service import InterviewReviewService
+    from app.services.rag_service import RagService
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            class DeletingOllamaService:
+                async def chat_stream(self, messages, model):
+                    yield "잘한"
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    yield "점입니다"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0, 0.0]
+
+            settings = get_settings()
+            ollama = DeletingOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = InterviewReviewService(session=session, ollama_service=ollama, rag_service=rag)
+
+            try:
+                async for _event_type, _data in service.stream_create_review(
+                    user_id=user_id,
+                    company="하루한",
+                    position="백엔드 개발자",
+                    interview_date=date(2024, 1, 1),
+                    content="자기소개를 했습니다.",
+                    model="qwen2.5:3b",
+                ):
+                    pass
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401

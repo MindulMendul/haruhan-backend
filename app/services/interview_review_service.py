@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from datetime import date
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.interview_review import InterviewReview
@@ -13,6 +14,16 @@ from app.services.rag_service import RagService
 _NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview review not found")
 _GENERATION_FAILED = HTTPException(
     status_code=status.HTTP_502_BAD_GATEWAY, detail="피드백 생성에 실패했습니다. 다시 시도해주세요."
+)
+# get_current_user가 검증한 시점과 이 요청이 실제로 쓰는 시점 사이에 계정이
+# 지워지면(아래 create_review/stream_create_review 참고) core/dependencies.py의
+# get_current_user가 "존재하지 않는 사용자"에 쓰는 것과 같은 코드/메시지로
+# 응답한다 - 재시도하면 그 의존성이 어차피 이 코드로 401을 낼 상황이라
+# 클라이언트 입장에서 동일하게 다뤄야 한다(docs/FRONTEND_INTEGRATION.md에
+# 이미 문서화된 코드).
+_ACCOUNT_GONE = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_token", "message": "Could not validate credentials"},
 )
 
 
@@ -47,16 +58,25 @@ class InterviewReviewService:
     ) -> InterviewReview:
         feedback = await self._generate_feedback(company, position, content, model)
 
-        review = await self._reviews.create(
-            user_id=user_id,
-            company=company,
-            position=position,
-            interview_date=interview_date,
-            content=content,
-            model=model,
-        )
-        review.ai_feedback = feedback
-        await self._session.commit()
+        # get_current_user 인증 확인과 여기 사이에(위 AI 피드백 생성으로 늘어난
+        # 시간차 동안) 다른 요청이 UserService.delete_account()로 이 계정을
+        # 지워버리면(InterviewReview.user_id는 nullable=False FK), 이 INSERT가
+        # IntegrityError로 실패한다 - 143~145라운드가 고친 것과 같은 종류의
+        # 경쟁이다. 잡지 않으면 처리되지 않은 예외(500)로 새어나간다.
+        try:
+            review = await self._reviews.create(
+                user_id=user_id,
+                company=company,
+                position=position,
+                interview_date=interview_date,
+                content=content,
+                model=model,
+            )
+            review.ai_feedback = feedback
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
 
         # 복기 내용도 학습챗 그라운딩 자료로 쓰일 수 있도록 색인해둔다.
         await self._rag.index_content(
@@ -92,16 +112,23 @@ class InterviewReviewService:
         except OllamaServiceError as exc:
             raise _GENERATION_FAILED from exc
 
-        review = await self._reviews.create(
-            user_id=user_id,
-            company=company,
-            position=position,
-            interview_date=interview_date,
-            content=content,
-            model=model,
-        )
-        review.ai_feedback = "".join(feedback_parts)
-        await self._session.commit()
+        # create_review()와 같은 이유(그 메서드의 docstring 참고)로, 스트리밍 도중
+        # 계정이 삭제되면 이 INSERT가 IntegrityError로 실패할 수 있다 - 401로
+        # 변환해 라우트가 {"type": "error"} 프레임으로 우아하게 처리하게 한다.
+        try:
+            review = await self._reviews.create(
+                user_id=user_id,
+                company=company,
+                position=position,
+                interview_date=interview_date,
+                content=content,
+                model=model,
+            )
+            review.ai_feedback = "".join(feedback_parts)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
 
         # 색인은 "done" 이벤트를 보내기 전에 끝내둔다 - study_service.stream_message와
         # 같은 이유로, 클라이언트가 "done"을 받자마자 연결을 끊으면 그 이후 DB

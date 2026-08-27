@@ -4,6 +4,7 @@ import uuid
 
 from fastapi import HTTPException, status
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -25,6 +26,15 @@ _ALREADY_FINISHED = HTTPException(status_code=status.HTTP_409_CONFLICT, detail="
 _NO_PENDING_QUESTION = HTTPException(status_code=status.HTTP_409_CONFLICT, detail="답변할 질문이 없습니다.")
 _GENERATION_FAILED = HTTPException(
     status_code=status.HTTP_502_BAD_GATEWAY, detail="AI 응답 생성에 실패했습니다. 다시 시도해주세요."
+)
+# get_current_user가 검증한 시점과 이 요청이 실제로 쓰는 시점 사이에 계정이
+# 지워지면(아래 create_session 참고) core/dependencies.py의 get_current_user가
+# "존재하지 않는 사용자"에 쓰는 것과 같은 코드/메시지로 응답한다 - 재시도하면
+# 그 의존성이 어차피 이 코드로 401을 낼 상황이라 클라이언트 입장에서 동일하게
+# 다뤄야 한다(docs/FRONTEND_INTEGRATION.md에 이미 문서화된 코드).
+_ACCOUNT_GONE = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_token", "message": "Could not validate credentials"},
 )
 
 
@@ -142,11 +152,20 @@ class InterviewPracticeService:
         except OllamaServiceError as exc:
             raise _GENERATION_FAILED from exc
 
-        practice_session = await self._sessions.create(user_id=user_id, topic=topic, model=model)
-        first_turn = await self._turns.create(
-            session_id=practice_session.id, order_index=0, question=first_question
-        )
-        await self._session.commit()
+        # get_current_user 인증 확인과 여기 사이에(특히 위 RAG 조회 + Ollama 호출로
+        # 늘어난 시간차 동안) 다른 요청이 UserService.delete_account()로 이 계정을
+        # 지워버리면(InterviewPracticeSession.user_id는 nullable=False FK), 이
+        # INSERT가 IntegrityError로 실패한다 - 143~145라운드가 고친 것과 같은
+        # 종류의 경쟁이다. 잡지 않으면 처리되지 않은 예외(500)로 새어나간다.
+        try:
+            practice_session = await self._sessions.create(user_id=user_id, topic=topic, model=model)
+            first_turn = await self._turns.create(
+                session_id=practice_session.id, order_index=0, question=first_question
+            )
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
         return practice_session, first_turn
 
     async def list_sessions(
