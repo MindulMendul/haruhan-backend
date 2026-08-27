@@ -4470,3 +4470,43 @@
       와 무관한 별개 파일이라 여기서 손대지 않고, 다음 라운드 조사를
       위한 메모로 남겨둔다.)
 
+## 백로그 (138라운드)
+
+- [x] 162. 161라운드에서 우연히 발견한
+      `UserService.update_profile`의 `IntegrityError`→409 방어 분기
+      (`user_service.py:67-73`)가 결정론적으로 커버되지 않던 문제 해소.
+      실제로는 완전히 테스트가 없던 게 아니라
+      `test_concurrent_email_change_to_same_email_yields_clean_conflict_
+      not_crash`(파일 기반 SQLite + `asyncio.gather`로 진짜 동시성을
+      재현하는 기존 테스트)가 이미 이 분기를 다루고 있었다 - 다만 이
+      테스트는 두 동시 요청 중 어느 쪽이 실제로 이 `except IntegrityError`
+      분기를 타는지가 진짜 OS 스케줄링에 좌우되는 진짜 경쟁이라, 실행마다
+      커버리지가 들쭉날쭉할 수 있는 구조였다(우연히 이 라운드 직전
+      전체 스위트 실행에서 걸리지 않아 "미커버"로 보였던 것). 진짜
+      동시성 테스트 자체는 여전히 가치 있으므로 그대로 남겨두고, 매
+      실행마다 이 분기를 결정론적으로 걸치는 보완 테스트를 별도로
+      추가했다.
+
+      `tests/test_users.py`에
+      `test_update_profile_converts_concurrent_email_conflict_to_409`
+      를 추가했다 - `get_by_email()`이 실제로는 이미 다른 사용자가
+      그 이메일로 커밋해둔 상황에서도 "충돌 없음"으로 잘못 답하는
+      상황을(`UserRepository.get_by_email`을 직접 패치해) 결정론적으로
+      만들어, `commit()` 시점에야 유니크 제약 위반이 드러나는 경로를
+      매번 정확히 재현한다. 이 테스트를 작성하는 과정에서 스크립트
+      끝에 `asyncio.run(_run())`을 실수로 중복 호출해두는 바람에 같은
+      인메모리 DB에 같은 이메일로 두 번째 삽입을 시도해 진짜
+      `IntegrityError`가 새어나가는 버그를 겪었다 - 원인을 끝까지
+      추적해(단독 스크립트로 같은 로직을 재현해보며 좁혀감) 중복 호출을
+      제거하고 나서야 의도한 대로 통과하는 것을 확인했다. 방어 분기
+      자체가 실제로 필요한지도, 직접 `except IntegrityError` 블록을
+      코드에서 임시로 제거해 이 새 테스트(및 기존 동시성 테스트)가
+      정확히 실패(처리되지 않은 `IntegrityError`가 새어나감)하는 것을
+      확인한 뒤 복원했다.
+
+      전체 471개 테스트 통과, `app/services/user_service.py` 100%
+      커버리지 복원, `mypy app tests scripts` 클린. 순수 테스트
+      보강이라 애플리케이션 코드 변경은 없었고(방어 분기 자체는 이미
+      올바르게 존재), `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      마이그레이션도 필요 없었다.
+

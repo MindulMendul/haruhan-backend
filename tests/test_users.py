@@ -385,4 +385,41 @@ def test_update_profile_and_delete_account_hash_and_verify_password_off_the_even
             assert len(call_threads) == 3
             assert all(t is not main_thread for t in call_threads)
 
-    asyncio.run(_run())
+
+def test_update_profile_converts_concurrent_email_conflict_to_409(db_session_factory, monkeypatch):
+    """update_profile()의 `get_by_email()` 확인과 `commit()` 사이에는(비밀번호를
+    같이 바꾸는 경우 해싱 시간까지 포함해) 시간차가 있다 - 같은 이메일로 두
+    프로필 변경/가입 요청이 거의 동시에 오면 둘 다 그 확인을 통과해버릴 수
+    있고, 나중에 커밋하는 쪽만 유니크 제약 위반(IntegrityError)을 실제
+    commit() 시점에야 만나게 된다. 진짜 동시 요청 타이밍 대신, `get_by_email`
+    이 "그 확인 시점에는 충돌이 없었다"고 답하는 상황을 직접 재현한다(이미
+    다른 사용자가 그 이메일로 커밋돼 있는데도 조회를 패치해 None을 반환하게
+    함) - 새어나가는 처리되지 않은 예외(500) 대신, 정상적인 "이미 존재함"
+    케이스와 같은 409로 변환되는지 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            users = UserRepository(session)
+            await users.create(email="taken@example.com", hashed_password=hash_password("existing"))
+            user = await users.create_guest()
+            await session.commit()
+
+            async def _fake_get_by_email(self, email):
+                return None
+
+            monkeypatch.setattr(UserRepository, "get_by_email", _fake_get_by_email)
+
+            service = UserService(session=session)
+            try:
+                await service.update_profile(
+                    user=user, email="taken@example.com", password=None, current_password=None
+                )
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "Email already registered"
