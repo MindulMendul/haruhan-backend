@@ -30,11 +30,19 @@ class QuizAttemptRepository:
         return result.scalars().first()
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[QuizAttempt]:
-        """사용자의 모든 퀴즈에 걸친 전체 제출 이력 - 데이터 export용."""
+        """사용자의 모든 퀴즈에 걸친 전체 제출 이력 - 데이터 export용.
+
+        submitted_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상 정의되어
+        있지 않다 - list_for_quiz()/get_latest_for_quiz()는 이미 id를 2차 정렬
+        기준으로 추가했지만, 이 메서드는 페이지네이션이 없어(중복/누락 위험은
+        없음) 그 수정에서 빠졌었다. 페이지네이션 여부와 무관하게 같은 호출이
+        매번 같은 순서를 반환하도록 일관되게 맞춘다(export 결과가 호출마다
+        달라 보이는 걸 방지).
+        """
         result = await self._session.execute(
             select(QuizAttempt)
             .where(QuizAttempt.user_id == user_id)
-            .order_by(QuizAttempt.submitted_at)
+            .order_by(QuizAttempt.submitted_at, QuizAttempt.id)
         )
         return list(result.scalars().all())
 

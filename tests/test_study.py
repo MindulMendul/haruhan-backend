@@ -120,6 +120,42 @@ def test_list_for_user_breaks_updated_at_ties_deterministically():
     assert "id" in order_by_clause
 
 
+def test_list_all_for_user_breaks_created_at_ties_deterministically():
+    """list_for_user()(페이지네이션 있음)는 위 테스트처럼 이미 id를 2차 정렬
+    기준으로 쓰는데, 데이터 export가 쓰는 list_all_for_user()(페이지네이션
+    없음)는 created_at만으로 정렬해 같은 문제(SQL 표준상 동률 순서 미정의)가
+    남아 있었다 - 페이지네이션이 없어 중복/누락 위험은 없지만, 같은 호출이
+    매번 다른 순서를 반환할 수 있다는 점은 동일하다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.study_session_repository import StudySessionRepository
+
+    class _CapturingResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = StudySessionRepository(session)
+    asyncio.run(repo.list_all_for_user(uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    order_by_clause = str(session.captured_statement).split("ORDER BY")[1]
+    assert "created_at" in order_by_clause
+    assert "id" in order_by_clause
+
+
 def test_list_sessions_default_pagination_returns_all_when_under_limit(client):
     token = _signup_and_get_token(client)
     client.post("/api/v1/study/sessions", json={"title": "세션"}, headers=_auth_headers(token))

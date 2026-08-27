@@ -4211,3 +4211,47 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
       없었다.
 
+## 백로그 (131라운드)
+
+- [x] 155. 데이터 export(`GET /export/me`)가 쓰는 페이지네이션 없는
+      `list_all_for_user`/`list_for_user`류 메서드 5개에 `id` 2차 정렬
+      기준이 빠져 있던 문제 수정. 94번 라운드가 `list_for_user`(페이지네이션
+      있음, LIMIT/OFFSET) 형제 메서드들에는 이미 이 문제(타임스탬프만으로
+      정렬하면 값이 같은 행 사이의 순서가 SQL 표준상 정의되지 않음)를
+      고쳤는데, export 전용으로 페이지네이션 없이 전체를 가져오는 다섯
+      메서드(`StudySessionRepository.list_all_for_user`/
+      `InterviewPracticeSessionRepository.list_all_for_user`/
+      `QuizRepository.list_all_for_user`/
+      `InterviewReviewRepository.list_all_for_user`/
+      `QuizAttemptRepository.list_for_user`)는 그 수정에서 빠져 있었다 -
+      154라운드의 조사가 후보로 처음 발견해 "페이지네이션이 없어 중복/
+      누락 위험은 없지만, 같은 호출이 매번 다른 순서를 반환할 수 있다"고
+      낮은 우선순위로 남겨둔 항목을, 이번 라운드에서 다른 더 나은
+      후보(세션 삭제 중 동시 메시지/답변 생성이 RAG 색인을 고아로 남기는
+      경쟁 상태)를 검토했으나 그건 `send_message`/`stream_message`에
+      아직 없는 잠금 규율을 이 코드베이스에서 가장 자주 호출되는 채팅
+      경로에 새로 도입해야 하는 더 크고 위험한 변경이라 이번 라운드
+      범위로는 보류하고, 안전하고 이미 검증된 패턴을 그대로 반복하는
+      이 항목을 대신 골랐다.
+
+      다섯 파일 모두 기존 타임스탬프 정렬 기준 뒤에 `id`를 2차 기준으로
+      추가했다(정렬 방향은 각 메서드의 기존 오름차순/내림차순을 그대로
+      유지). `tests/test_study.py`/`tests/test_interview_practice.py`/
+      `tests/test_quiz.py`/`tests/test_interview_review.py`에는 94라운드가
+      페이지네이션 형제 메서드에 쓴 것과 같은 statement-interception
+      기법(리포지토리가 세션에 전달하는 실제 SQL의 `ORDER BY` 절에 `id`가
+      포함돼 있는지 직접 확인 - 이 동시성은 SQLite로 재현할 수 없어
+      68번 라운드와 같은 이유로 이 기법을 쓴다)으로 4개를 추가했고,
+      `QuizAttemptRepository.list_for_user`만 이미 같은 파일
+      (`tests/test_quiz_submission_dedup.py`)에 있던
+      `get_latest_for_quiz`용 "완전히 같은 시각의 시도 두 개를 직접
+      생성"하는 더 강한 기법(간접 검증이 아니라 실제 결과 순서를
+      확인)을 그대로 재사용했다. `git stash`로 다섯 리포지토리 수정만
+      되돌리면 5개 테스트 전부 정확히 실패(`ORDER BY`에 `id`가 없거나,
+      먼저 만든 시도가 실제로 먼저 안 나옴)하는 것까지 확인했다. 전체
+      455개 테스트 통과, 전체 커버리지 99%(수정한 리포지토리 5개 전부
+      100% 유지), `mypy app tests scripts` 클린. `GET /export/me`의
+      응답 스키마/필드는 그대로고 배열 순서 결정성만 좋아진 것이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요
+      없었다.
+

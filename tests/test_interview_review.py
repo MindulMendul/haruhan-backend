@@ -220,6 +220,46 @@ def test_list_for_user_breaks_interview_date_ties_deterministically():
     assert "id" in order_by_clause
 
 
+def test_list_all_for_user_breaks_created_at_ties_deterministically():
+    """list_for_user()(페이지네이션 있음)는 위 테스트처럼 이미 id를 2차 정렬
+    기준으로 쓰는데, 데이터 export가 쓰는 list_all_for_user()(페이지네이션
+    없음, created_at 기준 정렬)는 같은 문제(SQL 표준상 동률 순서 미정의)가
+    남아 있었다 - 페이지네이션이 없어 중복/누락 위험은 없지만, 같은 호출이
+    매번 다른 순서를 반환할 수 있다는 점은 동일하다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.interview_review_repository import InterviewReviewRepository
+
+    class _CapturingResult:
+        def scalar_one_or_none(self):
+            return None
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = InterviewReviewRepository(session)
+    asyncio.run(repo.list_all_for_user(uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    compiled = str(session.captured_statement)
+    order_by_clause = compiled.split("ORDER BY")[1]
+    assert "created_at" in order_by_clause
+    assert "id" in order_by_clause
+
+
 def test_update_without_content_keeps_feedback(client):
     fake = FakeOllamaService()
     client.app.dependency_overrides[get_ollama_service] = lambda: fake

@@ -45,9 +45,16 @@ class QuizRepository:
 
     async def list_all_for_user(self, user_id: uuid.UUID) -> list[Quiz]:
         """페이지네이션 없이 전체를 가져온다 - 오답노트/데이터 export처럼 전량이
-        필요할 때 쓴다."""
+        필요할 때 쓴다.
+
+        created_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상 정의되어
+        있지 않다 - list_for_user()는 이미 id를 2차 정렬 기준으로 추가했지만, 이
+        메서드는 페이지네이션이 없어(중복/누락 위험은 없음) 그 수정에서 빠졌었다.
+        페이지네이션 여부와 무관하게 같은 호출이 매번 같은 순서를 반환하도록
+        일관되게 맞춘다(오답노트/export 결과가 호출마다 달라 보이는 걸 방지).
+        """
         result = await self._session.execute(
-            select(Quiz).where(Quiz.user_id == user_id).order_by(Quiz.created_at.desc())
+            select(Quiz).where(Quiz.user_id == user_id).order_by(Quiz.created_at.desc(), Quiz.id.desc())
         )
         return list(result.scalars().all())
 

@@ -153,3 +153,48 @@ def test_get_latest_for_quiz_breaks_submitted_at_ties_by_id(db_session_factory):
             assert latest.id == attempt_b.id
 
     asyncio.run(_run())
+
+
+def test_list_for_user_breaks_submitted_at_ties_by_id(db_session_factory):
+    """list_for_quiz()/get_latest_for_quiz()는 이미 id를 2차 정렬 기준으로
+    쓰는데, 데이터 export가 쓰는 list_for_user()(한 사용자의 모든 퀴즈에
+    걸친 전체 제출 이력, 페이지네이션 없음)는 submitted_at만으로 정렬해
+    같은 문제(SQL 표준상 동률 순서 미정의)가 남아 있었다 - 페이지네이션이
+    없어 중복/누락 위험은 없지만, 같은 호출이 매번 다른 순서를 반환할 수
+    있다는 점은 동일하다. 위 테스트와 같은 방식으로 submitted_at이 완전히
+    같은 시도 두 개를 직접 만들어, id 오름차순으로 결정론적으로 정렬되는지
+    확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            quiz = await QuizRepository(session).create(
+                user_id=user.id, title="퀴즈", source_study_session_id=None
+            )
+            await session.commit()
+
+            tied_time = utcnow_naive()
+            attempt_a = QuizAttempt(
+                id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+                quiz_id=quiz.id,
+                user_id=user.id,
+                score=1,
+                total=1,
+                submitted_at=tied_time,
+            )
+            attempt_b = QuizAttempt(
+                id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
+                quiz_id=quiz.id,
+                user_id=user.id,
+                score=2,
+                total=2,
+                submitted_at=tied_time,
+            )
+            session.add_all([attempt_a, attempt_b])
+            await session.commit()
+
+            attempts = await QuizAttemptRepository(session).list_for_user(user.id)
+
+            assert [a.id for a in attempts] == [attempt_a.id, attempt_b.id]
+
+    asyncio.run(_run())
