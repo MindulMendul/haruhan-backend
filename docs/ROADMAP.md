@@ -4285,3 +4285,45 @@
       코드/API 응답 형태에 영향이 없어 `docs/FRONTEND_INTEGRATION.md`
       갱신도, 마이그레이션도 필요 없었다.
 
+## 백로그 (133라운드)
+
+- [x] 157. 데이터 export(`GET /export/me`)가 쓰는
+      `QuizAnswerRepository.list_for_attempts`(복수형)에도 154라운드가
+      단수형 `list_for_attempt`(`GET /quizzes/{id}/result`가 씀)에 적용한
+      것과 같은 정렬 누락 문제가 남아 있던 것을 발견해 수정. 154라운드는
+      `list_for_attempt`가 `ORDER BY` 없이 조회돼(요청 스키마가 문항 순서
+      제출을 강제 안 하므로 답안이 사실상 임의 순서로 INSERT됨) 결과 순서가
+      SQL 표준상 정의되지 않던 문제를 `QuizQuestion`과 조인해 그
+      `order_index`로 정렬하는 방식으로 고쳤는데, 86라운드에서 export의
+      N+1을 없애려고 따로 만든 복수형 `list_for_attempts`(여러 시도의
+      답안을 한 번에 가져와 파이썬에서 attempt_id별로 묶는 메서드)는
+      `attempt_id`로만 정렬해 같은 시도 안 답안 순서 자체는 여전히
+      정의되지 않은 채로 남아 있었다 - `GET /quizzes/{id}/result`가
+      보여주는 답안 순서와 `GET /export/me`가 보여주는 같은 시도의 답안
+      순서가 서로 어긋나 보일 수 있는, 두 뷰 사이의 실제 데이터 불일치
+      문제였다.
+
+      `list_for_attempts`도 같은 방식으로 `QuizQuestion`과 조인해
+      `(attempt_id, order_index)` 순으로 정렬하도록 고쳤다. 처음에는
+      154라운드와 같은 패턴(문항을 뒤바꿔 제출한 뒤 `GET /export/me`의
+      실제 응답 순서를 확인)으로 엔드투엔드 회귀 테스트를 작성했는데,
+      `git stash`로 수정만 되돌려도 이 테스트가 그대로 통과해버리는
+      것을 발견했다 - `submit_answers`가 이미(154라운드 수정으로) 문항
+      순서대로 `QuizAnswer` 행을 INSERT하므로, SQLite가 이 정도로 단순한
+      쿼리에서는 별도 `ORDER BY`가 없어도 우연히 그 삽입 순서를 그대로
+      돌려줘 버그가 있어도 테스트가 통과해버리는 것이었다(68/106라운드와
+      같은 성격의 함정). 그래서 `interview_review.py`의 동률 정렬
+      테스트들이 이미 쓰는 statement-interception 기법(리포지토리가
+      세션에 전달하는 실제 SQL을 가로채, 컴파일된 문에 `JOIN
+      quiz_questions`와 `ORDER BY`의 `order_index`가 실제로 있는지 직접
+      확인)으로 바꿔 다시 작성했다 - `git stash`로 리포지토리 수정만
+      되돌리면 이번엔 정확히 실패(조인/정렬절이 없음)하는 것까지
+      확인했다. 처음에 썼다가 버린, 아무것도 증명 못 하는 엔드투엔드
+      테스트는 지웠다(잘못된 검증을 남겨두지 않기 위함).
+
+      전체 457개 테스트 통과, 전체 커버리지 99%
+      (`quiz_attempt_repository.py` 100% 포함), `mypy app tests scripts`
+      클린. `GET /export/me`의 응답 스키마/필드는 그대로고 배열 순서만
+      바뀐 것이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
+      필요 없었다.
+

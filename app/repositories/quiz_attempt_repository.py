@@ -113,10 +113,22 @@ class QuizAnswerRepository:
     async def list_for_attempts(self, attempt_ids: list[uuid.UUID]) -> list[QuizAnswer]:
         """여러 시도의 답안을 한 번에 가져온다 (데이터 export처럼 시도마다
         따로 조회하면 시도 개수만큼 쿼리가 느는 N+1을 피하려는 용도). 호출부에서
-        attempt_id별로 묶어서 쓴다."""
+        attempt_id별로 묶어서 쓴다.
+
+        정렬은 attempt_id까지만이라 각 시도 내부의 답안 순서는 여전히 SQL
+        표준상 정의되어 있지 않았다 - list_for_attempt()(단수, GET /result가
+        씀)는 154라운드에서 이 문제를 QuizQuestion과 조인해 order_index로
+        정렬하는 방식으로 이미 고쳤는데, 이 복수형 메서드(데이터 export가
+        씀)는 그 수정에서 빠져 있었다. 같은 이유로 같은 시도의 답안이
+        GET /quizzes/{id}/result가 보여주는 순서와 GET /export/me가 보여주는
+        순서가 서로 어긋나 보일 수 있었다. attempt_id 그룹 안에서도
+        order_index로 정렬되도록 2차 정렬 기준을 추가한다."""
         if not attempt_ids:
             return []
         result = await self._session.execute(
-            select(QuizAnswer).where(QuizAnswer.attempt_id.in_(attempt_ids)).order_by(QuizAnswer.attempt_id)
+            select(QuizAnswer)
+            .join(QuizQuestion, QuizAnswer.question_id == QuizQuestion.id)
+            .where(QuizAnswer.attempt_id.in_(attempt_ids))
+            .order_by(QuizAnswer.attempt_id, QuizQuestion.order_index)
         )
         return list(result.scalars().all())

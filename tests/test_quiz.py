@@ -597,6 +597,51 @@ def test_submit_answers_out_of_order_returns_result_in_question_order(client):
     ]
 
 
+def test_list_for_attempts_orders_answers_by_question_order():
+    """QuizAnswerRepository.list_for_attempt(단수, GET /result가 씀)는 위
+    테스트가 검증하는 대로 QuizQuestion과 조인해 order_index로 정렬하도록
+    이미 고쳐져 있는데, 데이터 export가 쓰는 list_for_attempts(복수)는
+    attempt_id로만 정렬해 각 시도 안의 답안 순서 자체는 여전히 SQL
+    표준상 정의돼 있지 않았다 - GET /export/me의 answers 순서가
+    GET /result와 어긋나 보일 수 있다. 다만 이 회귀는 실제 API를 통한
+    end-to-end 테스트로는 재현할 수 없다(직접 확인함) - submit_answers는
+    이미 문항 순서대로 QuizAnswer 행을 INSERT하므로(154라운드), SQLite가
+    이 정도로 단순한 쿼리에서는 우연히 그 삽입 순서를 그대로 돌려줘 버그가
+    있어도 테스트가 통과해버린다(68/106번 라운드와 같은 성격의 함정 -
+    실제로 시도해서 확인함). 대신 리포지토리가 세션에 전달하는 실제
+    statement를 가로채, 컴파일된 SQL이 QuizQuestion과 조인해 order_index로
+    정렬하는지 직접 확인한다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.quiz_attempt_repository import QuizAnswerRepository
+
+    class _CapturingResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = QuizAnswerRepository(session)
+    asyncio.run(repo.list_for_attempts([uuid.uuid4()]))
+
+    assert session.captured_statement is not None
+    compiled = str(session.captured_statement)
+    assert "JOIN quiz_questions" in compiled
+    order_by_clause = compiled.split("ORDER BY")[1]
+    assert "order_index" in order_by_clause
+
+
 def test_resubmitting_identical_answers_quickly_returns_same_attempt(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)
