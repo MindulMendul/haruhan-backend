@@ -234,6 +234,28 @@ class Settings(BaseSettings):
             ) from exc
         return value
 
+    @field_validator("max_prompt_length")
+    @classmethod
+    def _validate_max_prompt_length_is_positive(cls, value: int) -> int:
+        """`ChatRequest`/`StudyMessageCreateRequest`/`InterviewPracticeAnswerRequest`
+        의 `validate_*_length` field_validator와 `routes/study.py`의 WS
+        스트리밍 경로가 전부 이 값을 `len(value) > max_length`로 검사한다.
+        이 값이 0 이하면(단위 착각, 오타 등) `min_length=1`을 통과한(=빈
+        문자열이 아닌) 어떤 메시지든 항상 이 조건을 만족해 거부된다 -
+        `/api/chat`/학습챗(REST+WS)/면접연습 답변 제출 전부를 포함해 이 앱의
+        AI 메시징 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속
+        막히게 된다(159라운드가 고친 `MAX_QUIZ_CHOICE_COUNT`보다 영향
+        범위가 더 넓다 - 그쪽은 퀴즈 생성만 막았지만 이건 메시지를 보내는
+        모든 기능을 막는다). `Settings()` 생성 자체는 성공해 앱도 정상적으로
+        뜨므로, 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_PROMPT_LENGTH({value})는 0보다 커야 합니다 - 0 이하면 빈 "
+                "문자열이 아닌 어떤 메시지도 항상 길이 초과로 거부되어 학습챗/"
+                "면접연습/일반 채팅 등 메시지를 보내는 모든 기능이 막힙니다."
+            )
+        return value
+
     @field_validator("max_quiz_choice_count")
     @classmethod
     def _validate_max_quiz_choice_count(cls, value: int) -> int:

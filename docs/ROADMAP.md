@@ -4396,3 +4396,34 @@
       그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도
       필요 없었다.
 
+## 백로그 (136라운드)
+
+- [x] 160. `MAX_PROMPT_LENGTH`에 하한 검증이 없어, 0 이하로 설정하면 이
+      앱의 AI 메시징 기능 전체(`/api/chat`, 학습챗 REST+WS, 면접연습 답변
+      제출)가 시작 시점엔 전혀 티가 안 나는 상태로 계속 막히던 문제 수정.
+      `ChatRequest`/`StudyMessageCreateRequest`/
+      `InterviewPracticeAnswerRequest`의 길이 검증 `field_validator`와
+      `routes/study.py`의 WS 스트리밍 경로가 전부 이 값을
+      `len(value) > max_length`로 검사하는데, 이 값이 0 이하면
+      `min_length=1`을 통과한(=빈 문자열이 아닌) 어떤 메시지든 항상 이
+      조건을 만족해 거부된다 - 159라운드가 고친 `MAX_QUIZ_CHOICE_COUNT`
+      (퀴즈 생성만 막힘)보다 영향 범위가 더 넓다(메시지를 보내는 모든
+      기능이 막힘). `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로,
+      이 파일이 이미 여러 라운드에 걸쳐 막아온 "Settings 필드 하나가
+      시작 시점 검증 없이 조용히 앱을 망가진 상태로 띄우는" 클래스의,
+      159라운드가 "이제 없다"고 여겼던 것과 달리 실제로는 남아있던
+      인스턴스였다.
+
+      `app/core/config.py`에 `max_prompt_length`용 `field_validator`를
+      추가해(`_validate_token_expiry_is_positive`/
+      `_validate_max_quiz_choice_count`와 같은 위치·문체) `<= 0`이면
+      거부하도록 했다. `tests/test_config.py`에
+      `test_settings_accepts_positive_max_prompt_length`와
+      `test_settings_rejects_non_positive_max_prompt_length`(0/-1
+      parametrize)를 추가했다. `git stash`로 `app/core/config.py`
+      수정만 되돌리면 두 케이스 모두 정확히 실패(`ValidationError`가
+      안 남)하는 것까지 확인했다. 전체 467개 테스트 통과, 전체 커버리지
+      99%(`app/core/config.py` 100% 포함), `mypy app tests scripts`
+      클린. 정상 범위(양수) 설정의 동작은 그대로라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, 마이그레이션도 필요 없었다.
+

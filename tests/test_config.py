@@ -139,3 +139,21 @@ def test_settings_rejects_max_quiz_choice_count_below_four(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, max_quiz_choice_count=bad_value)
     assert "MAX_QUIZ_CHOICE_COUNT" in str(exc_info.value)
+
+
+def test_settings_accepts_positive_max_prompt_length():
+    settings = Settings(jwt_secret_key="a" * 32, max_prompt_length=1)
+    assert settings.max_prompt_length == 1
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_max_prompt_length(bad_value):
+    """ChatRequest/StudyMessageCreateRequest/InterviewPracticeAnswerRequest의
+    길이 검증과 routes/study.py의 WS 스트리밍 경로가 전부 이 값을
+    len(value) > max_length로 검사한다. 0 이하면 min_length=1을 통과한(=빈
+    문자열이 아닌) 어떤 메시지든 항상 이 조건을 만족해 거부되어, 학습챗/
+    면접연습/일반 채팅 등 메시지를 보내는 기능 전체가 시작 시점에는 전혀
+    티가 안 나는 상태로 계속 막히게 된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, max_prompt_length=bad_value)
+    assert "MAX_PROMPT_LENGTH" in str(exc_info.value)
