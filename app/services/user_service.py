@@ -3,12 +3,26 @@ import asyncio
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.metrics import guest_conversions_total
 from app.core.password import PasswordTooLongError, hash_password, verify_password
 from app.db.models.user import User
 from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
+
+# get_current_user가 검증한 시점과 이 요청이 실제로 커밋하는 시점 사이에 (다른 탭의
+# delete_account() 호출이든, 159라운드가 추가한 cleanup_stale_guest_accounts cron
+# job이든) 이 계정이 지워지면, ORM이 로드해둔 User 객체를 수정한 뒤 커밋할 때
+# "UPDATE ... WHERE id = :id"가 0행에 매치되어 StaleDataError가 난다 - IntegrityError
+# (자식 테이블 INSERT가 사라진 FK를 참조하는 경우, 143~171라운드)와는 다른 경쟁으로,
+# users 테이블 자신에 대한 UPDATE가 대상이다. study_service.py 등이 쓰는 것과 같은
+# 코드/메시지로 응답해, 클라이언트가 재시도해도 get_current_user가 어차피 이 코드로
+# 401을 낼 상황과 동일하게 다루도록 한다.
+_ACCOUNT_GONE = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_token", "message": "Could not validate credentials"},
+)
 
 
 class UserService:
@@ -71,6 +85,9 @@ class UserService:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
             ) from None
+        except StaleDataError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
         return user
 
     async def upgrade_guest(self, user: User, email: str, password: str) -> User:
@@ -101,6 +118,9 @@ class UserService:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
             ) from None
+        except StaleDataError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
         guest_conversions_total.inc()
         return user
 

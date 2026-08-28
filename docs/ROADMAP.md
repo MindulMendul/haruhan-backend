@@ -5543,3 +5543,55 @@
       재접근 불가로 문서화돼 있음) 자체는 바뀌지 않아
       `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (160라운드)
+
+- [x] 184. `UserService.update_profile()`/`upgrade_guest()`가 계정이 요청 도중
+      지워지면 처리되지 않은 `StaleDataError`(500)로 끝나던 문제 해소 -
+      143~171라운드가 집중적으로 고친 `IntegrityError`(자식 테이블
+      INSERT가 이미 사라진 `user_id` FK를 참조할 때)와는 다른 종류의
+      경쟁이다. 이 두 메서드는 이미 로드해둔 `User` ORM 객체의 속성을
+      바꾼 뒤 `commit()`에서 SQLAlchemy가 `UPDATE users SET ... WHERE
+      id = :id`를 내게 하는데, `get_current_user`가 인증을 확인한
+      시점과 이 `commit()` 사이에 다른 요청의 `delete_account()`가(또는
+      159라운드가 막 추가한 `cleanup_stale_guest_accounts` cron job이)
+      먼저 그 행을 지워버리면 이 UPDATE가 0행에 매치되고, SQLAlchemy의
+      ORM 계층이 기본으로 이를 감지해 `StaleDataError`를 던진다(버전
+      컬럼 등 별도 설정 없이도 항상 켜져 있는 동작).
+
+      직접 재현 스크립트로 확인했다: 세션 A에서 게스트를 로드해두고
+      세션 B로 같은 계정을 완전히 지운 뒤, 세션 A에서 속성만 바꾸고
+      커밋하면 정확히 `sqlalchemy.orm.exc.StaleDataError: UPDATE
+      statement on table 'users' expected to update 1 row(s); 0 were
+      matched.`가 난다. `grep -rn StaleDataError app/`로 이 예외가
+      앱 어디에서도 다뤄지지 않고 있음을 확인했다. 실제로 재현
+      가능한 경로: (1) 같은 계정을 두 탭/기기로 열어두고 한쪽에서
+      계정 삭제, 다른 쪽에서 거의 동시에 프로필 수정, (2) 게스트가
+      `/auth/logout`으로 유일한 refresh token을 폐기한 직후, 아직
+      만료 전인 access token으로 `/users/me/upgrade`를 부르는 사이에
+      마침 `cleanup_stale_guest_accounts`(매일 06:00) cron이 그 계정을
+      정리해버리는 경우.
+
+      `app/services/user_service.py`에 다른 세 서비스(`study_service.py`
+      /`interview_practice_service.py`/`interview_review_service.py`,
+      146라운드)와 정확히 같은 코드/메시지의 `_ACCOUNT_GONE`
+      상수(401, `{"code": "invalid_token", ...}`)를 추가하고,
+      `update_profile()`/`upgrade_guest()` 양쪽의 기존 `except
+      IntegrityError:` 블록 옆에 `except StaleDataError:` 분기를
+      더해 같은 401로 변환하도록 했다 - 재시도해도 `get_current_user`
+      가 어차피 이 코드로 401을 낼 상황이라 클라이언트 입장에서
+      동일하게 다뤄야 하는 것도 기존 패턴과 같다.
+
+      `tests/test_users.py`에 두 메서드 각각에 대한 회귀 테스트를
+      추가했다 - 143라운드 계열이 확립한 "리포지토리 메서드를
+      몽키패치해 그 안에서 별도 세션으로 실제 삭제를 수행" 기법을
+      그대로 썼다(`get_by_email` 호출 직후 계정을 지우도록). `git
+      stash`로 `user_service.py`만 되돌리면 두 테스트 모두 (500으로
+      새어나가는 `StaleDataError`를 pytest가 그대로 잡아) 정확히
+      실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 525개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`app/services/user_service.py` 100% 커버리지 유지). 스키마
+      변경이 없어 마이그레이션은 필요 없었고, 이미 다른 세 서비스가
+      같은 코드로 401을 내고 있어 `FRONTEND_INTEGRATION.md`가 이미
+      문서화한 계약과 일치하므로 갱신도 필요 없었다.
+

@@ -423,3 +423,85 @@ def test_update_profile_converts_concurrent_email_conflict_to_409(db_session_fac
     assert exc is not None
     assert exc.status_code == 409
     assert exc.detail == "Email already registered"
+
+
+def test_update_profile_returns_401_when_account_deleted_during_request(db_session_factory, monkeypatch):
+    """get_current_user 인증 확인과 이 commit() 사이에 다른 요청이
+    UserService.delete_account()로(또는 159라운드가 추가한
+    cleanup_stale_guest_accounts cron job으로) 이 계정을 지워버리면, ORM이 이미
+    들고 있는 User 객체에 대한 UPDATE가 0행에 매치되어 StaleDataError가 난다 -
+    143~171라운드가 자식 테이블 INSERT를 대상으로 고친 IntegrityError와는 다른
+    경쟁으로, users 테이블 자신에 대한 UPDATE가 대상이다. get_by_email 조회
+    "직후" 별도 세션에서 이 계정을 완전히 지우도록 만들어서 이 좁은 타이밍을
+    결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            users = UserRepository(session)
+            user = await users.create_guest()
+            await session.commit()
+            user_id = user.id
+
+            original_get_by_email = UserRepository.get_by_email
+
+            async def _deleting_get_by_email(self, email):
+                async with db_session_factory() as session_b:
+                    users_b = UserRepository(session_b)
+                    target = await users_b.get_by_id(user_id)
+                    await users_b.delete(target)
+                    await session_b.commit()
+                return await original_get_by_email(self, email)
+
+            monkeypatch.setattr(UserRepository, "get_by_email", _deleting_get_by_email)
+
+            service = UserService(session=session)
+            try:
+                await service.update_profile(
+                    user=user, email="new@example.com", password=None, current_password=None
+                )
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+    assert exc.detail == {"code": "invalid_token", "message": "Could not validate credentials"}
+
+
+def test_upgrade_guest_returns_401_when_account_deleted_during_request(db_session_factory, monkeypatch):
+    """update_profile()의 위 테스트와 같은 경쟁을 upgrade_guest()에서도 재현한다 -
+    이 메서드는 email 지정 여부와 무관하게 항상 get_by_email을 부른다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            users = UserRepository(session)
+            user = await users.create_guest()
+            await session.commit()
+            user_id = user.id
+
+            original_get_by_email = UserRepository.get_by_email
+
+            async def _deleting_get_by_email(self, email):
+                async with db_session_factory() as session_b:
+                    users_b = UserRepository(session_b)
+                    target = await users_b.get_by_id(user_id)
+                    await users_b.delete(target)
+                    await session_b.commit()
+                return await original_get_by_email(self, email)
+
+            monkeypatch.setattr(UserRepository, "get_by_email", _deleting_get_by_email)
+
+            service = UserService(session=session)
+            try:
+                await service.upgrade_guest(user=user, email="new@example.com", password="supersecret")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+    assert exc.detail == {"code": "invalid_token", "message": "Could not validate credentials"}
