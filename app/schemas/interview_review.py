@@ -1,11 +1,11 @@
 import uuid
-from datetime import date, datetime
+from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.clock import utcnow_naive
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr
+from app.schemas.validators import NonBlankStr, UtcDatetime
 
 
 def _validate_interview_date_not_in_future(value: date) -> date:
@@ -84,5 +84,5 @@ class InterviewReviewResponse(BaseModel):
     interview_date: date
     content: str
     ai_feedback: str | None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime

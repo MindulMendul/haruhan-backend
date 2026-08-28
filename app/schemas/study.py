@@ -1,11 +1,10 @@
 import uuid
-from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr
+from app.schemas.validators import NonBlankStr, UtcDatetime
 
 
 class StudySessionCreateRequest(BaseModel):
@@ -23,8 +22,8 @@ class StudySessionResponse(BaseModel):
     id: uuid.UUID
     title: str
     model: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class StudyMessageResponse(BaseModel):
@@ -33,7 +32,7 @@ class StudyMessageResponse(BaseModel):
     id: uuid.UUID
     role: Literal["user", "assistant"]
     content: str
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class StudySessionDetailResponse(StudySessionResponse):

@@ -1,9 +1,8 @@
 import uuid
-from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, model_validator
 
-from app.schemas.validators import NormalizedEmail
+from app.schemas.validators import NormalizedEmail, UtcDatetime
 
 
 class UserResponse(BaseModel):
@@ -11,7 +10,7 @@ class UserResponse(BaseModel):
 
     id: uuid.UUID
     email: EmailStr | None
-    created_at: datetime
+    created_at: UtcDatetime
 
     @computed_field  # type: ignore[prop-decorator]  # pydantic v2 computed_field + property, mypy plugin gap
     @property

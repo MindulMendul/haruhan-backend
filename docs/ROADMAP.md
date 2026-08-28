@@ -5419,3 +5419,60 @@
       템플릿 파일 주석 수정이라 애플리케이션 동작 변경은 없고, DB
       스키마 변경도 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (158라운드)
+
+- [x] 182. API 응답의 모든 datetime 필드가 타임존 표기 없이(naive) 직렬화되던
+      문제 해소 - `docs/FRONTEND_INTEGRATION.md:302-303`은
+      `submitted_at`을 `"2026-08-21T12:00:00Z"`처럼 `Z` 접미사가 붙은
+      형태로 문서화하고 있었는데, 실제 앱을 직접 띄워 응답을 찍어보니
+      (`create_app()` + `FakeOllamaService`로 학습챗/퀴즈/면접연습/
+      면접복기 전체 플로우를 수동으로 실행) 모든 타임스탬프가
+      `"2026-08-28T04:36:50.771154"`처럼 `Z`도 오프셋도 없이 나가고
+      있었다.
+
+      원인: `app/core/clock.py`의 `utcnow_naive()`가 앱 전체에서
+      tz 정보 없는 UTC naive datetime만 저장/사용하도록 통일해뒀는데
+      (SQLite/Postgres tz-aware 처리 차이 회피 목적), 어떤 스키마에도
+      커스텀 직렬화기(`field_serializer`/`json_encoders`)가 없어
+      Pydantic 기본 `datetime.isoformat()`이 그대로 쓰이고 있었다 -
+      naive 값에는 `Z`도 오프셋도 붙이지 않는다. ECMA-262 Date Time
+      String Format 규격상 `new Date("...")`는 타임존 표기가 없는
+      문자열을 UTC가 아니라 **브라우저 로컬 시간**으로 해석하므로,
+      `docs/FRONTEND_INTEGRATION.md`가 명시적으로 타겟으로 삼는
+      한국(KST, UTC+9) 프론트가 자연스럽게 `new Date(response.created_at)`
+      를 쓰면 모든 화면의 타임스탬프가 9시간씩 밀려 보이게 된다 -
+      단순 문서 오기가 아니라 실제 프론트 연동 정확성 버그다.
+
+      `app/schemas/validators.py`에 `UtcDatetime` 타입(기존
+      `NormalizedEmail`/`NonBlankStr`과 같은 `Annotated` + 후처리
+      패턴)을 추가했다 - naive datetime엔 `"Z"`를 붙이고, (이 앱에서는
+      나오지 않지만 방어적으로) tz-aware 값은 이미 오프셋이 있으므로
+      그대로 둔다. `app/schemas/{auth,export,interview_practice,
+      interview_review,quiz,study,user}.py`의 응답 전용 `datetime`
+      필드 24개(요청 스키마의 필드는 없음 - 이 앱은 datetime을 입력
+      으로 받는 필드가 없다) 전부를 이 타입으로 바꿨다. WebSocket
+      스트리밍 라우트(`routes/study.py`, `routes/interview_review.py`)
+      는 같은 `*Response` 스키마의 `model_dump(mode="json")`을
+      재사용하므로 REST/WS 양쪽 다 한 번에 고쳐진다.
+
+      `tests/test_utc_datetime_serialization.py`를 새로 추가했다 -
+      (1) `UtcDatetime` 자체에 대한 순수 단위 테스트 2개(naive 값엔
+      `Z`가 붙는지, tz-aware 값엔 중복으로 붙지 않는지), (2) 실제
+      FastAPI 엔드포인트(`POST /study/sessions`, `GET /auth/sessions`)
+      를 호출해 응답 JSON의 타임스탬프가 실제로 `Z`로 끝나는지 확인
+      하는 통합 테스트 2개. `git stash`로 스키마 8개 파일 수정을
+      되돌리면 이 테스트 파일이 `ImportError`로 아예 수집 자체가
+      안 되는 것까지 확인했다(고치기 전엔 `UtcDatetime`이 존재하지
+      않았으므로).
+
+      `docs/FRONTEND_INTEGRATION.md`도 함께 정리했다 - `exported_at`
+      예시(`"2026-01-01T00:00:00"`)에 빠져있던 `Z`를 추가했고,
+      2절(공통 에러 규칙)에 "응답의 모든 타임스탬프는 `Z` 접미사가
+      붙은 UTC ISO 8601"이라는 문장을 명시적으로 추가해, 앞으로
+      이 관례가 다시 애매해지지 않도록 했다.
+
+      전체 516개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`app/schemas/validators.py` 100% 커버리지 포함). DB에
+      저장되는 값은 여전히 naive UTC 그대로이고 직렬화 방식만
+      바뀐 것이라 마이그레이션은 필요 없었다.
+

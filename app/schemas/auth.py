@@ -1,9 +1,8 @@
 import uuid
-from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.validators import NormalizedEmail
+from app.schemas.validators import NormalizedEmail, UtcDatetime
 
 
 class SignupRequest(BaseModel):
@@ -34,5 +33,5 @@ class SessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    created_at: datetime
-    expires_at: datetime
+    created_at: UtcDatetime
+    expires_at: UtcDatetime

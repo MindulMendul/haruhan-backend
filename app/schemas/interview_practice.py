@@ -1,11 +1,10 @@
 import uuid
-from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr
+from app.schemas.validators import NonBlankStr, UtcDatetime
 
 
 class InterviewPracticeCreateRequest(BaseModel):
@@ -25,7 +24,7 @@ class InterviewPracticeTurnResponse(BaseModel):
     question: str
     answer: str | None
     feedback: str | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class InterviewPracticeSessionResponse(BaseModel):
@@ -36,8 +35,8 @@ class InterviewPracticeSessionResponse(BaseModel):
     model: str
     status: Literal["in_progress", "completed"]
     overall_feedback: str | None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class InterviewPracticeSessionDetailResponse(InterviewPracticeSessionResponse):

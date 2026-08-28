@@ -174,6 +174,8 @@ DELETE /api/v1/auth/sessions           → 204 (모든 기기에서 로그아웃
 
 다른 사용자 소유의 리소스에 접근하면 (예: 남의 quiz_id로 조회) `403`이 아니라 **`404`**로 응답합니다 (리소스 존재 여부 자체를 숨김).
 
+응답 바디의 모든 타임스탬프 필드(`created_at`/`updated_at`/`submitted_at`/`expires_at`/`exported_at` 등)는 항상 UTC 기준 ISO 8601이며 `Z` 접미사가 붙어 있습니다 (예: `2026-08-21T12:00:00Z`). `Z`가 없으면 `new Date(...)`가 브라우저 로컬 시간으로 오해석하니, 그대로 `new Date(response.created_at)`에 넘기면 됩니다.
+
 ## 3. 기능별 엔드포인트
 
 전부 `Authorization: Bearer <access_token>` 필요 (아래 표에 별도 표기 없으면 전부 필수).
@@ -421,7 +423,7 @@ GET /api/v1/export/me   (인증 필요)
 → `200`
 ```json
 {
-  "exported_at": "2026-01-01T00:00:00",
+  "exported_at": "2026-01-01T00:00:00Z",
   "user_id": "...",
   "study_sessions": [ { "id": "...", "title": "...", "model": "...", "created_at": "...", "updated_at": "...", "messages": [ { "id": "...", "role": "user", "content": "...", "created_at": "..." } ] } ],
   "quizzes": [ { "id": "...", "title": "...", "source_study_session_id": null, "source_text": "...", "created_at": "...", "questions": [ { "id": "...", "order_index": 0, "question_text": "...", "choices": ["..."], "correct_answer": "...", "explanation": "..." } ], "attempts": [ { "id": "...", "score": 1, "total": 1, "submitted_at": "...", "answers": [ { "id": "...", "question_id": "...", "selected_index": 0, "is_correct": true } ] } ] } ],

@@ -1,7 +1,9 @@
 import uuid
-from datetime import date, datetime
+from datetime import date
 
 from pydantic import BaseModel, ConfigDict
+
+from app.schemas.validators import UtcDatetime
 
 
 class StudyMessageExport(BaseModel):
@@ -10,7 +12,7 @@ class StudyMessageExport(BaseModel):
     id: uuid.UUID
     role: str
     content: str
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class StudySessionExport(BaseModel):
@@ -19,8 +21,8 @@ class StudySessionExport(BaseModel):
     id: uuid.UUID
     title: str
     model: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
     messages: list[StudyMessageExport]
 
 
@@ -53,7 +55,7 @@ class QuizAttemptExport(BaseModel):
     id: uuid.UUID
     score: int
     total: int
-    submitted_at: datetime
+    submitted_at: UtcDatetime
     answers: list[QuizAnswerExport]
 
 
@@ -64,7 +66,7 @@ class QuizExport(BaseModel):
     title: str
     source_study_session_id: uuid.UUID | None
     source_text: str | None
-    created_at: datetime
+    created_at: UtcDatetime
     questions: list[QuizQuestionExport]
     attempts: list[QuizAttemptExport]
 
@@ -77,7 +79,7 @@ class InterviewPracticeTurnExport(BaseModel):
     question: str
     answer: str | None
     feedback: str | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class InterviewPracticeSessionExport(BaseModel):
@@ -88,8 +90,8 @@ class InterviewPracticeSessionExport(BaseModel):
     model: str
     status: str
     overall_feedback: str | None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
     turns: list[InterviewPracticeTurnExport]
 
 
@@ -103,12 +105,12 @@ class InterviewReviewExport(BaseModel):
     content: str
     model: str
     ai_feedback: str | None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class UserDataExport(BaseModel):
-    exported_at: datetime
+    exported_at: UtcDatetime
     user_id: uuid.UUID
     study_sessions: list[StudySessionExport]
     quizzes: list[QuizExport]

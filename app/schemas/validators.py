@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Annotated
 
-from pydantic import AfterValidator, EmailStr
+from pydantic import AfterValidator, EmailStr, PlainSerializer
 
 
 def _normalize_email(value: str) -> str:
@@ -25,3 +26,23 @@ def _reject_blank(value: str) -> str:
 # 그대로 노출되는 라벨 필드에 공백-only 값이 들어가면 목록에 빈 줄처럼 보이는
 # 항목이 생겨 다른 항목과 구별할 수 없게 된다.
 NonBlankStr = Annotated[str, AfterValidator(_reject_blank)]
+
+
+def _serialize_as_utc(value: datetime) -> str:
+    # core.clock.utcnow_naive()로 DB에는 항상 tz 정보 없는 UTC datetime만 저장하므로,
+    # 이 타입을 쓰는 응답 필드는 전부 naive UTC 값만 받는다. Pydantic 기본
+    # datetime.isoformat() 직렬화는 naive 값에 "Z"/오프셋을 붙이지 않는데,
+    # JS의 `new Date("...")`는 그 문자열에 타임존 표기가 없으면 UTC가 아니라
+    # 브라우저 로컬 시간으로 해석한다(ECMA-262) - 그 결과 프론트가 자연스럽게
+    # 표시하면 모든 타임스탬프가 브라우저의 UTC 오프셋만큼 틀어져 보인다.
+    # docs/FRONTEND_INTEGRATION.md도 이 필드들을 "Z" 접미사가 붙은 형태로 문서화하고
+    # 있어(예: submitted_at), 실제 응답도 그 문서와 일치하도록 명시적으로 맞춘다.
+    if value.tzinfo is None:
+        return value.isoformat() + "Z"
+    return value.isoformat()
+
+
+# API 응답에 노출되는 datetime 필드 전용 - 항상 UTC를 나타내는 "Z" 접미사를 붙여
+# 직렬화한다. 요청(request) 스키마의 datetime 필드에는 쓰지 않는다(이 앱은 datetime
+# 입력을 받는 요청 필드가 없다).
+UtcDatetime = Annotated[datetime, PlainSerializer(_serialize_as_utc, return_type=str)]

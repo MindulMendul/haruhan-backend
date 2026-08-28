@@ -1,10 +1,9 @@
 import uuid
-from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr
+from app.schemas.validators import NonBlankStr, UtcDatetime
 
 
 class QuizCreateRequest(BaseModel):
@@ -51,7 +50,7 @@ class QuizResponse(BaseModel):
     id: uuid.UUID
     title: str
     source_study_session_id: uuid.UUID | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class QuizQuestionPublic(BaseModel):
@@ -90,7 +89,7 @@ class QuizResultResponse(BaseModel):
     attempt_id: uuid.UUID
     score: int
     total: int
-    submitted_at: datetime
+    submitted_at: UtcDatetime
     answers: list[QuizAnswerResult]
 
 
@@ -100,7 +99,7 @@ class QuizAttemptSummary(BaseModel):
     id: uuid.UUID
     score: int
     total: int
-    submitted_at: datetime
+    submitted_at: UtcDatetime
 
 
 class WrongAnswerEntry(BaseModel):
