@@ -29,7 +29,7 @@ logger = logging.getLogger("haruhan")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     if not settings.api_key:
-        logger.warning("API_KEY가 설정되지 않아 /api/chat 인증이 비활성화된 상태로 실행됩니다.")
+        logger.warning("API_KEY가 설정되지 않아 /api/v1/chat 인증이 비활성화된 상태로 실행됩니다.")
 
     await init_engine(settings.database_url)
     await keep_supabase_alive()

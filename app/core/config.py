@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # 콤마로 구분된 origin 목록. 비어있으면 모든 cross-origin 요청을 차단한다(안전한 기본값).
     cors_origins: str = ""
 
-    # 설정되지 않으면 /api/chat 인증이 비활성화된다 (개발 편의용, 운영 환경에서는 반드시 설정할 것).
+    # 설정되지 않으면 /api/v1/chat 인증이 비활성화된다 (개발 편의용, 운영 환경에서는 반드시 설정할 것).
     api_key: str | None = None
 
     chat_rate_limit: str = "10/minute"
@@ -242,7 +242,7 @@ class Settings(BaseSettings):
         스트리밍 경로가 전부 이 값을 `len(value) > max_length`로 검사한다.
         이 값이 0 이하면(단위 착각, 오타 등) `min_length=1`을 통과한(=빈
         문자열이 아닌) 어떤 메시지든 항상 이 조건을 만족해 거부된다 -
-        `/api/chat`/학습챗(REST+WS)/면접연습 답변 제출 전부를 포함해 이 앱의
+        `/api/v1/chat`/학습챗(REST+WS)/면접연습 답변 제출 전부를 포함해 이 앱의
         AI 메시징 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속
         막히게 된다(159라운드가 고친 `MAX_QUIZ_CHOICE_COUNT`보다 영향
         범위가 더 넓다 - 그쪽은 퀴즈 생성만 막았지만 이건 메시지를 보내는

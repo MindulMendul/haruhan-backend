@@ -5241,3 +5241,59 @@
       동작은 완전히 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (154라운드)
+
+- [x] 178. `/api/v1/chat`(범용 Ollama 프록시) 라우트를 가리키던 로그
+      메시지/주석 세 곳이 실제로 존재하지 않는 `/api/chat`(버전
+      프리픽스 누락) 경로를 가리키고 있던 문제 해소 - 153라운드가 다른
+      영역들을 전부 훑고도 큰 버그를 못 찾자, 이번 라운드는 "코드
+      정확성"이 아니라 "코드가 실제로 하는 일과 주석/로그가 서술하는
+      내용이 일치하는가"라는 다른 각도로 조사해 발견했다.
+
+      `git log`로 확인한 결과 이 프록시는 `/api/v1` 버전 프리픽스가
+      도입된 최초 커밋부터 계속 `/api/v1/chat`이었는데, 다음 세 곳은
+      처음부터(153라운드까지 아무도 못 잡고) `/api/chat`으로 잘못
+      쓰여 있었다:
+      - `app/main.py`의 `lifespan()` - `API_KEY` 미설정 시 뜨는
+        경고 로그(운영자가 실제로 읽는 로그).
+      - `app/core/config.py`의 `api_key` 필드 주석.
+      - `app/core/config.py`의 `_validate_max_prompt_length_is_positive`
+        docstring.
+
+      기능적 영향은 없다(인증 동작, DB 상태, API 응답 어느 것도 바뀌지
+      않음) - 순수하게 사람이 읽는 로그/주석이 존재하지 않는 경로를
+      가리키던 문서 정확성 문제였다. 세 곳 모두 `/api/v1/chat`으로
+      바로잡았다.
+
+      같은 조사 중 `interview_practice_service.py`의
+      `_generate_feedback_and_next_question` docstring이 "217번째
+      줄 주석 참고"라는 줄 번호로 다른 주석을 가리키고 있었는데,
+      `git show`로 추적해보니 이 커밋(150라운드) 당시에도 이미 그
+      주석은 217번째 줄이 아니라 259번째 줄에 있었고(애초에 틀린
+      참조), 그 뒤 172라운드가 위에 `_generate_first_question`을
+      추가하면서 지금은 354번째 줄로 더 밀려나 있었다 - 줄 번호로 된
+      참조는 코드가 바뀔 때마다 다시 깨지는 근본적으로 취약한 형태라,
+      단순히 숫자를 "354"로 갱신하는 대신 그 주석의 첫 문장("답변을
+      먼저 커밋하지 않고...")으로 가리키도록 바꿔 앞으로 코드가
+      바뀌어도 안 깨지게 했다. `grep -n "번째 줄"`로 이 파일 전체에
+      같은 패턴의 다른 참조가 더 없는지도 확인했다(없음).
+
+      `tests/test_main.py`를 새로 만들어
+      `test_startup_warns_with_correct_chat_route_when_api_key_unset`을
+      추가했다 - `API_KEY`를 비운 채 `create_app()`을 실행해 lifespan
+      시작 시 뜨는 경고 로그를 `caplog`로 잡고(`create_app()`이
+      `configure_logging(force=True)`로 root logger 핸들러를 지워버려
+      `test_middleware.py`가 이미 쓰던 패턴대로 `create_app()` 이후에
+      `"haruhan"` 로거에 핸들러를 다시 붙여야 함), 그 로그가 실제로
+      `/api/v1/chat`을 담고 있고 옛 `/api/chat 인증`은 더는 없는지
+      확인한다. `git stash`로 `app/main.py` 수정만 되돌리면 이
+      테스트가 정확히 실패(옛 문구가 그대로 남아있음)하는 것까지
+      확인했다.
+
+      전체 511개 테스트 통과, `app/main.py` 100% 커버리지(신규 파일
+      포함 전체 133개 소스 파일), `mypy app tests scripts` 클린. 순수
+      로그/주석 문구 수정이라 애플리케이션 동작 변경은 없고,
+      `docs/FRONTEND_INTEGRATION.md`는 이미 올바른 경로를 쓰고 있어
+      갱신이 필요 없었다. DB 스키마 변경도 없어 마이그레이션도
+      필요 없었다.
+
