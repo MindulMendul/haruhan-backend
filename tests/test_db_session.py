@@ -105,6 +105,12 @@ def test_cleanup_expired_refresh_tokens_warns_when_uninitialized(caplog):
     assert "DB 엔진이 초기화되지 않아 refresh token 정리를 건너뜁니다" in caplog.text
 
 
+def test_cleanup_stale_guest_accounts_warns_when_uninitialized(caplog):
+    with caplog.at_level("WARNING", logger="app.db.session"):
+        asyncio.run(db_session.cleanup_stale_guest_accounts())
+    assert "DB 엔진이 초기화되지 않아 게스트 계정 정리를 건너뜁니다" in caplog.text
+
+
 def test_enable_sqlite_foreign_keys_noop_for_non_sqlite_dialect():
     class _FakeDialect:
         name = "postgresql"
@@ -213,5 +219,24 @@ def test_cleanup_expired_refresh_tokens_logs_error_on_failure(monkeypatch, caplo
         with caplog.at_level("ERROR", logger="app.db.session"):
             await db_session.cleanup_expired_refresh_tokens()
         assert "[Refresh Token 정리] 실패" in caplog.text
+
+    asyncio.run(_with_initialized_engine(_check))
+
+
+def test_cleanup_stale_guest_accounts_logs_deleted_count_when_initialized(caplog):
+    async def _check():
+        with caplog.at_level("INFO", logger="app.db.session"):
+            await db_session.cleanup_stale_guest_accounts()
+        assert "게스트 계정" in caplog.text
+
+    asyncio.run(_with_initialized_engine(_check))
+
+
+def test_cleanup_stale_guest_accounts_logs_error_on_failure(monkeypatch, caplog):
+    async def _check():
+        monkeypatch.setattr(AsyncSession, "execute", AsyncMock(side_effect=RuntimeError("boom")))
+        with caplog.at_level("ERROR", logger="app.db.session"):
+            await db_session.cleanup_stale_guest_accounts()
+        assert "[게스트 계정 정리] 실패" in caplog.text
 
     asyncio.run(_with_initialized_engine(_check))

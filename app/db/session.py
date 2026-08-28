@@ -5,7 +5,9 @@ from typing import Any
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.clock import utcnow_naive
 from app.repositories.refresh_token_repository import RefreshTokenRepository
+from app.repositories.user_repository import UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,22 @@ async def cleanup_expired_refresh_tokens() -> None:
         logger.info("[Refresh Token 정리] 만료된 토큰 %d개 삭제", deleted)
     except Exception:
         logger.exception("[Refresh Token 정리] 실패")
+
+
+async def cleanup_stale_guest_accounts() -> None:
+    """활성 refresh token이 하나도 남지 않아 재로그인 자체가 불가능해진(=본인도
+    다시 접근할 수 없는) 게스트 계정을 정리한다. 학습챗/퀴즈/면접연습/면접복기
+    데이터가 계속 쌓이기만 하고 아무도 다시 볼 수 없는 채로 무기한 보관되는
+    것을 막는다."""
+    if _session_factory is None:
+        logger.warning("DB 엔진이 초기화되지 않아 게스트 계정 정리를 건너뜁니다.")
+        return
+    try:
+        async with _session_factory() as session:
+            deleted = await UserRepository(session).delete_stale_guests(utcnow_naive())
+        logger.info("[게스트 계정 정리] 접근 불가능해진 게스트 계정 %d개 삭제", deleted)
+    except Exception:
+        logger.exception("[게스트 계정 정리] 실패")
 
 
 async def check_db_health() -> bool:

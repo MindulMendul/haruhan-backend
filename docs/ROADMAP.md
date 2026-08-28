@@ -5476,3 +5476,70 @@
       저장되는 값은 여전히 naive UTC 그대로이고 직렬화 방식만
       바뀐 것이라 마이그레이션은 필요 없었다.
 
+## 백로그 (159라운드)
+
+- [x] 183. 활성 refresh token이 하나도 남지 않아 재로그인 자체가 불가능해진
+      게스트 계정이 영구히 정리되지 않고 계속 쌓이던 문제 해소 -
+      `app/core/scheduler.py`는 정확히 세 개의 daily cron job만 등록하고
+      있었고(`keep_supabase_alive`/`cleanup_expired_refresh_tokens`/
+      `run_scheduled_rag_backfill`), 그중 `cleanup_expired_refresh_tokens`
+      조차 `refresh_tokens` 테이블 행만 지울 뿐 그 소유자인 `User` row는
+      전혀 건드리지 않았다. `app/repositories/user_repository.py`에도
+      계정을 찾거나 정리하는 메서드가 `get_by_id`/`get_by_email`/`create`/
+      `create_guest`/`delete` 외엔 없었다.
+
+      `docs/FRONTEND_INTEGRATION.md:30`이 이미 명시하듯("localStorage를
+      지우거나 다른 브라우저/기기로 접속하면 완전히 새로운 방문자로
+      취급되고, 이전 데이터에는 다시 접근할 방법이 없습니다") 게스트는
+      email/password가 없는 인증 방식이라, 유일한 재접근 수단인 활성
+      refresh token이 전부 만료/폐기되고 나면 그 계정과 거기 딸린
+      학습챗/퀴즈/면접연습/면접복기/RAG 색인은 본인을 포함해 아무도
+      다시 볼 수 없는 채로 무기한 DB에 남는다 - 게스트가 이 앱의
+      권장 온보딩 경로(`FRONTEND_INTEGRATION.md`의 "1-0. ... (추천,
+      지금 이거 씀)")라 이 죽은 데이터의 비중이 상당할 수 있다.
+      `grep`으로 `docs/ROADMAP.md` 전체에서 "게스트" 언급을 확인해
+      RAG 청크 개수 상한(94/104/128/131라운드)처럼 스토리지 증가에
+      대한 안전장치는 여럿 있었지만, 이 계정 자체의 정리는 어디에도
+      명시적으로 다뤄지거나 범위 밖으로 유보된 적이 없었음을 확인했다.
+
+      `app/repositories/user_repository.py`에 `delete_stale_guests(now)`
+      를 추가했다 - `email IS NULL`(게스트)이면서 `revoked_at IS NULL
+      AND expires_at > now`인 refresh token이 하나도 없는(상관
+      서브쿼리 `NOT EXISTS`) 계정만 골라 `delete(User).where(...)`로
+      한 번에 지운다. `delete()`와 마찬가지로 User row만 지우면
+      나머지는 DB의 `ON DELETE CASCADE`로 함께 지워진다(기존
+      `test_account_deletion_cascade.py`가 이미 검증한 것과 동일한
+      경로). 실계정(`email`이 있는)은 비밀번호로 언제든 재로그인
+      가능하므로 이 조건에서 처음부터 제외했다. 게스트는
+      `AuthService.create_guest_session()`이 `create_guest()` 직후
+      같은 트랜잭션에서 항상 refresh token을 발급하고 커밋하므로,
+      "토큰이 아직 하나도 없는" 갓 생성된 게스트가 이 조건에 잘못
+      걸릴 여지도 없다.
+
+      `app/db/session.py`에 `cleanup_stale_guest_accounts()`를
+      `cleanup_expired_refresh_tokens()`와 같은 모양(엔진 미초기화
+      시 경고 후 건너뜀, `try/except Exception: logger.exception(...)`)
+      으로 추가하고, `app/core/scheduler.py`에 네 번째 daily cron
+      job(매일 06:00, `misfire_grace_time=None`)으로 등록했다.
+
+      `tests/test_stale_guest_cleanup.py`를 새로 추가했다 - 활성
+      토큰이 없는 게스트는 삭제되는지, 그 계정 소유 학습챗 세션까지
+      cascade로 함께 지워지는지, 활성 토큰이 있는 게스트는 그대로
+      남는지, 실계정은 refresh token이 전부 만료돼도 절대 건드리지
+      않는지 확인하는 4개 테스트. `tests/test_db_session.py`에는
+      `cleanup_stale_guest_accounts()`의 엔진 미초기화/로깅/실패
+      케이스 3개를 기존 `cleanup_expired_refresh_tokens` 테스트와
+      같은 패턴으로 추가했다. `tests/test_scheduler.py`의
+      `test_scheduled_jobs_never_skip_due_to_misfire`도 job 개수를
+      3→4로 갱신했다. `git stash`로 `app/repositories/user_repository.py`
+      /`app/db/session.py`/`app/core/scheduler.py` 세 파일만 되돌리면
+      새/갱신된 테스트 8개가 전부 (없는 메서드·job 개수 불일치로)
+      정확히 실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 523개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`app/repositories/user_repository.py`/`app/db/session.py`
+      100% 커버리지 포함). 스키마 변경이 없어 마이그레이션은 필요
+      없었고, 프론트가 관찰하는 API 동작(게스트 데이터는 어차피
+      재접근 불가로 문서화돼 있음) 자체는 바뀌지 않아
+      `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+

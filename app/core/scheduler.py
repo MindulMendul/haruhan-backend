@@ -3,7 +3,7 @@ import logging
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED, JobExecutionEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.db.session import cleanup_expired_refresh_tokens, keep_supabase_alive
+from app.db.session import cleanup_expired_refresh_tokens, cleanup_stale_guest_accounts, keep_supabase_alive
 from app.services.rag_backfill_service import run_scheduled_rag_backfill
 
 logger = logging.getLogger("haruhan")
@@ -41,3 +41,4 @@ def setup_scheduler_jobs() -> None:
     scheduler.add_job(keep_supabase_alive, "cron", hour=3, minute=0, misfire_grace_time=None)
     scheduler.add_job(cleanup_expired_refresh_tokens, "cron", hour=4, minute=0, misfire_grace_time=None)
     scheduler.add_job(run_scheduled_rag_backfill, "cron", hour=5, minute=0, misfire_grace_time=None)
+    scheduler.add_job(cleanup_stale_guest_accounts, "cron", hour=6, minute=0, misfire_grace_time=None)

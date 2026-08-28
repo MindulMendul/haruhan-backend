@@ -54,7 +54,7 @@ def test_scheduled_jobs_never_skip_due_to_misfire():
     루프가 요청 처리 등으로 1초만 밀려도 그날 실행을 통째로 건너뛰게 만든다 -
     keep_supabase_alive처럼 "7일 연속 놓치면 Supabase가 자동 정지된다"는 걸
     막으려고 만든 job이 정작 이 좁은 기본값 때문에 놓치기 쉬운 상태였다.
-    세 job 모두 misfire_grace_time=None(무제한)으로 등록되는지 확인한다."""
+    네 job 모두 misfire_grace_time=None(무제한)으로 등록되는지 확인한다."""
     from app.core.scheduler import scheduler, setup_scheduler_jobs
 
     for job in list(scheduler.get_jobs()):
@@ -62,7 +62,7 @@ def test_scheduled_jobs_never_skip_due_to_misfire():
     setup_scheduler_jobs()
 
     jobs = scheduler.get_jobs()
-    assert len(jobs) == 3
+    assert len(jobs) == 4
     for job in jobs:
         assert job.misfire_grace_time is None, f"{job.id}의 misfire_grace_time이 무제한이 아님"
 
