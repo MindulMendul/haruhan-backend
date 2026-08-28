@@ -773,7 +773,10 @@ def test_get_for_user_locked_requests_row_lock_on_postgres():
     (직접 확인함), 이 잠금에 의존하는 동시성은 SQLite 기반 테스트 스위트로
     재현/검증할 수 없다 - 가로챈 statement를 실제로 잠그는 Postgres 방언으로
     다시 컴파일해 SQL 문자열에 "FOR UPDATE"가 포함되는지 확인하는 것으로
-    대신한다(54번 라운드에서 이미 마주친 것과 같은 성격의 SQLite 한계)."""
+    대신한다(같은 이유로 interview_practice_repository.py/
+    interview_review_repository.py의 get_for_user_locked()도 이 한계를
+    똑같이 갖는다 - app/repositories/quiz_repository.py의 get_for_user_locked()
+    docstring 참고)."""
     import asyncio
     import uuid
 
