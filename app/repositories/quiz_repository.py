@@ -83,7 +83,9 @@ class QuizRepository:
         보게 되어 중복 감지가 정상 동작한다. Postgres(운영)에서만 실제로 잠그고,
         SQLite(테스트/로컬)는 FOR UPDATE를 지원하지 않아 이 조회가 일반 SELECT로
         컴파일된다 - 그래서 이 잠금에 의존하는 동시성 자체는 SQLite 기반 테스트로
-        재현/검증할 수 없다(54번 라운드에서 이미 마주친 것과 같은 성격의 한계).
+        재현/검증할 수 없다(같은 이유로 `interview_practice_repository.py`/
+        `interview_review_repository.py`의 `get_for_user_locked()`도 이 한계를
+        똑같이 갖는다).
         """
         result = await self._session.execute(
             select(Quiz).where(Quiz.id == quiz_id, Quiz.user_id == user_id).with_for_update()
