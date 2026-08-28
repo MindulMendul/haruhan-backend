@@ -5389,3 +5389,33 @@
       `mypy app tests scripts` 클린. 순수 문서 정확성 수정이라
       애플리케이션 동작 변경은 전혀 없다.
 
+## 백로그 (157라운드)
+
+- [x] 181. `.env.example`의 `API_KEY` 주석이 존재하지 않는 `/api/chat`
+      (버전 프리픽스 누락) 경로를 가리키던 문제 해소 - 154라운드가
+      `app/main.py`/`app/core/config.py`에서 고친 것과 정확히 같은
+      버그인데, 그 라운드는 애플리케이션 코드만 감사하고 이 템플릿
+      파일은 훑지 않아서 놓쳤다.
+
+      `app/api/v1/router.py`(`prefix="/api/v1"`)와
+      `app/api/v1/routes/chat.py`(`prefix="/chat"`)를 다시 확인해
+      실제 경로가 여전히 `/api/v1/chat`임을 재확인했다. `git log`로
+      `.env.example`이 `/api/v1` 프리픽스 도입 이후에도 이 주석만
+      갱신되지 않은 채 남아있었던 것도 확인했다. 저장소 전체를
+      `/api/chat` 문자열로 다시 훑어, 남은 참조가 이 한 곳뿐임을
+      확인했다(나머지는 전부 Ollama 자신의 업스트림 `/api/chat`
+      엔드포인트나 ROADMAP.md의 과거 서술로 무관함).
+
+      `.env.example:18`의 주석을 `/api/v1/chat`으로 바로잡았다.
+
+      `tests/test_docker_compose.py`에
+      `test_env_example_api_key_comment_references_versioned_chat_route`
+      를 추가했다 - `.env.example`에 `/api/v1/chat`은 있고 버전
+      프리픽스 없는 `/api/chat`은 없는지 확인한다. `git stash`로
+      `.env.example` 수정만 되돌리면 이 테스트가 정확히 실패(옛
+      문구가 그대로 남아있음)하는 것까지 확인했다.
+
+      전체 512개 테스트 통과, `mypy app tests scripts` 클린. 순수
+      템플릿 파일 주석 수정이라 애플리케이션 동작 변경은 없고, DB
+      스키마 변경도 없어 마이그레이션도 필요 없었다.
+

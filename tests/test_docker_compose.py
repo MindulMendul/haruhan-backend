@@ -94,3 +94,15 @@ def test_every_service_has_a_memory_limit():
     for name, service in services.items():
         limits = service.get("deploy", {}).get("resources", {}).get("limits", {})
         assert limits.get("memory"), f"{name}에 메모리 상한이 없음"
+
+
+def test_env_example_api_key_comment_references_versioned_chat_route():
+    """이 앱의 채팅 프록시 라우트는 `/api/v1` 프리픽스 도입 이후 계속
+    `/api/v1/chat`이었는데(154라운드가 app/main.py/core/config.py의 같은
+    문제를 고쳤을 때 이미 확인함), .env.example의 API_KEY 주석만 버전
+    프리픽스 없는 옛 `/api/chat`을 그대로 가리키고 있었다 - 그 라운드가
+    이 템플릿 파일은 감사하지 않아서 놓친 것이다. 실제 운영자가 읽는
+    설정 안내 문구가 존재하지 않는 경로를 가리키는 걸 회귀 테스트로 막는다."""
+    content = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert "/api/v1/chat" in content
+    assert "/api/chat" not in content
