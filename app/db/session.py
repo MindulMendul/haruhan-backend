@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -120,13 +121,20 @@ async def cleanup_stale_guest_accounts() -> None:
         logger.exception("[게스트 계정 정리] 실패")
 
 
-async def check_db_health() -> bool:
-    """readiness 체크용: 세션을 열어 간단한 쿼리를 수행할 수 있는지 확인한다."""
+async def check_db_health(timeout_seconds: float) -> bool:
+    """readiness 체크용: 세션을 열어 간단한 쿼리를 수행할 수 있는지 확인한다.
+
+    이 세션이 커넥션 풀에서 커넥션을 새로 얻어야 하면 asyncpg 기본 연결
+    타임아웃(60초)을 그대로 물려받는다 - DB가 완전히 죽은 게 아니라 응답만
+    느려지는 상황에서는 이 확인 하나가 최대 60초까지 걸릴 수 있다 -
+    core/health.py의 check_redis_health/check_ollama_health와 같은 이유로
+    health_check_timeout_seconds로 짧은 상한을 건다.
+    """
     if _session_factory is None:
         return False
     try:
         async with _session_factory() as session:
-            await session.execute(text("SELECT 1"))
+            await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=timeout_seconds)
         return True
     except Exception:
         logger.exception("DB 헬스체크 실패")

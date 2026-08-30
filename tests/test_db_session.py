@@ -90,7 +90,7 @@ def test_init_engine_enables_pool_pre_ping():
 
 
 def test_check_db_health_returns_false_when_uninitialized():
-    assert asyncio.run(db_session.check_db_health()) is False
+    assert asyncio.run(db_session.check_db_health(3.0)) is False
 
 
 def test_keep_supabase_alive_warns_when_uninitialized(caplog):
@@ -172,7 +172,7 @@ def test_init_engine_and_close_engine_round_trip():
 
 def test_check_db_health_returns_true_when_initialized():
     async def _check():
-        assert await db_session.check_db_health() is True
+        assert await db_session.check_db_health(3.0) is True
 
     asyncio.run(_with_initialized_engine(_check))
 
@@ -180,7 +180,28 @@ def test_check_db_health_returns_true_when_initialized():
 def test_check_db_health_returns_false_on_query_error(monkeypatch):
     async def _check():
         monkeypatch.setattr(AsyncSession, "execute", AsyncMock(side_effect=RuntimeError("boom")))
-        assert await db_session.check_db_health() is False
+        assert await db_session.check_db_health(3.0) is False
+
+    asyncio.run(_with_initialized_engine(_check))
+
+
+def test_check_db_health_returns_false_when_query_is_slower_than_timeout(monkeypatch):
+    """DB가 완전히 죽은 게 아니라 응답만 느려지는 상황(연결 풀러 문제 등)에서는
+    이 쿼리 하나가 asyncpg 기본 연결 타임아웃(60초)까지 걸릴 수 있다 - readiness
+    probe는 빠르게 답해야 의미가 있으므로, health_check_timeout_seconds로
+    실제로 짧은 상한이 걸리는지 확인한다."""
+
+    async def _slow_execute(*args, **kwargs):
+        await asyncio.sleep(1.0)
+
+    async def _check():
+        monkeypatch.setattr(AsyncSession, "execute", _slow_execute)
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        result = await db_session.check_db_health(0.05)
+        elapsed = loop.time() - start
+        assert result is False
+        assert elapsed < 1.0
 
     asyncio.run(_with_initialized_engine(_check))
 

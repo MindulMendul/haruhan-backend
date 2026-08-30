@@ -244,3 +244,20 @@ def test_settings_rejects_non_positive_ws_idle_timeout_seconds(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, ws_idle_timeout_seconds=bad_value)
     assert "WS_IDLE_TIMEOUT_SECONDS" in str(exc_info.value)
+
+
+def test_settings_accepts_positive_health_check_timeout_seconds():
+    settings = Settings(jwt_secret_key="a" * 32, health_check_timeout_seconds=1.0)
+    assert settings.health_check_timeout_seconds == 1.0
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_settings_rejects_non_positive_health_check_timeout_seconds(bad_value):
+    """core/health.py의 check_db_health/check_redis_health/check_ollama_health는
+    각각 asyncio.wait_for(..., timeout=health_check_timeout_seconds)를 쓴다. 0
+    이하면 asyncio.wait_for가 각 확인이 완료될 기회조차 주지 않고 즉시
+    TimeoutError를 내서, DB/Redis/Ollama가 전부 정상이어도 /health/ready가
+    항상 503(unavailable)만 응답하게 된다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, health_check_timeout_seconds=bad_value)
+    assert "HEALTH_CHECK_TIMEOUT_SECONDS" in str(exc_info.value)

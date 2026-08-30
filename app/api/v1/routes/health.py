@@ -52,15 +52,16 @@ async def _get_or_check_readiness(
         if cached is not None:
             return cached
 
-        db_ok = await check_db_health()
+        timeout = settings.health_check_timeout_seconds
+        db_ok = await check_db_health(timeout)
 
         redis_status = "not_configured"
         redis_ok = True
         if settings.redis_url:
-            redis_ok = await check_redis_health(settings.redis_url)
+            redis_ok = await check_redis_health(settings.redis_url, timeout)
             redis_status = "connected" if redis_ok else "disconnected"
 
-        ollama_ok = await check_ollama_health(ollama_service)
+        ollama_ok = await check_ollama_health(ollama_service, timeout)
 
         status_code = (
             status.HTTP_200_OK

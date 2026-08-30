@@ -32,7 +32,7 @@ def test_readiness_when_all_dependencies_healthy(client, monkeypatch):
     import app.api.v1.routes.health as health_module
     from app.core.dependencies import get_ollama_service
 
-    async def _fake_check_db_health():
+    async def _fake_check_db_health(timeout_seconds):
         return True
 
     monkeypatch.setattr(health_module, "check_db_health", _fake_check_db_health)
@@ -51,7 +51,7 @@ def test_readiness_when_ollama_unreachable(client, monkeypatch):
     import app.api.v1.routes.health as health_module
     from app.core.dependencies import get_ollama_service
 
-    async def _fake_check_db_health():
+    async def _fake_check_db_health(timeout_seconds):
         return True
 
     monkeypatch.setattr(health_module, "check_db_health", _fake_check_db_health)
@@ -74,7 +74,7 @@ def test_readiness_caches_result_within_ttl(client, monkeypatch):
     import app.api.v1.routes.health as health_module
     from app.core.dependencies import get_ollama_service
 
-    async def _fake_check_db_health():
+    async def _fake_check_db_health(timeout_seconds):
         return True
 
     monkeypatch.setattr(health_module, "check_db_health", _fake_check_db_health)
@@ -104,10 +104,10 @@ def test_readiness_reports_redis_disconnected_when_configured_but_unreachable(
     import app.api.v1.routes.health as health_module
     from app.core.dependencies import get_ollama_service
 
-    async def _fake_check_db_health():
+    async def _fake_check_db_health(timeout_seconds):
         return True
 
-    async def _fake_check_redis_health(redis_url):
+    async def _fake_check_redis_health(redis_url, timeout_seconds):
         return False
 
     monkeypatch.setattr(health_module, "check_db_health", _fake_check_db_health)
@@ -134,7 +134,7 @@ def test_get_or_check_readiness_coalesces_concurrent_cache_misses(monkeypatch):
     from app.api.v1.routes.health import _get_or_check_readiness, _readiness_cache
     from app.core.config import get_settings
 
-    async def _fake_check_db_health():
+    async def _fake_check_db_health(timeout_seconds):
         return True
 
     monkeypatch.setattr(health_module, "check_db_health", _fake_check_db_health)

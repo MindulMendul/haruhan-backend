@@ -158,6 +158,20 @@ class Settings(BaseSettings):
     # 커넥션을 남겨둔다.
     max_concurrent_ws_connections: int = 6
 
+    # /health/ready(오케스트레이터/로드밸런서가 트래픽 라우팅 판단에 쓰는 엔드포인트)
+    # 가 DB/Redis/Ollama 각각을 확인할 때 쓰는 타임아웃. 이 값이 없으면 각 확인은
+    # 그 클라이언트 자신의 기본 타임아웃(asyncpg 연결 60초, redis-py socket_timeout
+    # 5초, OllamaService 기본 60초)을 그대로 물려받는데, 그 상대가 완전히
+    # 죽은(연결 거부, 즉시 실패) 게 아니라 응답만 느려지는 상황(패킷 유실, GPU
+    # 과부하 등)에서는 readiness 확인 하나가 최대 60초까지 걸릴 수 있다 -
+    # readiness probe는 원래 "몇 초 안에 빠르게" 답해야 트래픽 라우팅에 의미가
+    # 있는데, 이러면 오케스트레이터의 probe 자체가 타임아웃나 계속 unready로
+    # 잘못 판정되고, 그 사이 도착한 다른 폴러들도 _readiness_cache_lock 때문에
+    # 같은 느린 확인을 함께 기다리게 된다. rate_limit.py의
+    # REDIS_SOCKET_TIMEOUT_SECONDS(1초, 147라운드)와 같은 "정상 왕복 시간보다
+    # 훨씬 넉넉하지만 무한정은 아닌" 상한 철학이다.
+    health_check_timeout_seconds: float = 3.0
+
     @field_validator("jwt_secret_key")
     @classmethod
     def _validate_jwt_secret_key_length(cls, value: str) -> str:
@@ -336,6 +350,24 @@ class Settings(BaseSettings):
                 f"MAX_CONCURRENT_WS_CONNECTIONS({value})는 1 이상이어야 합니다 - "
                 "0 이하면 활성 연결 수 카운터가 0에서 시작하므로 첫 WebSocket 연결"
                 "시도부터 매번 거부되어 학습챗/면접복기 스트리밍 전체가 막힙니다."
+            )
+        return value
+
+    @field_validator("health_check_timeout_seconds")
+    @classmethod
+    def _validate_health_check_timeout_seconds_is_positive(cls, value: float) -> float:
+        """core/health.py의 check_db_health/check_redis_health/check_ollama_health는
+        각각 이 값으로 `asyncio.wait_for(..., timeout=...)`를 건다(ws_idle_timeout_seconds
+        와 같은 이유) - 이 값이 0 이하면 asyncio.wait_for가 각 확인이 완료될 기회조차
+        주지 않고 즉시 TimeoutError를 내, DB/Redis/Ollama가 전부 정상이어도
+        /health/ready가 항상 503(unavailable)만 응답하게 된다. `Settings()` 생성
+        자체는 성공해 앱도 정상적으로 뜨므로, 다른 숫자 설정들과 같은 이유로 시작
+        시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"HEALTH_CHECK_TIMEOUT_SECONDS({value})는 0보다 커야 합니다 - 0 이하면 "
+                "asyncio.wait_for가 즉시 타임아웃되어, DB/Redis/Ollama가 전부 정상이어도 "
+                "/health/ready가 항상 503(unavailable)만 응답합니다."
             )
         return value
 

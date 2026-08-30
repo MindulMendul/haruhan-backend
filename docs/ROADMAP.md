@@ -5858,3 +5858,58 @@
       401을 내고 있어 `FRONTEND_INTEGRATION.md`가 이미 문서화한 계약과
       일치하므로 갱신도 필요 없었다.
 
+## 백로그 (166라운드)
+
+- [x] 190. `/health/ready`(오케스트레이터/로드밸런서용 readiness probe)가
+      DB/Redis/Ollama 각각을 확인할 때 자체 타임아웃이 전혀 없어, 상대가
+      완전히 죽은 게 아니라 응답만 느려지는 상황에서는 확인 하나가 최대
+      60초까지 걸릴 수 있던 문제 해소 - `check_db_health()`(연결 새로
+      맺을 때 asyncpg 기본 연결 타임아웃 60초)/`check_redis_health()`
+      (redis-py `socket_timeout`/`socket_connect_timeout` 기본값 5초)/
+      `check_ollama_health()`(`OllamaService` 기본 60초)가 전부 그
+      클라이언트 라이브러리 자신의 기본 타임아웃을 그대로 물려받고
+      있었다. readiness probe는 원래 몇 초 안에 빠르게 답해야 트래픽
+      라우팅 판단에 의미가 있는데, 세 확인이 `_readiness_cache_lock`
+      아래 순차로 실행돼(`app/api/v1/routes/health.py`) 셋 중 하나만
+      느려져도 그 시간 동안 캐시가 비어있는 다른 모든 폴러까지 함께
+      멈춰 기다리게 된다.
+
+      실제 소켓을 열고 응답만 안 주는 블랙홀 서버로 `check_ollama_health`
+      를 직접 재현해, 타임아웃 없이는 확인 하나가 정확히 그 대기 시간만큼
+      (1초/2.5초 등) 걸린다는 것을 확인했다. 91라운드가 이미 "헬스체크가
+      이벤트 루프를 막는가"를 검토해 기각한 적이 있지만, 그건 "블로킹
+      I/O인가"라는 질문이었고 이번 건은 "이 타임아웃이 probe에 적합한
+      길이인가"라는 다른 질문이다 - 149라운드는 캐싱/락으로 호출 *빈도*를
+      줄였을 뿐 호출 *소요 시간* 자체는 다루지 않았다.
+
+      `app/core/config.py`에 `health_check_timeout_seconds: float = 3.0`
+      을 다른 숫자 설정들과 같은 `field_validator`(0 이하 거부) 패턴으로
+      추가했다 - `rate_limit.py`의 `REDIS_SOCKET_TIMEOUT_SECONDS`(1초,
+      147라운드)와 같은 "정상 왕복 시간보다 훨씬 넉넉하지만 무한정은
+      아닌" 상한 철학이다. `app/core/health.py`의 `check_redis_health`/
+      `check_ollama_health`와 `app/db/session.py`의 `check_db_health`
+      모두 이 값을 인자로 받아 `asyncio.wait_for(..., timeout=...)`로
+      감쌌다(Redis는 라이브러리 내부 소켓 타임아웃에만 기대지 않도록
+      `socket_timeout`/`socket_connect_timeout` 전달과 `wait_for`를
+      둘 다 적용). `app/api/v1/routes/health.py`의 `_get_or_check_readiness`
+      가 이 값을 세 함수에 전달하도록 고쳤다.
+
+      `tests/test_core_health.py`(Redis/Ollama가 "응답은 하지만 느린"
+      경우 짧은 타임아웃 안에 실패 판정되는지, `socket_timeout`이 실제로
+      전달되는지), `tests/test_db_session.py`(DB 쿼리가 느린 경우도
+      동일), `tests/test_config.py`(새 설정의 양수 검증)에 회귀 테스트를
+      추가하고, `tests/test_health.py`의 기존 가짜 `check_db_health`/
+      `check_redis_health` 더블들이 새 `timeout_seconds` 인자를 받도록
+      갱신했다. `.env.example`/`docker-compose.yml`에도
+      `HEALTH_CHECK_TIMEOUT_SECONDS`를 추가해 113/120라운드가 세운
+      "모든 Settings 필드는 컨테이너까지 전달돼야 한다" 관례를
+      `test_docker_compose.py`의 전수 확인 테스트로 계속 만족시켰다.
+      `git stash`로 스키마/헬스체크 파일들만 되돌리면 새/갱신된 테스트
+      19개가 전부 (없는 인자·타임아웃 미적용으로) 정확히 실패하는 것까지
+      확인한 뒤 복원했다.
+
+      전체 559개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`app/core/health.py`/`app/db/session.py`/
+      `app/api/v1/routes/health.py`/`app/core/config.py` 전부 100%
+      커버리지 유지). DB 스키마 변경이 없어 마이그레이션은 필요 없었다.
+
