@@ -6196,3 +6196,60 @@
       동작은 완전히 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
       스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (173라운드)
+
+- [x] 197. 학습챗/면접복기 WebSocket 스트리밍 연결이 구조화된 접근 로그
+      (`haruhan.access`)에 전혀 남지 않던 문제 해소 - `AccessLogMiddleware`
+      (`core/middleware.py`)는 `scope["type"] != "http"`이면 그대로
+      통과시키기만 해서 WebSocket scope는 애초에 다루지 않는다(14라운드가
+      "성공 요청 포함 전체 트래픽"을 남기려고 만든 미들웨어인데, 정작 이
+      두 라우트의 트래픽은 처음부터 범위 밖이었다). 두 라우트(`routes/
+      study.py`의 `stream_message`, `routes/interview_review.py`의
+      `stream_create_review`) 자신도 연결/종료 시점에 로그를 남기지
+      않았다 - 유휴 타임아웃으로 닫힐 때도, `WebSocketDisconnect`로
+      클라이언트가 스스로 끊을 때도 로그 한 줄이 없고, 처리되지 않은
+      예외가 났을 때(`logger.exception(...)`)만 유일하게 로그가 남았다.
+      169라운드가 추가한 `ws_active_connections`/`ws_connections_rejected_
+      total` 지표(`core/metrics.py`)도 두 라우트가 공유하는 합산 게이지/
+      카운터일 뿐, 연결 하나하나의 지속 시간·종료 사유·user_id는 전혀
+      담지 않는다.
+
+      이 두 라우트는 이 서비스에서 가장 오래 사는 연결이자(accept부터
+      종료까지 DB 커넥션 풀 커넥션 하나 + Ollama httpx 클라이언트 하나를
+      계속 점유 - `limit_ws_connections`의 docstring 참고) LLM 호출
+      비용을 가장 많이 태우는 트래픽인데도, 운영 중 특정 IP/계정의
+      연결이 계속 실패/유휴 타임아웃되거나 `MAX_CONCURRENT_WS_CONNECTIONS`
+      상한에 얼마나 자주 걸리는지 grep 한 줄로 확인할 방법이 없었다 -
+      HTTP 요청(429/413/전역 예외 포함 전부)은 전부 구조화된 로그를
+      남기는데, 이 앱에서 가장 오래 사는 연결만 로그가 없는 비대칭이었다.
+
+      두 라우트에 `time`을 import하고 `core.middleware.access_logger`
+      (기존 "haruhan.access" 로거)를 재사용해, `await websocket.accept()`
+      직후 `ws_event=connect path=... client=... user_id=...`를, 연결이
+      끝나는 지점(`try/finally`로 감싸 유휴 타임아웃/클라이언트 종료/오류
+      세 경로 전부를 커버)에 `ws_event=disconnect ... duration_ms=...
+      reason=idle_timeout|client_disconnect|error`를 한 줄씩 남겼다.
+      기존 예외 처리 흐름(각 분기에서 `break`/`return`/`WebSocketDisconnect`)은
+      그대로 두고 `reason` 변수만 각 분기 직전에 채워 넣었다.
+
+      `tests/test_study.py`/`tests/test_interview_review.py`에 각각
+      `test_stream_*_logs_connect_and_disconnect_to_access_log`(정상
+      연결→클라이언트 종료 시 connect/disconnect가 정확히 한 줄씩,
+      `reason=client_disconnect`)와 `test_stream_*_idle_timeout_logs_
+      disconnect_reason`(유휴 타임아웃 시 `reason=idle_timeout`)을
+      추가했다 - `caplog.set_level(logging.INFO, logger="haruhan.access")`
+      로 캡처했다(처음에는 `test_middleware.py`의 기존 패턴대로 `caplog.
+      handler`를 로거에 직접 `addHandler`했다가, pytest가 테스트 "call"
+      단계마다 그 핸들러를 root 로거에도 별도로 재부착해두는 것과
+      맞물려 같은 로그 한 줄이 직접 부착분+propagate분 두 번 잡히는
+      것을 발견했다 - `caplog.set_level`은 이 중복 부착 없이 propagate만
+      으로 정확히 한 번만 잡는다). `git stash`로 두 라우트 파일 수정만
+      되돌리면 새 테스트 4개가 전부 `AssertionError`(로그가 아예 없거나
+      `duration_ms=`/`reason=`이 없음)로 실패하는 것까지 확인했다.
+
+      전체 580개 테스트 통과, `app/api/v1/routes/study.py`/`interview_
+      review.py` 둘 다 커버리지 100%, `mypy app tests scripts` 클린.
+      클라이언트에게 보내는 메시지 프로토콜은 전혀 바뀌지 않는 순수
+      서버 사이드 로깅 추가라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

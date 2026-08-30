@@ -645,6 +645,57 @@ def test_stream_create_review_closes_connection_after_idle_timeout(client, monke
             ws.receive_json()
 
 
+def test_stream_create_review_logs_connect_and_disconnect_to_access_log(client, caplog):
+    """AccessLogMiddleware(core/middleware.py)는 ASGI "http" scope만 다뤄서 이
+    WebSocket 연결은 지금까지 구조화된 접근 로그(haruhan.access)에 전혀 남지
+    않았다 - 이 라우트가 붙잡고 있는 DB 커넥션/Ollama 클라이언트를 누가 얼마나
+    오래 점유했는지 grep 한 줄로 확인할 방법이 없었다. connect/disconnect가
+    각각 한 줄씩 남는지, 클라이언트가 스스로 연결을 끊으면
+    reason=client_disconnect로 남는지 확인한다."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="haruhan.access")
+    token = _signup_and_get_token(client, email="stream-review-access-log@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}"):
+        pass
+
+    records = [r.getMessage() for r in caplog.records if r.name == "haruhan.access"]
+    connect_records = [m for m in records if m.startswith("ws_event=connect")]
+    disconnect_records = [m for m in records if m.startswith("ws_event=disconnect")]
+    assert len(connect_records) == 1
+    assert "path=/api/v1/interview/reviews/stream" in connect_records[0]
+    assert len(disconnect_records) == 1
+    assert "duration_ms=" in disconnect_records[0]
+    assert "reason=client_disconnect" in disconnect_records[0]
+
+
+def test_stream_create_review_idle_timeout_logs_disconnect_reason(client, monkeypatch, caplog):
+    """유휴 타임아웃으로 서버가 먼저 연결을 끊는 경우에도 disconnect 로그의
+    reason이 client_disconnect가 아니라 idle_timeout으로 정확히 구분되는지
+    확인한다 - 방치된 연결과 클라이언트가 스스로 끊은 연결을 로그만 보고
+    구분할 수 있어야 운영 중 원인 파악에 의미가 있다."""
+    import logging
+
+    import pytest
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("WS_IDLE_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+
+    caplog.set_level(logging.INFO, logger="haruhan.access")
+    token = _signup_and_get_token(client, email="stream-review-idle-log@example.com")
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+            ws.receive_json()
+
+    records = [r.getMessage() for r in caplog.records if r.name == "haruhan.access"]
+    disconnect_records = [m for m in records if m.startswith("ws_event=disconnect")]
+    assert len(disconnect_records) == 1
+    assert "reason=idle_timeout" in disconnect_records[0]
+
+
 def test_stream_create_review_rejects_when_at_max_concurrent_connections(client, monkeypatch):
     """학습챗 스트리밍과 마찬가지로 이 WebSocket 연결도 accept부터 종료까지
     DB 커넥션 풀의 커넥션 하나를 계속 점유한다 - 풀 크기보다 많은 동시 연결이

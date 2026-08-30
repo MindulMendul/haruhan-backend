@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 
 from fastapi import (
@@ -24,6 +25,7 @@ from app.core.dependencies import (
     get_rag_service,
     limit_ws_connections,
 )
+from app.core.middleware import access_logger
 from app.core.rate_limit import check_rate_limit, limiter
 from app.db.models.user import User
 from app.db.session import get_db
@@ -174,11 +176,23 @@ async def stream_message(
     합쳐) max_concurrent_ws_connections(기본 6)개보다 많이 동시에 열리면 같은
     이유로 DB 커넥션 풀을 고갈시킬 수 있다 - limit_ws_connections 의존성이
     accept() 전에 상한을 확인해, 넘으면 연결 자체를 거부한다.
+
+    AccessLogMiddleware(core/middleware.py)는 ASGI "http" scope만 다뤄서 이
+    WebSocket 연결은 지금까지 구조화된 접근 로그에 전혀 남지 않았다 - 이 라우트가
+    붙잡고 있는 DB 커넥션/Ollama 클라이언트를 누가(user_id/client IP) 얼마나
+    오래 점유했는지, 왜 끊겼는지(유휴 타임아웃/클라이언트 종료/오류) grep 한 줄로
+    확인할 방법이 없었다. 같은 "haruhan.access" 로거로 connect/disconnect를
+    한 줄씩 남긴다.
     """
     await websocket.accept()
     settings = get_settings()
     max_length = settings.max_prompt_length
     client_ip = websocket.client.host if websocket.client else "127.0.0.1"
+    connect_time = time.monotonic()
+    access_logger.info(
+        "ws_event=connect path=%s client=%s user_id=%s", websocket.url.path, client_ip, current_user.id
+    )
+    disconnect_reason = "client_disconnect"
     try:
         while True:
             try:
@@ -187,6 +201,7 @@ async def stream_message(
                 )
             except asyncio.TimeoutError:
                 await websocket.close(code=status.WS_1000_NORMAL_CLOSURE, reason="idle timeout")
+                disconnect_reason = "idle_timeout"
                 break
             except json.JSONDecodeError:
                 await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
@@ -250,6 +265,17 @@ async def stream_message(
                 logger.exception("스트리밍 중 처리되지 않은 예외 발생: session_id=%s", session_id)
                 await websocket.send_json({"type": "error", "detail": "메시지 처리 중 오류가 발생했습니다."})
                 await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                disconnect_reason = "error"
                 return
     except WebSocketDisconnect:
         pass
+    finally:
+        duration_ms = (time.monotonic() - connect_time) * 1000
+        access_logger.info(
+            "ws_event=disconnect path=%s client=%s user_id=%s duration_ms=%.1f reason=%s",
+            websocket.url.path,
+            client_ip,
+            current_user.id,
+            duration_ms,
+            disconnect_reason,
+        )
