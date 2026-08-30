@@ -5756,3 +5756,52 @@
       없었고, 거부 대상이 넓어졌을 뿐 정상 입력의 동작은 그대로라
       `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (164라운드)
+
+- [x] 188. 면접복기 `interview_date`의 "미래 날짜 거부" 검증이 서버의 UTC
+      달력일만 기준으로 비교해, UTC보다 앞선 시간대(KST 등) 사용자의
+      정당한 "오늘" 날짜를 미래로 오판해 거부하던 문제 해소 -
+      `app/schemas/interview_review.py`의
+      `_validate_interview_date_not_in_future()`(110라운드/항목 134가
+      도입)는 `utcnow_naive().date()`(서버 UTC 기준 오늘)와 비교하는데,
+      `interview_date`는 tz 정보 없는 순수 날짜라 사용자의 로컬 달력
+      날짜를 뜻한다. 이 앱은 한국어 UI로 KST(UTC+9)를 주 대상으로 하는데
+      (182라운드가 `UtcDatetime` 도입 근거로도 확인한 사실), UTC 자정
+      전(KST로는 이미 다음날 오전, 하루 24시간 중 9시간에 해당하는 구간)
+      KST 사용자가 자신의 "오늘" 날짜를 보내면, 서버 UTC 기준으로는
+      아직 "내일"이라 미래 날짜로 오판해 거부해버린다.
+
+      `utcnow_naive`를 실제 UTC 20:00으로 몽키패치해 KST "오늘"(=UTC
+      기준 "내일") 날짜를 보내면 정확히 거부됨을 직접 재현해 확인했다.
+      이 검증의 기존 회귀 테스트(`test_create/update_review_accepts_
+      todays_interview_date`)는 프로덕션 코드와 똑같이 `utcnow_naive()`
+      로 "오늘"을 계산해 이 시간대 어긋남 자체를 볼 수 없는 구조라
+      (자기 자신과만 비교), 이 버그가 지금까지 안 걸린 이유였다.
+
+      `_validate_interview_date_not_in_future()`의 비교 기준을
+      `today`에서 `today + timedelta(days=1)`로 바꿔, UTC보다 앞선
+      시간대와의 어긋남을 흡수하는 하루의 여유를 뒀다 - "정확한 하한이
+      아니라 넉넉한 안전장치"라는, 이 코드베이스의 다른 소프트 상한들과
+      같은 원칙이다. `interview_date`를 쓰는 유일한 두 필드
+      (`InterviewReviewCreateRequest`/`UpdateRequest`)가 이 헬퍼 하나를
+      공유해 자동으로 함께 고쳐진다. `grep ": date\\b" app/schemas/*.py`
+      로 `interview_date`가 스키마 계층에서 유일한 순수 `date`(datetime
+      아님) 사용자 입력 필드임을 확인해, 이 패턴이 다른 곳에 더 없음을
+      확인했다.
+
+      `tests/test_interview_review.py`의 기존 "미래 날짜 거부"
+      테스트 2개(생성/수정)를 "내일"이 아니라 "2일 뒤"로 갱신했다
+      (새 하루 여유 안에 들어와 더는 거부 케이스가 아니게 됐으므로).
+      "UTC 기준 내일 = KST 사용자의 오늘" 날짜가 생성/수정 둘 다 정상
+      허용되는지 확인하는 회귀 테스트 2개를 새로 추가했다. `git stash`로
+      스키마 파일만 되돌리면 이 새 테스트 2개가 정확히 (기대한 200/201
+      대신 422를 받아) 실패하는 것까지 확인한 뒤 복원했다.
+
+      `docs/FRONTEND_INTEGRATION.md`의 면접복기 절에 이 하루 여유를
+      한 줄로 명시했다 - 사용자가 관찰 가능한 검증 경계 변경이라
+      110라운드/항목 134가 세운 문서화 관례를 따랐다.
+
+      전체 551개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린. 스키마 필드 자체는 그대로고 검증 로직만 바뀐 것이라
+      DB 스키마 변경/마이그레이션은 필요 없었다.
+

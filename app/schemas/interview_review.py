@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,9 +13,19 @@ def _validate_interview_date_not_in_future(value: date) -> date:
     의미가 없다 - 정렬 기준으로도 쓰이는 값이라 터무니없는 값이 들어가면 UX가
     깨진다. "얼마나 먼 과거까지 허용할지"는 제품 판단이 필요해 하한은 두지
     않고(오래된 면접을 뒤늦게 기록하는 경우가 실제로 있을 수 있음), 명백히
-    모순인 미래 날짜만 막는다."""
+    모순인 미래 날짜만 막는다.
+
+    interview_date는 tz 정보 없는 순수 날짜라 사용자의 로컬 달력 기준 "오늘"을
+    뜻하는데, 서버는 utcnow_naive()로 UTC 기준 "오늘"만 알 수 있다 - 이 앱은
+    한국어 UI에 KST(UTC+9)를 주 대상으로 하므로, UTC 자정 전(KST로는 이미
+    다음날 오전) 사용자가 정당한 "오늘" 날짜를 보내면 서버 UTC 기준으로는
+    아직 "내일"이라 미래로 오판해 거부해버린다. UTC보다 앞선 시간대와의
+    이 어긋남을 흡수하도록 하루의 여유를 둔다 - 다른 소프트 상한들(RAG 후보
+    청크 수, RAG 백필 배치 크기 등)과 같은 "정확한 하한이 아니라 넉넉한
+    안전장치" 원칙이다.
+    """
     today = utcnow_naive().date()
-    if value > today:
+    if value > today + timedelta(days=1):
         raise ValueError("interview_date는 미래 날짜일 수 없습니다.")
     return value
 

@@ -81,16 +81,37 @@ def test_create_review_generates_feedback(client):
 
 def test_create_review_rejects_future_interview_date(client):
     """면접 복기는 이미 치른 면접을 되짚는 기능이라, 아직 안 일어난 미래 날짜는
-    의미가 없다 - 스키마 검증에서 바로 422로 거부돼야 한다."""
+    의미가 없다 - 스키마 검증에서 바로 422로 거부돼야 한다. 164라운드가 KST
+    등 UTC보다 앞선 시간대와의 어긋남을 흡수하려고 하루의 여유를 뒀으므로,
+    그 여유를 넘어서는(2일 뒤) 명백한 미래 날짜로 확인한다."""
     token = _signup_and_get_token(client, email="future-interview-date@example.com")
-    tomorrow = (utcnow_naive().date() + timedelta(days=1)).isoformat()
+    clearly_future = (utcnow_naive().date() + timedelta(days=2)).isoformat()
 
     response = client.post(
         "/api/v1/interview/reviews",
-        json=_create_payload(interview_date=tomorrow),
+        json=_create_payload(interview_date=clearly_future),
         headers=_auth_headers(token),
     )
     assert response.status_code == 422
+
+
+def test_create_review_accepts_tomorrows_interview_date_as_timezone_grace(client):
+    """interview_date는 tz 정보 없는 순수 날짜라 사용자의 로컬 달력 기준
+    "오늘"을 뜻하는데, 서버는 utcnow_naive()로 UTC 기준 "오늘"만 안다 - 이
+    앱은 한국어 UI로 KST(UTC+9)를 주 대상으로 하므로, UTC 자정 전(KST로는
+    이미 다음날 오전)에 정당한 "오늘" 날짜를 보내면 서버 UTC 기준 "내일"과
+    같은 값이 된다. 이 시간대 어긋남을 흡수하도록 하루의 여유를 뒀는지
+    확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="tz-grace-interview-date@example.com")
+    utc_tomorrow = (utcnow_naive().date() + timedelta(days=1)).isoformat()
+
+    response = client.post(
+        "/api/v1/interview/reviews",
+        json=_create_payload(interview_date=utc_tomorrow),
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 201
 
 
 def test_create_review_accepts_todays_interview_date(client):
@@ -439,6 +460,8 @@ def test_update_interview_date_only(client):
 
 
 def test_update_review_rejects_future_interview_date(client):
+    """164라운드가 KST 등 시간대 어긋남을 흡수하려고 하루의 여유를 뒀으므로,
+    그 여유를 넘어서는(2일 뒤) 명백한 미래 날짜로 확인한다."""
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client, email="update-future-interview-date@example.com")
 
@@ -446,14 +469,32 @@ def test_update_review_rejects_future_interview_date(client):
         "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
     )
     review_id = create.json()["id"]
-    tomorrow = (utcnow_naive().date() + timedelta(days=1)).isoformat()
+    clearly_future = (utcnow_naive().date() + timedelta(days=2)).isoformat()
 
     update = client.patch(
         f"/api/v1/interview/reviews/{review_id}",
-        json={"interview_date": tomorrow},
+        json={"interview_date": clearly_future},
         headers=_auth_headers(token),
     )
     assert update.status_code == 422
+
+
+def test_update_review_accepts_tomorrows_interview_date_as_timezone_grace(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="update-tz-grace-interview-date@example.com")
+
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+    utc_tomorrow = (utcnow_naive().date() + timedelta(days=1)).isoformat()
+
+    update = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"interview_date": utc_tomorrow},
+        headers=_auth_headers(token),
+    )
+    assert update.status_code == 200
 
 
 def test_update_review_with_explicit_null_interview_date_leaves_it_unchanged(client):
