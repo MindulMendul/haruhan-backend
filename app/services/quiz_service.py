@@ -307,8 +307,18 @@ class QuizService:
 
         total = await self._session.scalar(select(func.count()).select_from(base_query.subquery()))
 
+        # created_at(퀴즈)/order_index(문항)만으로는 값이 같은 행 사이의 순서가
+        # SQL 표준상 정의돼 있지 않다(같은 초에 만들어진 여러 퀴즈는 created_at이
+        # 같고, 서로 다른 퀴즈의 첫 문항은 order_index가 항상 0으로 같다) - 페이지
+        # 마다 그 순서가 달라질 수 있어서, LIMIT/OFFSET으로 나눠 받으면 같은 문제가
+        # 두 페이지에 다시 나오거나(중복) 어느 페이지에도 안 나올(누락) 수 있다.
+        # list_quizzes 등 다른 모든 페이지네이션 쿼리(quiz_repository.py 등)는
+        # 전부 id를 2차 정렬 기준으로 쓰는데, 이 오답노트 쿼리만 116라운드가
+        # 페이지네이션을 도입하면서 그 관례를 놓쳤다.
         result = await self._session.execute(
-            base_query.order_by(Quiz.created_at.desc(), QuizQuestion.order_index)
+            base_query.order_by(
+                Quiz.created_at.desc(), Quiz.id.desc(), QuizQuestion.order_index, QuizQuestion.id
+            )
             .limit(limit)
             .offset(offset)
         )

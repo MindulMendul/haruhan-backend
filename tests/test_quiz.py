@@ -1273,9 +1273,20 @@ def test_wrong_answer_notebook_pagination(client):
     second_page = client.get("/api/v1/quizzes/wrong-answers?limit=2&offset=2", headers=_auth_headers(token))
     assert len(second_page.json()["entries"]) == 2
 
+    third_page = client.get("/api/v1/quizzes/wrong-answers?limit=2&offset=4", headers=_auth_headers(token))
+    assert len(third_page.json()["entries"]) == 1
+
     first_ids = {e["question_id"] for e in first_page.json()["entries"]}
     second_ids = {e["question_id"] for e in second_page.json()["entries"]}
+    third_ids = {e["question_id"] for e in third_page.json()["entries"]}
     assert first_ids.isdisjoint(second_ids)
+    # 인접한 두 페이지끼리 겹치지 않는 것만으로는 부족하다 - 정렬 기준에 동률이
+    # 있으면 어느 페이지에도 안 나오는 행(누락)이 생겨도 이 확인만으로는
+    # 못 잡는다. 전체 3페이지를 합치면 정확히 5개 전부가 중복/누락 없이
+    # 나오는지 확인한다.
+    all_ids = first_ids | second_ids | third_ids
+    assert len(all_ids) == 5
+    assert len(first_ids) + len(second_ids) + len(third_ids) == 5
 
 
 def test_get_wrong_answer_notebook_issues_a_constant_number_of_queries(db_session_factory):
@@ -1336,6 +1347,52 @@ def test_get_wrong_answer_notebook_issues_a_constant_number_of_queries(db_sessio
     assert len(entries) == 5  # 퀴즈마다 오답 1개씩
     assert total == 5
     assert len(select_statements) == 2  # 퀴즈 개수와 무관하게 SELECT는 고정 2번(총 개수 + 데이터)
+
+
+def test_get_wrong_answer_notebook_breaks_ties_deterministically():
+    """같은 초에 만들어진 여러 퀴즈는 created_at이 같고, 서로 다른 퀴즈의 첫
+    문항은 order_index가 항상 0으로 같다 - `ORDER BY created_at DESC,
+    order_index`만으로는 이런 동률 행 사이의 순서가 SQL 표준상 정의돼 있지
+    않아, LIMIT/OFFSET으로 나눠 받으면 같은 문제가 두 페이지에 다시 나오거나
+    (중복) 어느 페이지에도 안 나올(누락) 수 있다. 이 동시성은 SQLite 기반
+    테스트로 재현할 수 없어(68/116라운드와 같은 성격의 한계), 서비스가
+    세션에 전달하는 statement를 가로채 컴파일된 SQL의 ORDER BY 절에
+    created_at/order_index뿐 아니라 Quiz.id/QuizQuestion.id도 2차 기준으로
+    포함돼 있는지 직접 확인한다."""
+    import uuid
+
+    class _CapturingResult:
+        def scalar(self):
+            return 0
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+        async def scalar(self, statement):
+            return 0
+
+    session = _CapturingSession()
+    settings = get_settings()
+    service = QuizService(session=session, ollama_service=None, rag_service=None, settings=settings)
+    asyncio.run(service.get_wrong_answer_notebook(uuid.uuid4(), limit=20, offset=0))
+
+    assert session.captured_statement is not None
+    # 이 쿼리는 최신 제출을 고르는 윈도우 함수(OVER (... ORDER BY ...))도 함께
+    # 컴파일되어 "ORDER BY"가 두 번 나온다 - 마지막 것이 페이지네이션에 실제로
+    # 쓰이는 바깥쪽 ORDER BY다.
+    order_by_clause = str(session.captured_statement).split("ORDER BY")[-1]
+    assert "quizzes.created_at" in order_by_clause
+    assert "quizzes.id" in order_by_clause
+    assert "order_index" in order_by_clause
+    assert "quiz_questions.id" in order_by_clause
 
 
 def test_list_attempts_returns_full_history_newest_first(client):

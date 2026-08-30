@@ -6406,3 +6406,58 @@
       변경이 없어(이미 로드된 `User` 객체를 읽을 뿐) 마이그레이션도
       필요 없었다.
 
+## 백로그 (177라운드)
+
+- [x] 201. 오답노트(`GET /quizzes/wrong-answers`)의 페이지네이션 정렬이
+      동률 행 순서를 보장하지 않던 문제 해소 - `QuizService.
+      get_wrong_answer_notebook`(116라운드가 페이지네이션을 도입)의
+      `ORDER BY`가 `Quiz.created_at.desc(), QuizQuestion.order_index`
+      뿐이었다. 두 기준 다 동률이 흔하다: 같은 초에 여러 퀴즈를 만들면
+      `created_at`이 같고, 서로 다른 퀴즈의 첫 문항은 `order_index`가
+      항상 0으로 같다. `list_quizzes`/`list_attempts`/`list_sessions`
+      등 이 코드베이스의 다른 모든 페이지네이션 쿼리(`quiz_repository.py`/
+      `quiz_attempt_repository.py`/`study_session_repository.py`/
+      `study_message_repository.py`/`interview_practice_repository.py`/
+      `interview_review_repository.py`/`knowledge_chunk_repository.py`/
+      `refresh_token_repository.py`)는 전부 `id`를 2차 정렬 기준으로 쓰는데
+      (68/104라운드 등이 이 "동률 순서 미정의" 문제를 반복적으로 고쳐온
+      바로 그 관례), 이 오답노트 쿼리만 `QuizService` 안에 인라인으로 남아
+      그 관례에서 빠져 있었다 - 저장소(repository) 계층 전수 스캔으로는
+      안 잡히는 사각지대였다.
+
+      로컬 Postgres 16으로 직접 재현했다 - 한 트랜잭션 안에서 만든(그래서
+      `created_at`이 완전히 같은) 퀴즈 10개를, 삽입 순서만 오름차순/
+      내림차순으로 바꿔 똑같은 `ORDER BY created_at DESC, order_index`
+      쿼리를 돌리면 정확히 반대 순서로 나오는 것을 확인했다 - 물리적
+      삽입 순서에 결과가 좌우된다는 뜻이라 SQL 표준상 미정의 동작에
+      기대고 있었다는 증거다. 이 앱 자신의 테스트 스위트로 실제 API
+      (`POST /quizzes` → `submit` 5번)를 돌려봐도 5개 퀴즈의 `created_at`
+      이 전부 동일한 값으로 나오는 것까지 확인했다 - 드문 경우가 아니라
+      이 엔드포인트의 기존 페이지네이션 테스트 자체가 매번 만들어내는
+      기본 상황이었다.
+
+      `app/services/quiz_service.py`의 `get_wrong_answer_notebook`
+      정렬을 `Quiz.created_at.desc(), Quiz.id.desc(), QuizQuestion.
+      order_index, QuizQuestion.id`로 바꿨다(`quiz_repository.py`의
+      `list_for_user`/`list_all_for_user`가 `Quiz.created_at.desc(),
+      Quiz.id.desc()`를 쓰는 것과 같은 패턴을 그대로 따름).
+
+      `tests/test_quiz.py`에 68/116라운드가 확립한 "세션에 전달되는
+      statement를 가로채 컴파일된 SQL의 ORDER BY 절을 직접 확인" 기법으로
+      `test_get_wrong_answer_notebook_breaks_ties_deterministically`를
+      추가했다(이 쿼리는 최신 제출을 고르는 윈도우 함수 자체도 `OVER (...
+      ORDER BY ...)`를 컴파일해내서 "ORDER BY"가 두 번 나오는데, 마지막
+      것이 실제 페이지네이션에 쓰이는 바깥쪽 절임을 확인하고 그것만
+      검사하도록 주의했다). 기존 `test_wrong_answer_notebook_pagination`도
+      강화했다 - 인접한 두 페이지끼리 안 겹치는 것만으로는 동률로 인한
+      "어느 페이지에도 안 나오는 누락"을 못 잡으므로, 3페이지 전부를 합쳐
+      정확히 5개 전부가 중복/누락 없이 나오는지 확인하도록 바꿨다. `git
+      stash`로 `quiz_service.py` 수정만 되돌리면 새 정렬 확인 테스트가
+      정확히 실패하는 것까지 확인했다.
+
+      전체 585개 테스트 통과, `app/services/quiz_service.py` 커버리지
+      100%, `mypy app tests scripts` 클린. 응답 스키마/API 동작은
+      전혀 바뀌지 않는(동률이 아닌 정상 케이스는 결과가 그대로) 순수
+      정렬 안정성 수정이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
+      스키마 변경이 없어 마이그레이션도 필요 없었다.
+
