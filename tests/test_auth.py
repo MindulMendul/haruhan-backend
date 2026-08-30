@@ -413,6 +413,56 @@ def test_revoke_session_returns_404_when_account_deleted_during_request(
     assert exc.status_code == 404
 
 
+def test_logout_succeeds_silently_when_account_deleted_during_request(
+    db_session_factory, monkeypatch
+):
+    """logout()의 get_by_hash() 조회도 revoke_session()과 같은 이유(185/186라운드)로
+    잠금이 없어, 그 조회와 revoke()의 UPDATE 사이에 다른 요청이 DELETE /users/me로
+    이 계정을 지우면(FK가 ON DELETE CASCADE라 refresh_tokens 행도 함께 사라짐)
+    UPDATE가 0행에 매치돼 StaleDataError가 난다 - 186라운드가 "StaleDataError가
+    날 수 있는 모든 unlocked UPDATE 경로를 전부 커버했다"고 판단했지만, revoke()를
+    쓰는 이 메서드는 그 스캔에서 빠져 있었다(인증 없이 refresh token만으로 호출
+    가능해 revoke_session()보다 경쟁 창이 트리거하기 쉽다). logout()은 이미 없는
+    (stored is None) 토큰으로도 조용히 성공 처리하므로, 계정이 사라진 경우도 같은
+    방식으로 흡수해야 한다(revoke_session()처럼 404로 바꾸는 것과 다름 - 그쪽은
+    존재하는 계정의 특정 세션을 대상으로 한 요청이라 다르다)."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            settings = get_settings()
+            raw_token = "raw-token-for-logout-race"
+            await RefreshTokenRepository(session).create(
+                user_id=user_id,
+                token_hash=hash_refresh_token(raw_token),
+                expires_at=utcnow_naive() + timedelta(days=1),
+            )
+            await session.commit()
+
+            class DeletingRefreshTokenRepository(RefreshTokenRepository):
+                async def revoke(self, target_token):
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target_user = await users_b.get_by_id(user_id)
+                        await users_b.delete(target_user)
+                        await session_b.commit()
+                    return await super().revoke(target_token)
+
+            monkeypatch.setattr(
+                auth_service_module, "RefreshTokenRepository", DeletingRefreshTokenRepository
+            )
+            service = AuthService(session=session, settings=settings)
+
+            # 예외가 나면 그대로 전파되어 asyncio.run()이 실패한다 - 조용히
+            # 성공(반환값 없음)해야 한다는 것 자체가 이 테스트의 확인 대상이다.
+            await service.logout(refresh_token=raw_token)
+
+    asyncio.run(_run())
+
+
 def test_login_rejects_nonexistent_email(client):
     response = client.post(
         "/api/v1/auth/login",

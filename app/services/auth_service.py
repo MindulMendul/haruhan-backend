@@ -169,7 +169,20 @@ class AuthService:
         token_hash = hash_refresh_token(refresh_token)
         stored = await self._refresh_tokens.get_by_hash(token_hash)
         if stored is not None and stored.revoked_at is None:
-            await self._refresh_tokens.revoke(stored)
+            # get_by_hash()는 잠금 없는 조회라, 그 조회와 아래 revoke()의 UPDATE
+            # 사이에 다른 요청이 DELETE /users/me로 이 계정을 지워버리면(FK가 ON
+            # DELETE CASCADE라 refresh_tokens 행도 함께 사라짐) revoke_session()과
+            # 같은 이유(185/186라운드)로 StaleDataError가 난다 - 186라운드가 "모든
+            # unlocked UPDATE 경로를 전부 커버했다"고 판단했지만 revoke()를 쓰는
+            # 이 메서드는 그때 빠져 있었다. 이미 없는(stored is None) 토큰으로
+            # 로그아웃해도 조용히 성공 처리하는 이 메서드의 기존 동작과 같은
+            # 성격의 경쟁이라, 404로 바꾸는 revoke_session()과 달리 같은 방식
+            # (조용한 성공)으로 흡수한다.
+            try:
+                await self._refresh_tokens.revoke(stored)
+            except StaleDataError:
+                await self._session.rollback()
+                return
         await self._session.commit()
 
     async def list_active_sessions(

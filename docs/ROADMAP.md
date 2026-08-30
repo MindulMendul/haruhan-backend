@@ -6253,3 +6253,59 @@
       서버 사이드 로깅 추가라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (174라운드)
+
+- [x] 198. `AuthService.logout()`이 계정이 요청 도중 삭제되면 처리되지 않은
+      `StaleDataError`(500)로 실패하던 문제 해소 - 186라운드가 "184/185/
+      186라운드가 StaleDataError가 날 수 있는 모든 unlocked UPDATE 경로
+      (계정 자체, 학습챗/퀴즈/면접연습 리소스, refresh token)를 전부
+      커버했다"고 명시적으로 결론지었지만, `revoke_session()`(186라운드가
+      고친 바로 그 메서드)과 똑같이 `RefreshTokenRepository.revoke()`
+      (`token.revoked_at = ...; flush()`, 잠금 없는 단일 행 UPDATE)를 쓰는
+      `logout()` 자신은 그 스캔에서 빠져 있었다.
+
+      `logout()`의 `get_by_hash()` 조회는 잠금이 없어, 그 조회와 `revoke()`
+      의 UPDATE 사이에 다른 요청이 `DELETE /users/me`로 이 계정을 지워버리면
+      (FK가 `ON DELETE CASCADE`라 `refresh_tokens` 행도 함께 사라짐) UPDATE가
+      0행에 매치돼 `StaleDataError`가 난다 - `POST /auth/logout`도
+      `routes/auth.py`도 이 예외를 잡지 않아 전역 예외 핸들러까지 그대로
+      새어나가 204 대신 500이 된다. `revoke_session()`은 access token 인증이
+      필요하지만 `logout()`은 refresh token만 있으면(액세스 토큰 없이도)
+      호출 가능해 이 경쟁 창이 더 쉽게 트리거된다. `RefreshTokenRepository.
+      revoke()`를 몽키패치해 그 안에서 별도 세션으로 실제 계정을 삭제하도록
+      만들어(143라운드 계열 기법) 직접 재현했다 - 픽스처가 아니라 실제
+      `create_async_engine`/`enable_sqlite_foreign_keys`로 CASCADE가 실제로
+      발동하는 것까지 확인한 스크립트로 `StaleDataError`가 그대로 올라오는
+      것을 먼저 확인한 뒤 고쳤다.
+
+      `app/services/auth_service.py`의 `logout()`에서 `revoke()` 호출을
+      `try: ... except StaleDataError:` 블록으로 감쌌다 - `revoke_session()`
+      과 달리 404로 바꾸지 않고, 이미 없는(`stored is None`) 토큰으로
+      로그아웃해도 조용히 성공 처리하는 이 메서드의 기존 동작과 같은 방식
+      (rollback 후 조용히 반환)으로 흡수했다. `revoke_session()`은 존재하는
+      계정의 특정 세션을 대상으로 한 요청이라 404가 맞지만, `logout()`은
+      원래도 "토큰이 이미 없어졌다"를 에러로 취급하지 않으므로 계정이
+      사라진 경우도 같은 취급이 자연스럽다.
+
+      `tests/test_auth.py`에 `test_logout_succeeds_silently_when_account_
+      deleted_during_request`를 추가했다(185/186라운드가 확립한 몽키패치
+      기법과 동일한 패턴). `git stash`로 `auth_service.py`만 되돌리면 이
+      테스트가 (500으로 새어나가는 `StaleDataError`를 pytest가 그대로 잡아)
+      정확히 실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 581개 테스트 통과, `app/services/auth_service.py` 커버리지
+      100% 유지, `mypy app tests scripts` 클린. 이미 존재하는 204 응답과
+      동작이 동일해(호출자 입장에서는 원래도 성공으로 보이던 경로) `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, 스키마 변경이 없어 마이그레이션도
+      필요 없었다.
+
+      (이번 라운드는 처음에 Dockerfile의 `--forwarded-allow-ips=*`가
+      Caddy를 통한 `X-Forwarded-For` 위조로 모든 IP 기준 레이트리밋을
+      우회할 수 있다는 조사 결과로 시작했으나, 실제 `caddy:2-alpine` 계열
+      바이너리(2.6.2)를 로컬에서 직접 띄워 위조된 `X-Forwarded-For`를
+      보내봤더니 Caddy의 기본 `reverse_proxy`가 클라이언트가 보낸 값을
+      추가(append)하는 게 아니라 자신이 본 실제 피어 IP로 완전히
+      교체(override)한다는 것을 직접 확인해 - 문서/기억에 의존하지 않고
+      스텁 백엔드로 실측 - 기각했다. `Dockerfile`의 `--forwarded-allow-
+      ips=*` 자체 주석이 설명하는 신뢰 모델이 맞았던 것으로 재확인됨.)
+
