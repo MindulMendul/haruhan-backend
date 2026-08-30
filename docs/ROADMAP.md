@@ -6097,3 +6097,50 @@
       경로 동작은 그대로라 DB 스키마 변경/마이그레이션도,
       `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (171라운드)
+
+- [x] 195. `Quiz.source_study_session_id`가 이 코드베이스에서 유일하게
+      인덱스 없는 FK 컬럼이던 문제 해소 - `app/db/models/`의 모든 모델
+      파일을 `grep`으로 전수 확인해, `User.id`/`StudySession.id`/
+      `Quiz.id` 등을 참조하는 다른 모든 FK 컬럼(`Quiz.user_id`,
+      `QuizAttempt.quiz_id`/`user_id`, `StudyMessage.session_id`,
+      `InterviewPracticeTurn.session_id` 등 전부)이 `index=True`인데
+      이 컬럼만 빠져 있었음을 확인했다. `ondelete="SET NULL"`이라
+      `DELETE /study/sessions/{id}`가 그 세션을 참조하던 `quizzes`
+      행을 찾아 `NULL`로 갱신할 때마다, 인덱스 없이는 `quizzes` 테이블
+      전체를 순차 스캔해야 한다 - 계정이 쌓이고 퀴즈가 늘어날수록 학습
+      세션 삭제 요청이 계속 느려지는 방향으로 악화되는, "서비스가
+      커질수록 나빠지는" 부류의 문제다(114/128라운드가
+      `knowledge_chunks`에 대해 같은 이유로 신경 쓴 것과 같은 종류).
+      `docs/ROADMAP.md`에서 이 컬럼을 다룬 기존 항목(81/82라운드,
+      항목 105/106)은 전부 `IntegrityError` 경쟁 처리였을 뿐, 인덱스
+      누락 자체는 그 라운드들에서도 언급된 적이 없었다.
+
+      `app/db/models/quiz.py`의 `source_study_session_id`에
+      `index=True`를 추가했다. 로컬 Postgres 16으로 직접 검증했다 -
+      수정 전 `alembic check`가 클린임을 먼저 확인한 뒤, 모델 수정
+      후 `alembic revision --autogenerate`가 정확히
+      `ix_quizzes_source_study_session_id` 인덱스 추가 하나만
+      감지하는 것을 확인했다.
+
+      `migrations/versions/8a9d7f4d33d6_...py`를 추가했다 -
+      `f8c776ddf837`(`knowledge_chunks` 복합 인덱스, 115라운드)와
+      정확히 같은 이유로 `CREATE INDEX CONCURRENTLY`(`op.get_context().
+      autocommit_block()`로 트랜잭션 밖에서 실행)를 썼다: `quizzes`는
+      사용자가 퀴즈를 만들 때마다 계속 쌓이는 테이블이라, 비-concurrent
+      `CREATE INDEX`는 인덱스 빌드가 끝날 때까지 이 테이블에 대한
+      쓰기를 전부 막는 락을 들고 있어 배포 순간 퀴즈 생성/조회가
+      멈춘다. `alembic upgrade head` → `alembic check`(드리프트 없음,
+      `\d quizzes`로 인덱스 실제 생성까지 확인) → `alembic downgrade
+      -1`(인덱스가 정확히 제거되고 `ix_quizzes_user_id`/기본키만
+      남는 것 확인) → `alembic upgrade head`(재적용 후 다시 드리프트
+      없음) 순으로 왕복 전체를 검증했다.
+
+      전체 564개 테스트 통과(회귀 없음, SQLite 테스트 픽스처는
+      `Base.metadata.create_all()`로 스키마를 만들어 Postgres
+      전용 `CONCURRENTLY`/인덱스 실사용 자체를 검증하지 않으므로
+      테스트 개수 변화는 없음 - 104/115라운드가 인덱스 전용 변경을
+      검증한 것과 같은 방식), `mypy app tests scripts` 클린. 응답
+      스키마/API 동작은 전혀 바뀌지 않는 순수 인덱스 추가라
+      `FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
+
