@@ -38,4 +38,20 @@ EXPOSE 8000
 # 통과하고 이 플래그를 켜면 프로토콜 레벨에서 거부되는(1009 message too big)
 # 것까지 재현 확인했다. HTTP 쪽 기본값과 같은 1MiB로 맞춰서 두 경로의
 # 보호 수준을 통일한다.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*", "--ws-max-size=1048576"]
+#
+# --log-level warning: 학습챗/면접복기 스트리밍 WebSocket 인증(get_current_user_ws,
+# core/dependencies.py)은 브라우저가 커스텀 헤더를 못 보내서 access token을
+# 쿼리 파라미터(?token=<access_token>)로 받는다(FRONTEND_INTEGRATION.md에 문서화된
+# 정상 계약). uvicorn의 기본(info) 로그 레벨에서는 이 핸드셰이크마다
+# "uvicorn.error" 로거(핸드셰이크/연결 자체를 다루는 websockets_sansio_impl.py가
+# 씀 - "uvicorn.access"가 아니라서 173라운드의 own AccessLogMiddleware/WS 접근
+# 로그와는 완전히 별개 경로)가 `127.0.0.1:PORT - "WebSocket /.../stream?token=
+# <JWT 전체>" [accepted]`를 그대로 stdout에 찍는다 - docker-compose.yml의
+# json-file 로그(141라운드, 최대 30MB 보관)에 최대 access_token_expire_minutes
+# (기본 30분)간 유효한 실제 access token이 평문으로 계속 쌓인다. 직접 uvicorn을
+# 띄워 실제 JWT가 이 로그 줄에 그대로 찍히는 것과, --no-access-log(=uvicorn.access
+# 로거만 끔)는 이 줄에 전혀 영향이 없지만(다른 로거라서) 로그 레벨을 warning으로
+# 올리면 uvicorn 자신의 이 INFO 레벨 핸드셰이크/기동 로그가 전부 사라지는 것까지
+# 재현 확인했다. HTTP 요청/WS 연결 각각의 access 로그는 이미 haruhan.access
+# 로거(14/173라운드)가 쿼리 없이 완전히 대체하고 있어서 정보 손실이 없다.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*", "--ws-max-size=1048576", "--log-level", "warning"]

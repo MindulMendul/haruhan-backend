@@ -6309,3 +6309,53 @@
       스텁 백엔드로 실측 - 기각했다. `Dockerfile`의 `--forwarded-allow-
       ips=*` 자체 주석이 설명하는 신뢰 모델이 맞았던 것으로 재확인됨.)
 
+## 백로그 (175라운드)
+
+- [x] 199. 학습챗/면접복기 WebSocket 인증 토큰이 uvicorn 기본 로그에 평문으로
+      찍히던 문제 해소 - `get_current_user_ws`(`core/dependencies.py`)는
+      브라우저가 WebSocket에 커스텀 헤더를 못 보내서 access token을 쿼리
+      파라미터(`?token=<access_token>`)로 받는다(`docs/FRONTEND_INTEGRATION.md`
+      에 문서화된 정상 계약). 173라운드가 이 두 라우트 자신의 접근 로그
+      (`haruhan.access`, `path`만 남기고 쿼리는 안 남김)를 추가했지만,
+      uvicorn 자신의 **기본 내장** 로그는 완전히 별개 경로라 전혀 손대지
+      않은 상태였다.
+
+      실제 uvicorn 0.51.0(고정 버전)을 직접 띄워 확인했다 - 기본(info)
+      로그 레벨에서 WebSocket 핸드셰이크마다 `uvicorn.error` 로거(연결
+      자체를 다루는 `websockets_sansio_impl.py`가 씀 - `haruhan.access`나
+      `uvicorn.access`가 아니라서 141라운드의 로그 로테이션 조치나 173라운드의
+      WS 접근 로그 어느 쪽으로도 안 잡힘)가 `127.0.0.1:PORT - "WebSocket
+      /.../stream?token=<JWT 전체>" [accepted]`를 그대로 stdout에 찍는 것을
+      실측했다. `docker-compose.yml`의 json-file 로그(141라운드, 서비스당
+      최대 30MB 보관)에 최대 `access_token_expire_minutes`(기본 30분)간
+      유효한 실제 access token이 평문으로 계속 쌓여, 그 로그를 읽을 수 있는
+      누구나(운영자, 로그 수집 사이드카, 유출된 로그 저장소) 정상적인
+      `Authorization: Bearer` REST API 전체를 그 유효 기간 동안 그대로
+      가장할 수 있었다.
+
+      처음엔 `--no-access-log`를 고치는 방향으로 접근했지만, 그 플래그는
+      `uvicorn.access` 로거만 끄고 이 핸드셰이크 로그는 `uvicorn.error`
+      로거가 내는 것이라 직접 재현해보니 `--no-access-log`를 켜도 토큰이
+      그대로 찍혔다(다른 로거라 영향이 없음 - 처음 조사 결과를 그대로
+      구현했다면 문제가 실제로는 안 고쳐졌을 뻔했다). `--log-level warning`
+      으로 올리면 uvicorn 자신의 이 INFO 레벨 핸드셰이크/기동 로그 전부가
+      사라지는 것까지 실제 서브프로세스로 `Dockerfile`의 CMD 배열을 그대로
+      실행해 재현 확인했다 - `haruhan`/`apscheduler`/`haruhan.access`(HTTP
+      접근 로그 14라운드, WS 접근 로그 173라운드) 등 앱 자신의 로거는 전부
+      영향받지 않고 그대로 남아 정보 손실이 없다.
+
+      `Dockerfile`의 uvicorn CMD에 `--log-level warning`을 추가했다.
+      `tests/test_dockerfile.py`에
+      `test_uvicorn_log_level_is_lowered_to_avoid_leaking_ws_auth_tokens_
+      in_logs`를 추가했다 - CMD 줄만 따로 뽑아 `--log-level`/`warning`이
+      있는지 확인한다(파일 전체를 대상으로 하면 이 테스트 자신의 docstring에
+      "warning"이라는 단어가 들어가 있어 실제 플래그 없이도 통과해버릴 수
+      있어서, 기존 두 테스트와 달리 CMD 줄만 골라내는 헬퍼를 새로 만들었다).
+      `git stash`로 `Dockerfile` 수정만 되돌리면 정확히 실패하는 것까지
+      확인했다.
+
+      전체 582개 테스트 통과, 전체 커버리지 99%, `mypy app tests scripts`
+      클린. WebSocket 인증 계약(`?token=` 쿼리 파라미터) 자체는 전혀
+      바뀌지 않는 순수 서버 배포 설정 변경이라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+
