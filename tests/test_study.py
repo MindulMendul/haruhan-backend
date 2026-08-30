@@ -310,6 +310,30 @@ def test_send_message_rejects_whitespace_only_content(client):
     assert detail.json()["messages"] == []
 
 
+def test_send_message_rejects_invisible_only_content(client):
+    """`str.strip()`은 공백류만 제거하고 zero-width space(U+200B) 같은 유니코드
+    Cf 카테고리 문자는 제거하지 못한다 - 이런 문자로만 이루어진 content가
+    `not value.strip()` 검사를 통과해 저장되고 불필요한 Ollama 호출까지
+    발생시켰다. is_blank()로 바꾼 뒤에도 공백-only 케이스와 동일하게
+    거부되는지 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "보이지 않는 문자 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "​​"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    assert detail.json()["messages"] == []
+
+
 def test_list_recent_for_session_returns_last_n_in_chronological_order(db_session_factory):
     """send_message/stream_message가 채팅 프롬프트에 넣을 최근 히스토리를
     구하던 이전 방식은 list_for_session()으로 세션 전체를 가져온 뒤 파이썬
@@ -967,6 +991,28 @@ def test_stream_message_rejects_empty_content(client):
         f"/api/v1/study/sessions/{session_id}/stream?token={token}"
     ) as ws:
         ws.send_json({"content": "   "})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_message_rejects_invisible_only_content(client):
+    """`str.strip()`은 공백류(`str.isspace()`가 True인 문자)만 제거하고,
+    zero-width space(U+200B)처럼 화면엔 안 보이지만 공백이 아닌 유니코드 Cf
+    카테고리 문자는 그대로 남긴다 - 그 결과 이런 문자로만 이루어진 content가
+    `not content.strip()` 검사를 통과해버렸다. is_blank()로 바꾼 뒤에도 REST
+    경로(test_send_message_rejects_whitespace_only_content)와 동일하게
+    거부되는지 WS 경로에서도 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "보이지 않는 문자 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "​​"})
         error_event = ws.receive_json()
         assert error_event["type"] == "error"
 

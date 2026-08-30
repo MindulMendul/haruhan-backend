@@ -5693,3 +5693,66 @@
       token)를 전부 커버했다 - `*_locked()`를 쓰는 메서드들은 92~103
       라운드의 잠금으로 이미 안전하다.
 
+## 백로그 (163라운드)
+
+- [x] 187. 121/146/151/153/175라운드가 추가한 "공백-only 입력 거부" 검증이
+      보이지 않는 유니코드 문자로 우회 가능했던 문제 해소 - 이 검증들은
+      전부 `not value.strip()` 패턴을 쓰는데, `str.strip()`은
+      `str.isspace()`가 True인 공백류 문자만 제거하고, zero-width
+      space(U+200B)/ZWNJ(U+200C)/ZWJ(U+200D)/word joiner(U+2060)/
+      BOM(U+FEFF)처럼 화면엔 아무것도 안 보이지만 공백이 아닌 유니코드
+      Cf("서식") 카테고리 문자는 그대로 남긴다 - `'​'.isspace()`가
+      `False`이고 `'​'.strip()`이 `'​'`(제거 안 됨) 그대로임을
+      직접 확인했다. 그 결과 이런 문자로만 이루어진 문자열은
+      `not value.strip()`가 `False`(="비어있지 않음")로 나와, 화면엔
+      완전히 빈 것처럼 보이는 값이 검증을 통과해버린다.
+
+      실제 앱을 띄워 재현했다: `POST /study/sessions/{id}/messages`에
+      `{"content": "​​"}`을 보내면 `200`으로 저장되고 실제
+      Ollama `chat()` 호출까지 발생했다(이 검증이 121라운드에 막으려던
+      바로 그 낭비). `POST /interview/practice-sessions/{id}/answers`도
+      같은 값을 스키마 검증 통과시켰다. 영향받는 지점은
+      `app/schemas/validators.py`(`NonBlankStr`가 거치는 `_reject_blank`
+      - 학습챗/퀴즈/면접연습/면접복기의 제목·주제·회사명·직무명 라벨
+      필드 전부가 이걸 공유), `app/schemas/study.py`(메시지 content),
+      `app/schemas/chat.py`(prompt), `app/schemas/quiz.py`(source_text),
+      `app/schemas/interview_practice.py`(answer),
+      `app/schemas/interview_review.py`(생성/수정 content 둘 다) 총
+      7곳 - 전부 같은 결함을 공유하는 하나의 근본 원인이다. WS 스트리밍
+      경로(`routes/study.py`의 `stream_message`)도 Pydantic을 거치지
+      않는 자체 검증(`not content.strip()`)이라 같은 문제가 있어 함께
+      고쳤다(면접복기 WS는 `InterviewReviewCreateRequest.model_validate()`
+      를 그대로 쓰므로 스키마 수정만으로 자동으로 커버됨).
+
+      `app/schemas/validators.py`에 `is_blank(value)` 헬퍼를 추가했다 -
+      문자열의 모든 문자가 공백류(`isspace()`)이거나 유니코드 Cf
+      카테고리인지 확인한다(`unicodedata.category(ch) == "Cf"`). 위
+      7곳의 `not value.strip()`/`not self.source_text.strip()`을 전부
+      이 헬퍼 호출로 바꿨다. `app/services/quiz_service.py:101`(학습
+      세션에 메시지가 있는지 확인 - "role: " 접두사가 항상 붙어 순수
+      비가시 문자만으로는 절대 도달 못 하는 분기라 무관)과
+      `app/services/rag_service.py:62`(색인을 건너뛸지 결정하는 내부
+      최적화 가드, 사용자에게 보이는 거부 응답이 아니고 스키마 검증을
+      통과한 값만 들어옴)는 검토 후 이 벡터와 무관하다고 판단해 손대지
+      않았다.
+
+      `tests/test_schemas_validators.py`에 `is_blank()` 자체에 대한
+      단위 테스트(대표적인 Cf 문자 5종 + 여러 개 조합이 blank로 판정,
+      보이는 문자와 섞이면 blank 아님)와, 기존
+      `test_whitespace_only_label_field_is_rejected`와 같은
+      파라미터 목록을 재사용한 "비가시 문자 라벨 필드 거부" 테스트를
+      추가했다. `tests/test_study.py`(REST+WS 둘 다)/
+      `tests/test_chat.py`(Ollama 미호출까지 확인)/`tests/test_quiz.py`
+      /`tests/test_interview_practice.py`/`tests/test_interview_review.py`
+      (생성+수정 둘 다)에도 각 필드의 기존 "공백-only 거부" 테스트
+      바로 옆에 짝을 이루는 비가시 문자 버전을 추가했다 - 총 7개 파일에
+      걸쳐 다수의 회귀 테스트. `git stash`로 스키마/라우트 파일들만
+      되돌리면 이 새 테스트들이 전부 (기대한 422 대신 200/201을 받아)
+      정확히 실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 549개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`app/schemas/validators.py` 100% 커버리지 포함). 순수
+      검증 로직 수정이라 DB 스키마 변경이 없어 마이그레이션은 필요
+      없었고, 거부 대상이 넓어졌을 뿐 정상 입력의 동작은 그대로라
+      `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+

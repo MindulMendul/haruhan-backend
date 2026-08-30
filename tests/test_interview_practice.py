@@ -404,6 +404,27 @@ def test_submit_answer_rejects_whitespace_only_answer(client):
     )
     assert response.status_code == 422
 
+
+def test_submit_answer_rejects_invisible_only_answer(client):
+    """`str.strip()`은 공백류만 제거하고 zero-width space(U+200B) 같은 유니코드
+    Cf 카테고리 문자는 제거하지 못한다 - 이런 문자로만 이루어진 answer가
+    공백-only 검사를 통과해버렸다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "​​"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
     # 거부됐다면 그 턴은 여전히 미답변 상태로 남아, 정상적인 답변으로 다시
     # 제출할 수 있어야 한다.
     detail = client.get(

@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import get_settings
+from app.schemas.validators import is_blank
 
 
 class ChatRequest(BaseModel):
@@ -15,7 +16,7 @@ class ChatRequest(BaseModel):
         # 이유로, 통과하면 무의미한 프롬프트로 Ollama 호출만 낭비하게 된다.
         # 학습챗/면접연습/면접복기/퀴즈의 프롬프트 필드는 이미 121/151라운드가
         # 이 검증을 추가했는데, 이 범용 프록시 엔드포인트만 빠져 있었다.
-        if not value.strip():
+        if is_blank(value):
             raise ValueError("prompt는 비어 있을 수 없습니다.")
         max_length = get_settings().max_prompt_length
         if len(value) > max_length:

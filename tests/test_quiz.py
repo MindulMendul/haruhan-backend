@@ -327,6 +327,20 @@ def test_create_quiz_rejects_whitespace_only_source_text(client):
     assert response.status_code == 422
 
 
+def test_create_quiz_rejects_invisible_only_source_text(client):
+    """`str.strip()`은 공백류만 제거하고 zero-width space(U+200B) 같은 유니코드
+    Cf 카테고리 문자는 제거하지 못한다 - 이런 문자로만 이루어진 source_text가
+    공백-only 검사를 통과해버렸다."""
+    token = _signup_and_get_token(client)
+
+    response = client.post(
+        "/api/v1/quizzes",
+        json={"title": "보이지 않는 문자 소스", "source_text": "​​"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
 def test_create_quiz_rejects_question_count_over_max(client, monkeypatch):
     # DEFAULT_QUIZ_QUESTION_COUNT(기본 5)가 MAX보다 커지면 Settings 자체가
     # 시작 시점에 거부하므로(84번 라운드), DEFAULT도 함께 낮춰야 한다.

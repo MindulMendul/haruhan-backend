@@ -36,6 +36,7 @@ from app.schemas.study import (
     StudySessionResponse,
     StudySessionUpdateRequest,
 )
+from app.schemas.validators import is_blank
 from app.services.ollama_service import OllamaService
 from app.services.rag_service import RagService
 from app.services.study_service import StudyService
@@ -194,7 +195,7 @@ async def stream_message(
                 await websocket.send_json({"type": "error", "detail": "잘못된 요청 형식입니다."})
                 continue
             content = payload.get("content")
-            if not isinstance(content, str) or not content.strip():
+            if not isinstance(content, str) or is_blank(content):
                 await websocket.send_json({"type": "error", "detail": "content는 비어 있을 수 없습니다."})
                 continue
             if len(content) > max_length:

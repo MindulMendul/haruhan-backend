@@ -7,6 +7,7 @@ from app.schemas.interview_review import InterviewReviewCreateRequest, Interview
 from app.schemas.quiz import QuizCreateRequest, QuizUpdateRequest
 from app.schemas.study import StudySessionCreateRequest, StudySessionUpdateRequest
 from app.schemas.user import GuestUpgradeRequest, UserUpdateRequest
+from app.schemas.validators import is_blank
 
 
 @pytest.mark.parametrize("model_cls", [SignupRequest, LoginRequest])
@@ -78,3 +79,48 @@ def test_interview_review_update_allows_omitted_but_rejects_whitespace_only_comp
 
     request = InterviewReviewUpdateRequest(company="회사명")
     assert request.company == "회사명"
+
+
+# str.strip()은 공백류(str.isspace()가 True인 문자)만 제거하고, zero-width
+# space(U+200B)/ZWNJ/ZWJ/word joiner(U+2060)/BOM(U+FEFF)처럼 화면엔 안 보이지만
+# 공백이 아닌 유니코드 Cf("서식") 카테고리 문자는 그대로 남긴다 - 그 결과 이런
+# 문자로만 이루어진 문자열이 `not value.strip()` 검사를 통과해버렸다(공백류 문자가
+# 하나도 없어 strip이 아무것도 제거하지 못함).
+@pytest.mark.parametrize(
+    "value",
+    ["​", "‌", "‍", "⁠", "﻿", "​​​"],
+)
+def test_is_blank_treats_invisible_format_characters_as_blank(value):
+    assert is_blank(value)
+
+
+def test_is_blank_does_not_treat_visible_content_as_blank():
+    assert not is_blank("정상 텍스트")
+    assert not is_blank("a​")  # 보이는 문자와 섞여 있으면 공백이 아님
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "kwargs"),
+    [
+        (StudySessionCreateRequest, {"title": "​​"}),
+        (StudySessionUpdateRequest, {"title": "​​"}),
+        (QuizCreateRequest, {"title": "​​", "source_text": "테스트 소스"}),
+        (QuizUpdateRequest, {"title": "​​"}),
+        (InterviewPracticeCreateRequest, {"topic": "​​"}),
+        (
+            InterviewReviewCreateRequest,
+            {
+                "company": "​​",
+                "position": "백엔드",
+                "interview_date": "2026-01-01",
+                "content": "면접 내용",
+            },
+        ),
+    ],
+)
+def test_invisible_only_label_field_is_rejected(model_cls, kwargs):
+    """공백만 있는 값을 거부하는 test_whitespace_only_label_field_is_rejected와
+    같은 필드들이, 보이는 공백 대신 zero-width space로만 이루어진 값도 똑같이
+    거부하는지 확인한다."""
+    with pytest.raises(ValidationError):
+        model_cls(**kwargs)

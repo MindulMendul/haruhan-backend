@@ -3,7 +3,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr, UtcDatetime
+from app.schemas.validators import NonBlankStr, UtcDatetime, is_blank
 
 
 class QuizCreateRequest(BaseModel):
@@ -27,7 +27,7 @@ class QuizCreateRequest(BaseModel):
         # 이유로, 통과하면 빈 소스로 AI가 퀴즈를 생성해 저장한다(title 외에는
         # 수정할 방법이 없음 - 121/122라운드가 "대응하는 WS 구현이 없어 범위 밖"
         # 이라는 이유로 미뤄뒀던 필드다).
-        if self.source_text is not None and not self.source_text.strip():
+        if self.source_text is not None and is_blank(self.source_text):
             raise ValueError("source_text는 비어 있을 수 없습니다.")
         if self.source_text and len(self.source_text) > settings.max_quiz_source_length:
             raise ValueError(f"source_text는 최대 {settings.max_quiz_source_length}자까지 허용됩니다.")

@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.clock import utcnow_naive
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr, UtcDatetime
+from app.schemas.validators import NonBlankStr, UtcDatetime, is_blank
 
 
 def _validate_interview_date_not_in_future(value: date) -> date:
@@ -39,7 +39,7 @@ class InterviewReviewCreateRequest(BaseModel):
         # 통과시킨다 - study.py의 validate_content_length(121라운드)와 같은 이유로,
         # 통과하면 빈 내용으로 AI 피드백을 생성해 저장한다(121/122라운드가 "대응하는
         # WS 구현이 없어 범위 밖"이라는 이유로 미뤄뒀던 필드다).
-        if not value.strip():
+        if is_blank(value):
             raise ValueError("content는 비어 있을 수 없습니다.")
         max_length = get_settings().max_review_content_length
         if len(value) > max_length:
@@ -67,7 +67,7 @@ class InterviewReviewUpdateRequest(BaseModel):
             return value
         # Create 쪽과 같은 이유(그 검증기 참고) - 공백만 있는 값으로 content를
         # "수정"하면 그 즉시 update_review()가 빈 내용으로 AI 피드백을 재생성해버린다.
-        if not value.strip():
+        if is_blank(value):
             raise ValueError("content는 비어 있을 수 없습니다.")
         max_length = get_settings().max_review_content_length
         if len(value) > max_length:

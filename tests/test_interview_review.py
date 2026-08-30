@@ -163,6 +163,37 @@ def test_update_review_rejects_whitespace_only_content(client):
     assert response.status_code == 422
 
 
+def test_create_review_rejects_invisible_only_content(client):
+    """`str.strip()`은 공백류만 제거하고 zero-width space(U+200B) 같은 유니코드
+    Cf 카테고리 문자는 제거하지 못한다 - 이런 문자로만 이루어진 content가
+    공백-only 검사를 통과해버렸다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+
+    response = client.post(
+        "/api/v1/interview/reviews",
+        json=_create_payload(content="​​"),
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_update_review_rejects_invisible_only_content(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"content": "​​"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
 def test_list_and_get_review(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

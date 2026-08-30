@@ -57,6 +57,17 @@ def test_chat_rejects_whitespace_only_prompt():
     assert fake.generate_call_count == 0
 
 
+def test_chat_rejects_invisible_only_prompt():
+    """`str.strip()`은 공백류만 제거하고 zero-width space(U+200B) 같은 유니코드
+    Cf 카테고리 문자는 제거하지 못한다 - 이런 문자로만 이루어진 prompt가
+    공백-only 검사를 통과해 Ollama 호출을 낭비시켰다."""
+    fake = FakeOllamaService()
+    with _client_with_fake_service(lambda: fake) as client:
+        response = client.post("/api/v1/chat", json={"prompt": "​​"})
+    assert response.status_code == 422
+    assert fake.generate_call_count == 0
+
+
 def test_chat_rejects_prompt_over_max_length(monkeypatch):
     monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
     get_settings.cache_clear()

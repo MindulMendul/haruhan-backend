@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr, UtcDatetime
+from app.schemas.validators import NonBlankStr, UtcDatetime, is_blank
 
 
 class InterviewPracticeCreateRequest(BaseModel):
@@ -55,7 +55,7 @@ class InterviewPracticeAnswerRequest(BaseModel):
         # 단발성 CAS(WHERE answer IS NULL)로 그 턴을 영구히 소비해버린다(재제출
         # 엔드포인트가 없음) - 121/122라운드가 "대응하는 WS 구현이 없어 범위 밖"
         # 이라는 이유로 미뤄뒀던 필드다.
-        if not value.strip():
+        if is_blank(value):
             raise ValueError("답변은 비어 있을 수 없습니다.")
         max_length = get_settings().max_prompt_length
         if len(value) > max_length:

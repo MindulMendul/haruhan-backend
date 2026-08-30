@@ -1,3 +1,4 @@
+import unicodedata
 from datetime import datetime
 from typing import Annotated
 
@@ -15,8 +16,22 @@ def _normalize_email(value: str) -> str:
 NormalizedEmail = Annotated[EmailStr, AfterValidator(_normalize_email)]
 
 
+def is_blank(value: str) -> bool:
+    """문자열 전체가 공백이거나 유니코드 Cf("서식") 카테고리 문자뿐인지 확인한다.
+
+    `str.strip()`은 `str.isspace()`가 True인 문자(공백류)만 제거하고, 폭 없는
+    문자(zero-width space U+200B, ZWNJ/ZWJ, word joiner U+2060, BOM U+FEFF 등
+    유니코드 Cf 카테고리)는 공백이 아니라고 보아 그대로 남긴다 - 그 결과
+    `"​​"` 같은, 화면에는 아무것도 안 보이는 문자열이
+    `not value.strip()` 검사를 통과해버린다(공백류 문자가 하나도 없어 strip이
+    아무것도 제거하지 못함). 이 문자들만으로 이루어진 값도 공백류와 똑같이
+    "실질적으로 비어있음"으로 취급한다.
+    """
+    return all(ch.isspace() or unicodedata.category(ch) == "Cf" for ch in value)
+
+
 def _reject_blank(value: str) -> str:
-    if not value.strip():
+    if is_blank(value):
         raise ValueError("공백만 입력할 수 없습니다.")
     return value
 

@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import get_settings
-from app.schemas.validators import NonBlankStr, UtcDatetime
+from app.schemas.validators import NonBlankStr, UtcDatetime, is_blank
 
 
 class StudySessionCreateRequest(BaseModel):
@@ -51,7 +51,7 @@ class StudyMessageCreateRequest(BaseModel):
         # 그대로 통과시켜 빈 메시지가 저장되고 불필요한 LLM 호출까지 발생했다 -
         # 두 경로가 동일한 기능(send_message)에 대해 다르게 동작하지 않도록
         # REST도 WS와 같은 규칙으로 맞춘다.
-        if not value.strip():
+        if is_blank(value):
             raise ValueError("content는 비어 있을 수 없습니다.")
         max_length = get_settings().max_prompt_length
         if len(value) > max_length:
