@@ -261,3 +261,36 @@ def test_settings_rejects_non_positive_health_check_timeout_seconds(bad_value):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, health_check_timeout_seconds=bad_value)
     assert "HEALTH_CHECK_TIMEOUT_SECONDS" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["rag_top_k", "rag_max_candidate_chunks", "rag_backfill_batch_size"],
+)
+@pytest.mark.parametrize("good_value", [0, 1, 500])
+def test_settings_accepts_non_negative_rag_settings(field_name, good_value):
+    settings = Settings(jwt_secret_key="a" * 32, **{field_name: good_value})
+    assert getattr(settings, field_name) == good_value
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["rag_top_k", "rag_max_candidate_chunks", "rag_backfill_batch_size"],
+)
+def test_settings_rejects_negative_rag_settings(field_name):
+    """rag_max_candidate_chunks/rag_backfill_batch_size는 각각
+    KnowledgeChunkRepository.list_for_user/backfill_unindexed_content의
+    SQLAlchemy .limit(...)을 거쳐 SQL LIMIT으로 내려가는데, Postgres는 음수
+    LIMIT을 값 오류로 거부한다(직접 재현해 확인함 - SQLite는 음수를
+    "무제한"으로 받아줘서 이 테스트 스위트로는 안 드러난다). rag_max_candidate_
+    chunks가 음수면 이 쿼리가 RagService.retrieve_relevant의 그 어떤
+    try/except도 거치지 않고 실행돼 학습챗/면접연습 매 턴마다 처리되지 않은
+    DBAPIError가 그대로 터진다. rag_top_k는 SQL과 무관한 순수 파이썬
+    슬라이싱(scored[:top_k])이라 크래시는 안 나지만, 음수 slice는 "빈 배열"이
+    아니라 뒤에서 |top_k|개를 뺀 나머지 전부를 반환해(직접 재현해 확인함)
+    가장 관련 없는 것 하나만 빼고 전부를 그라운딩에 욱여넣는 정반대의 결과를
+    낸다. 152라운드(176번 항목)가 이 필드들을 "0 이하에서 크래시 없이 우아하게
+    성능 저하"라 판단해 검증 없이 남겨뒀던 것과 다른, 더 정확한 재검토다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, **{field_name: -1})
+    assert field_name.upper() in str(exc_info.value)

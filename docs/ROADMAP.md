@@ -6144,3 +6144,55 @@
       스키마/API 동작은 전혀 바뀌지 않는 순수 인덱스 추가라
       `FRONTEND_INTEGRATION.md` 갱신은 필요 없었다.
 
+## 백로그 (172라운드)
+
+- [x] 196. `rag_top_k`/`rag_max_candidate_chunks`/`rag_backfill_batch_size`에
+      음수 거부 검증 추가 - 152라운드(176번 항목)가 이 세 필드(그리고
+      `max_interview_questions`)를 "0 이하에서 크래시나 전면 장애가 아니라
+      우아한 성능 저하로 이어져서" 검증 없이 남겨뒀는데, 직접 재현해보니
+      셋 다 그 판단과 다르게 동작함을 확인했다(`max_interview_questions`는
+      재확인 결과 판단이 맞아 그대로 뒀다).
+
+      `rag_max_candidate_chunks`는 `RagService.retrieve_relevant`가
+      `KnowledgeChunkRepository.list_for_user`를 거쳐 SQL
+      `.limit(rag_max_candidate_chunks)`로 그대로 내려가는데, 로컬 Postgres
+      16에 `SELECT 1 LIMIT -1`을 직접 실행해 `LIMIT must not be negative`
+      오류로 거부됨을 확인했다(SQLite는 음수 LIMIT을 "무제한"으로 받아줘서
+      이 테스트 스위트로는 506~564라운드 내내 전혀 드러나지 않았다). 이
+      쿼리는 `retrieve_relevant`의 그 어떤 try/except(임베딩 호출 실패만
+      잡는 `except OllamaServiceError`)도 거치지 않고 실행되므로, 값이
+      음수면 학습챗/면접연습 매 턴마다 처리되지 않은 `DBAPIError`가 그대로
+      터진다 - "RAG 그라운딩이 빈 배열"이 아니라 두 스트리밍 기능 전체가
+      시작 시점에는 전혀 티가 안 나는 상태로 계속 500/연결 끊김으로
+      이어진다.
+
+      `rag_backfill_batch_size`도 `backfill_unindexed_content`의 네
+      `.limit(...)` 호출 전부가 같은 이유로 거부되지만, 이 예외는
+      `run_scheduled_rag_backfill`의 최상위 `except Exception`에 잡혀
+      크래시가 밖으로 새지는 않는다 - 다만 그날 백필 job 전체(4개 카테고리
+      전부)가 첫 쿼리에서 예외 하나로 조기 중단된다는 점은 "각 카테고리가
+      독립적으로 아무 일도 안 함"이라는 원래 판단과 다르다.
+
+      `rag_top_k`는 SQL과 무관하게 `_rank_top_k`의 순수 파이썬 슬라이싱
+      (`scored[:top_k]`)이라 크래시는 안 나지만, 음수 slice가 파이썬에서
+      정확히 뭘 반환하는지 REPL로 직접 재현해보니 "빈 배열"이 아니라
+      뒤에서부터 `abs(top_k)`개를 뺀 나머지 전부였다(예: 후보 5개에
+      `top_k=-1`이면 4개 반환). `scored`는 코사인 유사도 내림차순 정렬이라,
+      이건 가장 관련 없는 것 하나만 빼고 전부를 그라운딩 프롬프트에
+      욱여넣는, 원래 판단(우아한 성능 저하)과 정반대의 결과다.
+
+      `app/core/config.py`에 `_validate_rag_settings_not_negative`
+      field_validator를 세 필드에 함께 추가했다(`value < 0`이면 거부, 0은
+      계속 허용 - `LIMIT 0`은 빈 결과, `scored[:0]`도 빈 리스트라 "RAG/백필을
+      끈다"는 안전한 의미로 그대로 동작한다). `tests/test_config.py`에
+      `test_settings_accepts_non_negative_rag_settings`(0/1/500 ×
+      3필드 parametrize)와 `test_settings_rejects_negative_rag_settings`
+      (3필드 parametrize, -1)를 추가했다. `git stash`로
+      `app/core/config.py` 수정만 되돌리면 새 테스트 3개가 정확히
+      `DID NOT RAISE ValidationError`로 실패하는 것까지 확인했다.
+
+      전체 576개 테스트 통과, 전체 커버리지 99%(`app/core/config.py`
+      100% 포함), `mypy app tests scripts` 클린. 정상 범위(0 이상) 설정의
+      동작은 완전히 그대로라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
+      스키마 변경이 없어 마이그레이션도 필요 없었다.
+

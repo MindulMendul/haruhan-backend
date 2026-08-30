@@ -425,6 +425,53 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("rag_top_k", "rag_max_candidate_chunks", "rag_backfill_batch_size")
+    @classmethod
+    def _validate_rag_settings_not_negative(cls, value: int, info: ValidationInfo) -> int:
+        """152라운드(176번 항목)가 이 세 필드를 "0 이하에서 크래시 없이 우아하게
+        성능이 저하될 뿐"이라 판단해 검증 없이 남겨뒀는데, 직접 재현해보니 셋 다
+        음수에서는 그 판단과 다르게 동작한다.
+
+        `rag_max_candidate_chunks`/`rag_backfill_batch_size`는 각각
+        `KnowledgeChunkRepository.list_for_user`/`backfill_unindexed_content`의
+        SQLAlchemy `.limit(...)`을 거쳐 SQL `LIMIT`으로 그대로 내려가는데,
+        Postgres는 음수 LIMIT을 값 자체 오류(`LIMIT must not be negative`)로
+        거부한다(SQLite는 음수를 "무제한"으로 받아줘서 이 테스트 스위트로는
+        전혀 드러나지 않았다 - 직접 재현해 확인함). `rag_max_candidate_chunks`가
+        음수면 `RagService.retrieve_relevant`가 이 쿼리를 그 어떤 try/except도
+        거치지 않고 바로 실행해, 학습챗/면접연습 매 턴마다 처리되지 않은
+        `DBAPIError`가 그대로 터진다 - "RAG 그라운딩이 빈 배열"이 아니라 두
+        스트리밍 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속 500/
+        연결 끊김으로 이어진다. `rag_backfill_batch_size`가 음수인 경우는 이
+        예외가 `run_scheduled_rag_backfill`의 최상위 `except Exception`에 잡혀
+        크래시가 밖으로 새지는 않지만, 그날 백필 job 전체(4개 카테고리 전부)가
+        예외 하나로 조기 중단된다 - "아무 일도 안 함"과 결과는 비슷해도 예상한
+        경로(빈 결과)가 아니라 예외 경로다.
+
+        `rag_top_k`는 SQL과 무관하게 순수 파이썬 슬라이싱(`scored[:top_k]`)이라
+        크래시는 나지 않지만, 음수 slice는 "빈 배열"이 아니라 뒤에서부터
+        `|top_k|`개를 뺀 나머지 전부를 반환한다(직접 재현: 후보 5개에
+        `top_k=-1`이면 4개가 반환됨) - 정렬 기준(코사인 유사도 내림차순)상
+        오히려 가장 관련 없는 것 하나만 빼고 전부를 프롬프트에 그라운딩으로
+        욱여넣는 정반대의 결과라, "우아한 성능 저하"라는 원래 판단이 이
+        필드에도 맞지 않는다.
+
+        `max_interview_questions`는 같은 조사에서 재확인한 네 번째 필드지만
+        `len(turns) < max_interview_questions` 비교로만 쓰여 음수여도 조건이
+        항상 거짓이 되어 첫 질문 뒤 바로 종료될 뿐이라(진짜 우아한 성능 저하),
+        이 필드는 그대로 검증 없이 남겨둔다. 0은 세 필드 모두에서 "RAG/백필을
+        끈다"는 안전한 의미로 그대로 동작하므로(`LIMIT 0`은 빈 결과,
+        `scored[:0]`도 빈 리스트) 0은 계속 허용한다."""
+        if value < 0:
+            field_name = info.field_name or "value"
+            raise ValueError(
+                f"{field_name.upper()}({value})는 0 이상이어야 합니다 - 음수면 "
+                "SQL LIMIT으로 쓰이는 필드는 Postgres가 즉시 오류로 거부하고, "
+                "rag_top_k는 파이썬 음수 슬라이싱 때문에 오히려 가장 관련 없는 "
+                "것만 빼고 전부를 그라운딩에 욱여넣습니다."
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_quiz_question_count_defaults(self) -> "Settings":
         """`QuizCreateRequest`는 `question_count`를 안 보낸 요청에는
