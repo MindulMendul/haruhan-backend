@@ -36,6 +36,13 @@ def liveness() -> dict:
     return {"status": "ok", "service": "haruhan-backend"}
 
 
+async def _check_redis_status(settings: Settings, timeout: float) -> tuple[bool, str]:
+    if not settings.redis_url:
+        return True, "not_configured"
+    ok = await check_redis_health(settings.redis_url, timeout)
+    return ok, "connected" if ok else "disconnected"
+
+
 async def _get_or_check_readiness(
     settings: Settings, ollama_service: OllamaService
 ) -> tuple[int, dict]:
@@ -53,15 +60,19 @@ async def _get_or_check_readiness(
             return cached
 
         timeout = settings.health_check_timeout_seconds
-        db_ok = await check_db_health(timeout)
-
-        redis_status = "not_configured"
-        redis_ok = True
-        if settings.redis_url:
-            redis_ok = await check_redis_health(settings.redis_url, timeout)
-            redis_status = "connected" if redis_ok else "disconnected"
-
-        ollama_ok = await check_ollama_health(ollama_service, timeout)
+        # 세 확인을 각각 순서대로 await하면, 개별 확인은 health_check_timeout_seconds
+        # 안에 끝나더라도(166라운드) 셋이 동시에 느려지는 실제 장애 상황(네트워크
+        # 이슈 등)에서는 총 대기 시간이 그 합(최대 3배)까지 늘어난다 - readiness
+        # probe는 이런 "여러 의존성이 한꺼번에 느려지는" 상황에서 오히려 가장
+        # 빠르게 답해야 의미가 있는데, 오케스트레이터의 probe 자체 타임아웃(보통
+        # 이 앱의 상한보다 짧게 잡힘)이 앱이 판단을 끝내기도 전에 먼저 끊어버릴
+        # 수 있다. asyncio.gather로 동시에 실행해, 전체 대기 시간을 가장 느린
+        # 확인 하나만큼(≈health_check_timeout_seconds)으로 되돌린다.
+        db_ok, (redis_ok, redis_status), ollama_ok = await asyncio.gather(
+            check_db_health(timeout),
+            _check_redis_status(settings, timeout),
+            check_ollama_health(ollama_service, timeout),
+        )
 
         status_code = (
             status.HTTP_200_OK

@@ -5913,3 +5913,51 @@
       `app/api/v1/routes/health.py`/`app/core/config.py` 전부 100%
       커버리지 유지). DB 스키마 변경이 없어 마이그레이션은 필요 없었다.
 
+## 백로그 (167라운드)
+
+- [x] 191. `/health/ready`의 DB/Redis/Ollama 세 확인이 순서대로(직렬로)
+      실행돼, 각 확인이 166라운드가 건 `health_check_timeout_seconds`
+      안에 끝나더라도 셋이 동시에 느려지는 실제 장애 상황에서는 전체
+      응답 시간이 그 합(최대 3배, 기본값 기준 최대 9초)까지 늘어나던
+      문제 해소 - 166라운드 자신의 커밋 메시지(`docs/ROADMAP.md`)가
+      "세 확인이 `_readiness_cache_lock` 아래 순차로 실행돼... 다른
+      모든 폴러까지 함께 멈춰 기다리게 된다"는 사실 자체는 이미 정확히
+      언급했지만, 그 라운드가 고친 건 확인 "개별" 소요 시간의 상한일
+      뿐 "합산" 소요 시간은 다루지 않아 목표("readiness probe는 몇 초
+      안에 빠르게 답해야 트래픽 라우팅 판단에 의미가 있다")를 절반만
+      달성한 상태였다. readiness probe는 여러 의존성이 한꺼번에
+      느려지는 진짜 장애 상황에서 오히려 가장 빠르게 답해야 의미가
+      있는데, 오케스트레이터 자신의 probe 타임아웃(대개 이 앱의 상한
+      보다 짧게 잡힘)이 앱이 판단을 끝내기도 전에 먼저 끊어버려 부정확한
+      "unready" 판정으로 이어질 수 있었다.
+
+      `app/api/v1/routes/health.py`의 `_get_or_check_readiness()`가
+      실제로 `db_ok = await check_db_health(...)` →
+      `redis_ok = await check_redis_health(...)` →
+      `ollama_ok = await check_ollama_health(...)`를 순서대로 부르고
+      있음을 코드로 확인했고, 3개 모두 1초 지연으로 흉내낸(각각
+      `asyncio.wait_for(timeout=1.0)`로 개별 제한을 걸어둔 채) 직접
+      재현 스크립트로 순차 실행 시 약 3.0초, `asyncio.gather`로 동시
+      실행 시 약 1.0초가 걸린다는 것도 확인했다.
+
+      `settings.redis_url`이 없으면 Redis 확인 자체를 건너뛰고
+      `"not_configured"`를 매기는 기존 분기를 `_check_redis_status()`
+      헬퍼로 그대로 옮기고, `check_db_health`/`_check_redis_status`/
+      `check_ollama_health` 세 코루틴을 `asyncio.gather`로 동시에
+      실행하도록 고쳤다 - 전체 대기 시간이 이제 가장 느린 확인
+      하나(≈`health_check_timeout_seconds`)에 가깝게 끝난다.
+
+      `tests/test_health.py`에
+      `test_get_or_check_readiness_runs_db_redis_ollama_checks_concurrently`
+      를 추가했다 - DB/Redis/Ollama 세 확인을 전부 0.2초 지연으로
+      흉내내고, 전체 응답 시간이 순차 실행이라면 나올 최소 0.6초보다
+      한참 짧은지 확인한다. `git stash`로 `health.py`만 되돌리면 이
+      테스트가 실제로 약 0.6초(정확히 세 지연의 합)가 걸려 정확히
+      실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 560개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`app/api/v1/routes/health.py` 100% 커버리지 유지). 응답
+      바디/상태 코드 계약은 그대로고 내부 실행 순서만 바뀐 것이라
+      DB 스키마 변경/마이그레이션도, `FRONTEND_INTEGRATION.md` 갱신도
+      필요 없었다.
+
