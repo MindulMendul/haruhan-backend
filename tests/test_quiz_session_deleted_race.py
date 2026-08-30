@@ -85,3 +85,64 @@ def test_create_quiz_from_study_session_returns_404_when_session_deleted_during_
     assert exc is not None
     assert exc.status_code == 404
     assert exc.detail == "Study session not found"
+
+
+def test_create_quiz_from_pasted_text_returns_401_when_account_deleted_during_ai_call(
+    db_session_factory,
+):
+    """study_session_id 없이 직접 붙여넣은 소스로 만드는 퀴즈는 이 Quiz INSERT가
+    참조하는 FK가 user_id(nullable=False, ondelete=CASCADE) 하나뿐이다 - 그
+    사이 다른 요청이 UserService.delete_account()로 계정을 지우면 IntegrityError
+    가 나는데, 원인이 될 수 있는 건 "계정이 지워졌다"뿐이다(애초에 요청에
+    study_session_id 자체가 없었으니 "학습 세션이 지워졌다"는 성립할 수 없음).
+    위 테스트(학습 세션 경로)와 똑같이 404 "Study session not found"로 답하면
+    세션 얘기를 꺼낸 적도 없는 사용자에게 엉뚱한 오답을 주게 된다 -
+    143~147라운드가 다른 서비스에 적용한 것과 같은 "계정 삭제 경쟁" 401로
+    변환해야 한다. 가짜 Ollama가 퀴즈 JSON을 반환하기 "직전"에 별도 세션에서
+    계정을 완전히 지우도록 만들어 이 타이밍을 결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            settings = get_settings()
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+            user_id = user.id
+
+            class DeletingOllamaService:
+                async def generate_json(self, prompt, model, schema):
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    return SAMPLE_QUIZ_JSON
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0, 0.0]
+
+            ollama = DeletingOllamaService()
+            quiz_service = QuizService(
+                session=session_a,
+                ollama_service=ollama,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+                settings=settings,
+            )
+
+            try:
+                await quiz_service.create_quiz(
+                    user_id=user_id,
+                    title="퀴즈",
+                    study_session_id=None,
+                    source_text="직접 붙여넣은 소스입니다",
+                    question_count=1,
+                    model="qwen2.5:3b",
+                )
+                return None
+            except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+    assert exc.detail == {"code": "invalid_token", "message": "Could not validate credentials"}

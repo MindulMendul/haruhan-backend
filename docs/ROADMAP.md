@@ -5805,3 +5805,56 @@
       클린. 스키마 필드 자체는 그대로고 검증 로직만 바뀐 것이라
       DB 스키마 변경/마이그레이션은 필요 없었다.
 
+## 백로그 (165라운드)
+
+- [x] 189. `QuizService.create_quiz()`가 직접 붙여넣은 소스로 퀴즈를 만들 때
+      (`study_session_id`를 지정하지 않은 경우) AI 생성 도중 계정이
+      지워지면, "Study session not found"(404)라는 엉뚱한 오답을 내던
+      문제 해소 - 143~147라운드가 다른 서비스들에 적용한 "계정 삭제
+      경쟁"(check-then-act 중 참조 대상이 지워지면 나중 INSERT가
+      IntegrityError로 실패) 계열인데, 147라운드의 전수 재점검이 정확히
+      이 메서드만 놓쳤다. 147라운드 자체의 기록(`## 백로그 (147라운드)`)
+      을 다시 읽어보면 `quiz_service.submit_answers`는 점검해 안전하다고
+      확인했지만 `create_quiz()`는 언급조차 되지 않아, "소진됐다"는
+      선언이 이 메서드까지는 실제로 검증한 게 아니었음을 확인했다.
+
+      `create_quiz()`는 `study_session_id`가 있을 때만 그 부모 학습
+      세션(`source_study_session_id`, `ondelete="SET NULL"`)이 AI 호출
+      도중 지워지는 경우를 다루도록 만들어졌는데(그때도 IntegrityError는
+      나는데, 이유는 "삭제 자체가 CASCADE라서"가 아니라 "INSERT 시점에
+      이미 사라진 부모를 참조하려 해서"), `study_session_id`가 없는(직접
+      붙여넣기) 경로는 이 INSERT가 참조하는 FK가 `user_id`
+      (`nullable=False`, `ondelete=CASCADE`) 하나뿐이라 IntegrityError의
+      원인이 "계정 자체가 지워졌다"일 수밖에 없다. 그런데도 기존 코드는
+      두 경로를 구분하지 않고 전부 "Study session not found"로 답해,
+      요청에 `study_session_id`를 넣은 적도 없는 사용자에게 있지도 않은
+      세션 얘기를 하는 오답을 내고 있었다.
+
+      직접 재현 스크립트로 확인했다: `study_session_id=None`으로 퀴즈
+      생성을 시작하고, 가짜 Ollama가 응답을 반환하기 "직전" 별도
+      세션에서 계정을 완전히 지우면 `create_quiz()`가 정확히
+      `404 Study session not found`를 반환한다는 것도 확인했다(고치기
+      전 상태로).
+
+      `app/services/quiz_service.py`에 다른 세 서비스와 같은
+      `_ACCOUNT_GONE`(401, `{"code": "invalid_token", ...}`) 상수를
+      추가하고, `except IntegrityError:` 분기를
+      `study_session_id is None`이면 `_ACCOUNT_GONE`, 아니면(=요청에
+      명시된 학습 세션이 있었던 경우) 기존처럼 `_SESSION_NOT_FOUND`로
+      나누도록 고쳤다 - 후자는 계정이 아니라 그 세션만 지워졌을 가능성도
+      있어, "그 리소스는 더는 없다"는 404가 여전히 정확하고 실행 가능한
+      답이기 때문에 그대로 뒀다.
+
+      `tests/test_quiz_session_deleted_race.py`에 기존 "학습 세션 삭제"
+      테스트와 짝을 이루는 "계정 삭제"(직접 붙여넣기 경로) 테스트를
+      추가했다 - 같은 "가짜 Ollama가 응답 직전에 별도 세션에서 실제로
+      지운다" 기법을 그대로 썼다. `git stash`로 `quiz_service.py`만
+      되돌리면 이 새 테스트가 정확히 (404를 받아 기대한 401과 다름)
+      실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 552개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`quiz_service.py` 100% 커버리지 유지). 스키마 변경이 없어
+      마이그레이션은 필요 없었고, 다른 세 서비스가 이미 같은 코드로
+      401을 내고 있어 `FRONTEND_INTEGRATION.md`가 이미 문서화한 계약과
+      일치하므로 갱신도 필요 없었다.
+

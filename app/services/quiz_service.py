@@ -51,6 +51,15 @@ _RESULT_NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=
 _GENERATION_FAILED = HTTPException(
     status_code=status.HTTP_502_BAD_GATEWAY, detail="퀴즈 생성에 실패했습니다. 다시 시도해주세요."
 )
+# get_current_user가 검증한 시점과 create_quiz()의 INSERT 사이(Ollama 호출로 늘어난
+# 시간차) 다른 요청이 계정을 지우면(아래 create_quiz 참고) core/dependencies.py의
+# get_current_user가 "존재하지 않는 사용자"에 쓰는 것과 같은 코드/메시지로 응답한다
+# (146/147라운드가 study_service.py/interview_practice_service.py/
+# interview_review_service.py에 쓴 것과 같은 상수).
+_ACCOUNT_GONE = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_token", "message": "Could not validate credentials"},
+)
 
 
 def _build_quiz_prompt(source_text: str, question_count: int) -> str:
@@ -134,6 +143,18 @@ class QuizService:
         # 같은 방식으로 404로 변환한다(source_study_session_id는 ondelete="SET NULL"
         # 이라 삭제 자체는 CASCADE가 아니지만, 지금 이 INSERT 시점엔 이미 사라진
         # 부모를 참조하려는 것이라 여전히 위반이다).
+        #
+        # study_session_id가 None(직접 붙여넣기)인 경우는 이 INSERT에 참조하는 FK가
+        # user_id(nullable=False, ondelete=CASCADE) 하나뿐이라, IntegrityError가
+        # 났다면 원인은 오직 "그 사이 계정 자체가 지워졌다"뿐이다 - 이 경우까지
+        # "Study session not found"로 답하면 요청에 study_session_id를 아예 넣지도
+        # 않은 사용자에게 있지도 않은 세션 얘기를 하는 오답이 된다(143~147라운드가
+        # study_service.py/interview_practice_service.py/interview_review_service.py
+        # 에 적용한 것과 같은 "계정 삭제 경쟁" 계열인데, create_quiz()만 그 전수
+        # 재점검(147라운드)에서 빠져 있었다). 요청에 명시된 study_session_id가
+        # 있는 경우만 기존처럼 404로 유지한다 - 그때는 계정이 아니라 그 세션만
+        # 지워졌을 가능성도 있어, 클라이언트 입장에서 "그 리소스는 더 이상
+        # 없다"는 404가 여전히 정확하고 실행 가능한 답이다.
         try:
             quiz = await self._quizzes.create(
                 user_id=user_id,
@@ -153,6 +174,8 @@ class QuizService:
             await self._session.commit()
         except IntegrityError:
             await self._session.rollback()
+            if study_session_id is None:
+                raise _ACCOUNT_GONE from None
             raise _SESSION_NOT_FOUND from None
         quiz_created_total.inc()
 
