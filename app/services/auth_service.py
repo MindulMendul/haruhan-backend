@@ -4,6 +4,7 @@ import uuid
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.clock import utcnow_naive
 from app.core.config import Settings
@@ -187,8 +188,18 @@ class AuthService:
         token = await self._refresh_tokens.get_active_by_id_for_user(session_id, user_id)
         if token is None:
             raise _SESSION_NOT_FOUND
-        await self._refresh_tokens.revoke(token)
-        await self._session.commit()
+        # get_active_by_id_for_user()는 잠금 없는 조회라, 그 조회와 아래 revoke()의
+        # UPDATE 사이에 다른 요청이 DELETE /users/me로 이 계정을 지워버리면(FK가
+        # ON DELETE CASCADE라 refresh_tokens 행도 함께 사라짐) 이 UPDATE가 0행에
+        # 매치돼 StaleDataError가 난다 - study_service.py 등의 rename_session()이
+        # 겪던 것과 같은 종류의 경쟁(185라운드)을 이 테이블에서도 겪는다.
+        # revoke_all_sessions()는 WHERE 절을 건 Core 벌크 UPDATE라 이 문제가 없다.
+        try:
+            await self._refresh_tokens.revoke(token)
+            await self._session.commit()
+        except StaleDataError:
+            await self._session.rollback()
+            raise _SESSION_NOT_FOUND from None
 
     async def revoke_all_sessions(self, user_id: uuid.UUID) -> None:
         await self._refresh_tokens.revoke_all_for_user(user_id)

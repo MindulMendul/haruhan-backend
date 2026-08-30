@@ -5643,3 +5643,53 @@
       마이그레이션은 필요 없었고, 이미 존재하는 404 응답과 코드/의미가
       동일해 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (162라운드)
+
+- [x] 186. `AuthService.revoke_session()`이 대상 refresh token이 요청 도중
+      지워지면 처리되지 않은 `StaleDataError`(500)로 끝나던 문제 해소 -
+      184/185라운드가 각각 `users` 테이블 UPDATE(계정 자체 수정)와
+      학습챗/퀴즈/면접연습 세 리소스 테이블 UPDATE(이름변경)에서 고친
+      것과 같은 종류의 경쟁을 `refresh_tokens` 테이블에서도 겪고 있었다.
+      `revoke_session()`은 `get_active_by_id_for_user()`(잠금 없는
+      조회)로 세션을 읽은 뒤 `RefreshTokenRepository.revoke()`(`token.
+      revoked_at = ...` + `flush()`, 개별 ORM UPDATE)로 폐기하는 구조라,
+      그 조회와 UPDATE 사이에 다른 요청이 `DELETE /users/me`로 이 계정을
+      지우면(FK가 `ON DELETE CASCADE`라 `refresh_tokens` 행도 함께
+      사라짐) UPDATE가 0행에 매치돼 `StaleDataError`가 난다.
+      `grep -rn StaleDataError app/services/auth_service.py`로 이
+      파일이 184/185라운드 어느 쪽에도 포함되지 않아 이 예외가 전혀
+      다뤄지지 않고 있었음을 확인했다.
+
+      직접 재현 스크립트로 확인했다: 세션 A에서 활성 refresh token을
+      만들어두고 세션 B로 그 소유 계정을 완전히 지운 뒤, 세션 A에서
+      `RefreshTokenRepository.revoke()`를 부르면 정확히 `StaleDataError:
+      UPDATE statement on table 'refresh_tokens' expected to update
+      1 row(s); 0 were matched.`가 난다는 것도 확인했다. `revoke_all_
+      sessions()`(전체 로그아웃)는 `WHERE user_id = :id`를 건 Core
+      벌크 UPDATE라 이 문제와 무관함도 코드로 확인했다(개별 ORM
+      UPDATE만 "기대한 행 수"를 검사해 이 예외를 던진다).
+
+      `app/services/auth_service.py`의 `revoke_session()`에서
+      `revoke()`+`commit()` 호출을 `try: ... except StaleDataError:`
+      블록으로 감싸, 이미 있는 `_SESSION_NOT_FOUND`(404)로 변환하도록
+      고쳤다 - 계정이 아니라 이 refresh token(세션) 자체가 사라진
+      경우라, 존재하지 않는 session_id를 상대로 한 다른 요청과 같은
+      404가 185라운드와 같은 이유로 맞다.
+
+      `tests/test_auth.py`에 143라운드 계열이 확립한 "리포지토리
+      메서드를 몽키패치해 그 안에서 별도 세션으로 실제 삭제를 수행"
+      기법(이 파일의 `test_refresh_returns_401_when_account_deleted_
+      before_user_lookup` 등과 같은 패턴)으로 회귀 테스트를 추가했다.
+      `git stash`로 `auth_service.py`만 되돌리면 이 테스트가 (500으로
+      새어나가는 `StaleDataError`를 pytest가 그대로 잡아) 정확히
+      실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 529개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`auth_service.py` 100% 커버리지 유지). 스키마 변경이 없어
+      마이그레이션은 필요 없었고, 이미 존재하는 404 응답과 코드/의미가
+      동일해 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다. 이로써
+      184/185/186라운드가 `StaleDataError`가 날 수 있는 모든 unlocked
+      UPDATE 경로(계정 자체, 학습챗/퀴즈/면접연습 리소스, refresh
+      token)를 전부 커버했다 - `*_locked()`를 쓰는 메서드들은 92~103
+      라운드의 잠금으로 이미 안전하다.
+

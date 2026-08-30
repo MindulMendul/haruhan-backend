@@ -362,6 +362,57 @@ def test_refresh_returns_401_when_account_deleted_before_user_lookup(db_session_
     assert exc.status_code == 401
 
 
+def test_revoke_session_returns_404_when_account_deleted_during_request(
+    db_session_factory, monkeypatch
+):
+    """revoke_session()의 get_active_by_id_for_user() 조회는 잠금이 없어, 그
+    조회와 revoke()의 UPDATE 사이에 다른 요청이 DELETE /users/me로 이 계정을
+    지우면(FK가 ON DELETE CASCADE라 refresh_tokens 행도 함께 사라짐) UPDATE가
+    0행에 매치돼 StaleDataError가 난다 - 185라운드가 고친 rename_session() 등의
+    "리소스가 지워지는" 경쟁과 같은 종류를 refresh_tokens 테이블에서도 겪는다.
+    revoke()가 반환하기 직전 별도 세션에서 계정을 지우도록 만들어 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            settings = get_settings()
+            token = await RefreshTokenRepository(session).create(
+                user_id=user_id,
+                token_hash="hash-for-revoke-session-race",
+                expires_at=utcnow_naive() + timedelta(days=1),
+            )
+            await session.commit()
+            token_id = token.id
+
+            class DeletingRefreshTokenRepository(RefreshTokenRepository):
+                async def revoke(self, target_token):
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target_user = await users_b.get_by_id(user_id)
+                        await users_b.delete(target_user)
+                        await session_b.commit()
+                    return await super().revoke(target_token)
+
+            monkeypatch.setattr(
+                auth_service_module, "RefreshTokenRepository", DeletingRefreshTokenRepository
+            )
+            service = AuthService(session=session, settings=settings)
+
+            try:
+                await service.revoke_session(user_id=user_id, session_id=token_id)
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
 def test_login_rejects_nonexistent_email(client):
     response = client.post(
         "/api/v1/auth/login",
