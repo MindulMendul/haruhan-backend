@@ -6004,3 +6004,48 @@
       내부 구현 변경이라 DB 스키마 변경/마이그레이션도,
       `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (169라운드)
+
+- [x] 193. WebSocket 연결(학습챗/면접복기 스트리밍)이 Prometheus 지표에
+      전혀 안 잡히던 문제 해소 - `app/core/metrics.py`의
+      `MetricsMiddleware`는 ASGI `"http"` scope만 다루고
+      (`if scope["type"] != "http": ... return`), WebSocket은 아예
+      건너뛴다. 그 결과 99/123/140/164/176라운드가 공들여 만든 동시
+      연결 상한(`max_concurrent_ws_connections`, DB 커넥션 풀 고갈
+      방지 안전장치)이 실제로 얼마나 여유가 있는지, 얼마나 자주
+      거부되는지를 운영자가 `docker-compose.yml`이 이미 갖춘
+      Prometheus/Grafana(17/25/141/142라운드)에서 전혀 볼 수 없었다 -
+      `tests/test_metrics.py`도 지금까지 HTTP 라우트/카운터만
+      확인했지 WS 관련 지표는 하나도 없었음을 확인했다.
+
+      `app/core/metrics.py`에 `ws_active_connections`(Gauge)와
+      `ws_connections_rejected_total`(Counter)을 추가했다 - 라벨은
+      두지 않았다. `app/core/dependencies.py`의 `limit_ws_connections`
+      가 이미 학습챗/면접복기 두 라우트가 공유하는 단일 카운터/단일
+      상한(`_active_ws_connections`)으로 설계돼 있어(라우트별로 안
+      나뉨), 그 실제 설계를 그대로 반영해 지표도 라우트 라벨 없이
+      하나로 합산하는 쪽이 지표가 실제 코드 동작과 어긋나지 않는다고
+      판단했다.
+
+      `limit_ws_connections`가 연결을 받아들일 때/반납할 때
+      `ws_active_connections.set(...)`을 갱신하고, 상한 초과로
+      거부할 때 `ws_connections_rejected_total.inc()`를 호출하도록
+      고쳤다. 테스트 간 상태 격리용 `reset_ws_connection_counter()`도
+      게이지를 0으로 되돌리도록 맞췄다(카운터만 초기화하고 게이지는
+      안 건드리면 이전 테스트가 남긴 값이 다음 테스트로 새어나갈 수
+      있었음).
+
+      `tests/test_metrics.py`에 두 테스트를 추가했다 -
+      (1) WS 연결이 열려 있는 동안 게이지가 늘고 닫히면 다시 줄어드는지,
+      (2) `MAX_CONCURRENT_WS_CONNECTIONS=1`로 줄인 뒤(140라운드 테스트와
+      같은 패턴) 상한 초과로 거부되는 두 번째 연결 시도가 거부 카운터를
+      늘리는지. `git stash`로 `metrics.py`/`dependencies.py`만 되돌리면
+      두 테스트 모두 (지표 자체가 없어) 정확히 실패하는 것까지 확인한
+      뒤 복원했다.
+
+      전체 563개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`core/metrics.py`/`core/dependencies.py` 둘 다 100%
+      커버리지 유지). 새 지표를 추가만 한 것이라 기존 HTTP 지표/DB
+      스키마 변경은 없어 마이그레이션도, `FRONTEND_INTEGRATION.md`
+      갱신도 필요 없었다.
+

@@ -1,6 +1,6 @@
 import time
 
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 http_requests_total = Counter(
@@ -18,6 +18,21 @@ http_request_duration_seconds = Histogram(
 user_signups_total = Counter("haruhan_user_signups_total", "완료된 회원가입 수")
 guest_conversions_total = Counter("haruhan_guest_conversions_total", "게스트 -> 실계정 전환 수")
 quiz_created_total = Counter("haruhan_quiz_created_total", "생성된 퀴즈 수")
+
+# WebSocket 연결(학습챗/면접복기 스트리밍)은 core/metrics.py의 MetricsMiddleware가
+# ASGI "http" scope만 다뤄서(아래 MetricsMiddleware.__call__ 참고) 지금까지 이
+# 파일의 어떤 지표에도 전혀 잡히지 않았다 - 99/123/140/164/176라운드가 공들여
+# 만든 동시 연결 상한(max_concurrent_ws_connections, DB 커넥션 풀 고갈 방지용
+# 안전장치)이 실제로 얼마나 여유가 있는지, 얼마나 자주 거부되는지를 운영자가
+# Grafana에서 전혀 볼 수 없었다. dependencies.py의 limit_ws_connections는 두
+# 라우트(학습챗/면접복기)가 공유하는 단일 카운터/단일 상한이므로(라우트별로
+# 나뉘지 않음), 그 실제 설계를 그대로 반영해 라벨 없이 하나로 합산한다.
+ws_active_connections = Gauge(
+    "haruhan_ws_active_connections", "현재 활성 WebSocket 연결 수 (학습챗+면접복기 스트리밍 합산)"
+)
+ws_connections_rejected_total = Counter(
+    "haruhan_ws_connections_rejected_total", "동시 연결 상한 초과로 거부된 WebSocket 연결 수"
+)
 
 
 def render_metrics() -> bytes:

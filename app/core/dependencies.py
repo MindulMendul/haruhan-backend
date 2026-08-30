@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.core.metrics import ws_active_connections, ws_connections_rejected_total
 from app.core.tokens import decode_access_token
 from app.db.models.user import User
 from app.db.session import get_db
@@ -76,6 +77,7 @@ def reset_ws_connection_counter() -> None:
     종료로 finally를 못 거치고 카운터를 남겼을 가능성에 대비한다."""
     global _active_ws_connections
     _active_ws_connections = 0
+    ws_active_connections.set(0)
 
 
 async def limit_ws_connections(settings: Settings = Depends(get_settings)) -> AsyncIterator[None]:
@@ -94,13 +96,16 @@ async def limit_ws_connections(settings: Settings = Depends(get_settings)) -> As
     global _active_ws_connections
     async with _ws_connections_lock:
         if _active_ws_connections >= settings.max_concurrent_ws_connections:
+            ws_connections_rejected_total.inc()
             raise WebSocketException(code=status.WS_1013_TRY_AGAIN_LATER)
         _active_ws_connections += 1
+        ws_active_connections.set(_active_ws_connections)
     try:
         yield
     finally:
         async with _ws_connections_lock:
             _active_ws_connections -= 1
+            ws_active_connections.set(_active_ws_connections)
 
 
 async def get_ollama_service(settings: Settings = Depends(get_settings)) -> AsyncIterator[OllamaService]:
