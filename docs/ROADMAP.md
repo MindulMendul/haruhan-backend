@@ -6049,3 +6049,51 @@
       스키마 변경은 없어 마이그레이션도, `FRONTEND_INTEGRATION.md`
       갱신도 필요 없었다.
 
+## 백로그 (170라운드)
+
+- [x] 194. `GET /models`(이 앱에서 유일하게 인증 없이 공개된 엔드포인트)가
+      Ollama의 `/api/tags` 응답 안 `models` 배열의 항목이 dict가 아니면
+      처리되지 않은 `AttributeError`(500)로 죽던 문제 해소 -
+      `OllamaService.list_models()`는 타입 힌트상 `list[dict]`지만,
+      그건 업스트림이 실제로 그런 형태로 응답한다는 걸 강제하지 않는다
+      (`models`가 명시적으로 `null`인 경우만 `[]`로 접어줄 뿐, 배열 안
+      각 항목의 *형태*는 전혀 검증하지 않음). `routes/models.py`의
+      `_get_or_fetch_models()`는 각 항목을 `m.get("name") or
+      m.get("model", "")`로 곧바로 destructure하는데, 항목이 dict가
+      아니면(오동작하는 Ollama 포크/프록시, 향후 API 형태 변경 등) 이
+      호출 자체가 `AttributeError`로 죽는다.
+
+      실제 앱에 `list_models()`가 `["qwen2.5", "llama3"]`(dict 배열이
+      아니라 문자열 배열)를 반환하는 가짜 서비스를 연결해 직접
+      재현했다 - 정확히 `AttributeError: 'str' object has no attribute
+      'get'`로 `500 {"error":{"code":"internal_error", ...}}`가
+      나옴을 확인했다. `ollama_service.py`의 다른 메서드들은 필드
+      하나하나가 예상과 다른 형태여도(`None`, 다른 타입 등) 이미
+      조용히 안전한 기본값으로 접도록 공들여 만들어져 있는데(그
+      메서드들의 주석 참고), 이 파일만 그 관례에서 벗어나 있었다.
+      이 엔드포인트는 (a) 유일하게 인증 없이 공개돼 있고, (b) 60초
+      캐시+락 코얼레싱(20/121라운드)이 부하를 막도록 설계돼 있는데
+      크래시가 `_models_cache.set()` *이전*에 나서 캐시를 전혀 못
+      채우고 매 요청마다 크래시와 함께 Ollama를 다시 호출해 그 캐시/락
+      설계 전체를 무력화하며, (c) 다른 모든 Ollama 실패 경로가
+      `OllamaServiceError` → `502`로 응답하는 것과 다르게(125/149/150
+      라운드가 "우리 버그 vs 업스트림 AI 엔진 문제" 구분을 위해 공들인
+      관례) 이 경로만 `500`으로 오분류됐다.
+
+      `_get_or_fetch_models()`에서 리스트 컴프리헨션을 for 루프로 바꿔,
+      각 항목이 `dict`가 아니면 `logger.warning(...)`으로 남기고 그
+      항목만 건너뛰도록 고쳤다 - 나머지 정상 항목은 그대로 매핑된다.
+
+      `tests/test_models.py`에
+      `test_list_models_skips_malformed_non_dict_entries`를 추가했다 -
+      정상 dict 항목과 문자열 항목이 섞인 응답을 흉내낸 가짜 서비스로,
+      `200`에 정상 항목만 포함되고 경고 로그가 남는지 확인한다.
+      `git stash`로 `routes/models.py`만 되돌리면 이 테스트가 정확히
+      (500으로 새어나가는 `AttributeError`를 pytest가 그대로 잡아)
+      실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 564개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`routes/models.py` 100% 커버리지 유지). 응답 스키마/정상
+      경로 동작은 그대로라 DB 스키마 변경/마이그레이션도,
+      `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+

@@ -45,6 +45,33 @@ def test_list_models_returns_mapped_fields(client):
     assert body["models"][1]["parameter_size"] is None
 
 
+def test_list_models_skips_malformed_non_dict_entries(client, caplog):
+    """OllamaService.list_models()는 타입 힌트상 list[dict]지만, 그건 업스트림
+    Ollama의 /api/tags가 실제로 그런 형태로 응답한다는 걸 강제하지 않는다 -
+    오동작하는 Ollama 포크/프록시가 문자열 배열을 보내는 경우를 흉내낸다.
+    이전에는 m.get(...)이 그대로 AttributeError로 죽어 이 앱에서 유일하게
+    인증 없이 공개된 엔드포인트가 500(다른 모든 Ollama 실패 경로가 502로
+    응답하는 것과 다르게)으로 죽었다."""
+
+    class PartiallyMalformedOllamaService:
+        async def list_models(self):
+            return [
+                {"name": "qwen2.5:3b", "size": 1929601456, "details": {}},
+                "llama3",  # 오동작하는 업스트림을 흉내낸 dict가 아닌 항목
+            ]
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: PartiallyMalformedOllamaService()
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/api/v1/models")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["models"]) == 1
+    assert body["models"][0]["name"] == "qwen2.5:3b"
+    assert "예상과 다른 형식" in caplog.text
+
+
 def test_list_models_requires_no_auth(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
 

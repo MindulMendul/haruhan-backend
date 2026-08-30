@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
@@ -8,6 +9,8 @@ from app.core.dependencies import get_ollama_service
 from app.core.rate_limit import limiter
 from app.schemas.models import OllamaModelInfo, OllamaModelListResponse
 from app.services.ollama_service import OllamaService, OllamaServiceError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
 
@@ -44,15 +47,30 @@ async def _get_or_fetch_models(ollama_service: OllamaService) -> OllamaModelList
         except OllamaServiceError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-        models = [
-            OllamaModelInfo(
-                name=m.get("name") or m.get("model", ""),
-                size=m.get("size"),
-                parameter_size=(m.get("details") or {}).get("parameter_size"),
-                quantization_level=(m.get("details") or {}).get("quantization_level"),
+        # OllamaService.list_models()는 타입 힌트상 list[dict]지만, 그건 업스트림
+        # Ollama의 /api/tags가 실제로 그런 형태를 보낸다는 걸 강제하지 않는다 -
+        # ollama_service.py의 다른 메서드들은 필드 하나하나가 예상과 다른 형태여도
+        # (None, 다른 타입 등) 조용히 안전한 기본값으로 접지만, 이 항목 자체가
+        # dict가 아닌 경우(예: 문자열 배열을 보내는 오동작하는 Ollama 포크/프록시나
+        # 향후 API 형태 변경)까지는 안 걸러졌다 - 그러면 m.get(...) 자체가
+        # AttributeError로 죽어 처리되지 않은 예외(500)가 새어나갔다. 이 앱에서
+        # 유일하게 인증 없이 공개된 엔드포인트라 그 크래시가 _models_cache.set()
+        # 이전에 나서 캐시도 못 채우고, 매 요청마다 같은 크래시와 함께 Ollama를
+        # 다시 호출해(캐시/락 코얼레싱이 이 실패 모드에서는 완전히 무력화됨) 다른
+        # 모든 Ollama 실패 경로와 같은 502가 아니라 500으로 오분류된다.
+        models = []
+        for m in raw_models:
+            if not isinstance(m, dict):
+                logger.warning("Ollama /api/tags 응답에 예상과 다른 형식의 항목이 있어 건너뜁니다: %r", m)
+                continue
+            models.append(
+                OllamaModelInfo(
+                    name=m.get("name") or m.get("model", ""),
+                    size=m.get("size"),
+                    parameter_size=(m.get("details") or {}).get("parameter_size"),
+                    quantization_level=(m.get("details") or {}).get("quantization_level"),
+                )
             )
-            for m in raw_models
-        ]
         result = OllamaModelListResponse(models=models)
         _models_cache.set(result)
         return result
