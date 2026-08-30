@@ -64,6 +64,20 @@ def test_export_my_data_returns_empty_lists_for_new_user(client):
     assert "exported_at" in body
 
 
+def test_export_my_data_includes_own_account_info(client):
+    """"내 데이터 전체 내보내기"인데 정작 계정 자체(가입 이메일/가입일/게스트 여부)는
+    빠져 있었다 - GET /users/me와 같은 정보(UserResponse)가 응답에 포함되는지
+    HTTP 계층에서도 확인한다."""
+    email = "export-account-info@example.com"
+    token = _signup_and_get_token(client, email=email)
+    response = client.get("/api/v1/export/me", headers=_auth_headers(token))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["user"]["email"] == email
+    assert body["user"]["is_guest"] is False
+    assert body["user"]["id"] == body["user_id"]
+
+
 def test_export_my_data_includes_created_study_session(client):
     token = _signup_and_get_token(client)
     create = client.post(

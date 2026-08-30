@@ -25,4 +25,4 @@ async def export_my_data(
     export_service: ExportService = Depends(get_export_service),
 ) -> UserDataExport:
     """내 학습챗/퀴즈/면접연습/면접복기 기록 전체를 JSON으로 내보낸다."""
-    return await export_service.export_user_data(current_user.id)
+    return await export_service.export_user_data(current_user)

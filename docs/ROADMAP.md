@@ -6359,3 +6359,50 @@
       바뀌지 않는 순수 서버 배포 설정 변경이라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (176라운드)
+
+- [x] 200. `GET /export/me`("내 데이터 전체 내보내기")가 정작 계정 자체
+      (가입 이메일/가입일/게스트 여부)는 내보내지 않던 문제 해소 -
+      `ExportService.export_user_data`는 `user_id: uuid.UUID`만 받아
+      학습챗/퀴즈/면접연습/면접복기만 채워 넣었고, `UserDataExport`
+      스키마에도 `user_id`(불투명한 UUID) 말고는 계정 관련 필드가 아예
+      없었다. `GET /users/me`가 이미 노출하는 `UserResponse`(`id`/`email`/
+      `created_at`/계산 필드 `is_guest`)와 정확히 같은 정보인데도, 라우트
+      (`routes/export.py`)는 이미 들고 있는 `current_user`(전체 ORM
+      객체)에서 `.id`만 뽑아 넘기고 나머지는 버렸다. 86/97/99/155/157라운드가
+      전부 N+1 배치/페이지네이션/`source_text` 포함 여부 등 export "안"의
+      내용을 다뤘을 뿐, export가 계정 자신의 정보를 담고 있는지는 어느
+      라운드에서도 다룬 적이 없었다 - `tests/test_export_service.py`의
+      "모든 레코드 타입을 포함한다"는 이름의 기존 테스트조차
+      `export.user_id == user.id`만 확인할 뿐 email/is_guest는 애초에
+      검증 대상이 아니었다(필드 자체가 없었으므로).
+
+      `app/schemas/export.py`의 `UserDataExport`에 `user: UserResponse`
+      필드를 추가했다(`user_id`는 하위 호환을 위해 그대로 남김 - 항상
+      `user.id`와 같은 값). `app/services/export_service.py`의
+      `export_user_data`가 `user_id: uuid.UUID` 대신 `user: User`(ORM
+      객체)를 받도록 바꿔 `UserResponse.model_validate(user)`로 채운다 -
+      라우트가 이미 인증 과정에서 로드해둔 `User` 객체를 그대로 넘기므로
+      추가 쿼리 없이(N+1 없이) 채울 수 있다. `routes/export.py`의 호출도
+      `current_user.id` 대신 `current_user`를 넘기도록 바꿨다.
+
+      `tests/test_export_service.py`에 실계정에서 `email`이 채워지고
+      `is_guest`가 `False`인지 확인하는 새 테스트를 추가했고, 기존
+      "모든 레코드 타입" 테스트에 게스트 계정에서 `email is None`/
+      `is_guest is True`/`created_at` 일치 확인을 더했다.
+      `tests/test_export.py`에도 HTTP 계층에서 `body["user"]["email"]`/
+      `is_guest`/`user_id`와의 일치를 확인하는 테스트를 추가했다. `git
+      stash`로 서비스/스키마/라우트 수정만 되돌리면 새 테스트 5개가
+      (일부는 이제 없는 위치 인자 시그니처 불일치로, 일부는 `user` 필드
+      부재로) 정확히 실패하는 것까지 확인했다.
+
+      `docs/FRONTEND_INTEGRATION.md`의 3-7 섹션 예시 JSON에 `user` 객체를
+      추가하고, `user_id`는 하위 호환용으로 남아있으며 `user.id`와 항상
+      같다는 설명을 덧붙였다.
+
+      전체 584개 테스트 통과, `app/services/export_service.py` 커버리지
+      100%, `mypy app tests scripts` 클린. 순수 응답 필드 추가(기존
+      `user_id` 필드는 그대로 유지)라 기존 소비자를 깨지 않고, DB 스키마
+      변경이 없어(이미 로드된 `User` 객체를 읽을 뿐) 마이그레이션도
+      필요 없었다.
+

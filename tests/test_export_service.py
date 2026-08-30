@@ -66,9 +66,13 @@ def test_export_user_data_includes_all_record_types(db_session_factory):
             )
             await session.commit()
 
-            export = await ExportService(session).export_user_data(user.id)
+            export = await ExportService(session).export_user_data(user)
 
             assert export.user_id == user.id
+            assert export.user.id == user.id
+            assert export.user.email is None
+            assert export.user.is_guest is True
+            assert export.user.created_at == user.created_at
             assert len(export.study_sessions) == 1
             assert [m.content for m in export.study_sessions[0].messages] == ["질문", "답변"]
 
@@ -92,12 +96,33 @@ def test_export_user_data_returns_empty_lists_for_new_user(db_session_factory):
             user = await UserRepository(session).create_guest()
             await session.commit()
 
-            export = await ExportService(session).export_user_data(user.id)
+            export = await ExportService(session).export_user_data(user)
 
             assert export.study_sessions == []
             assert export.quizzes == []
             assert export.interview_practice_sessions == []
             assert export.interview_reviews == []
+
+    asyncio.run(_run())
+
+
+def test_export_user_data_includes_email_and_is_guest_false_for_real_account(db_session_factory):
+    """"내 데이터 전체 내보내기"인데 정작 계정 자체(가입 이메일/가입일/게스트 여부)는
+    export_user_data가 user_id만 넘겨받아 빠져 있었다 - GET /users/me가 이미
+    노출하는 UserResponse를 그대로 재사용해 채운다. 실계정에서 email이 채워지고
+    is_guest가 False인지 확인한다(게스트 케이스는 위 다른 테스트가 확인함)."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create(
+                email="export-user@example.com", hashed_password="hashed"
+            )
+            await session.commit()
+
+            export = await ExportService(session).export_user_data(user)
+
+            assert export.user.email == "export-user@example.com"
+            assert export.user.is_guest is False
 
     asyncio.run(_run())
 
@@ -112,7 +137,7 @@ def test_export_user_data_only_includes_own_records(db_session_factory):
             )
             await session.commit()
 
-            export = await ExportService(session).export_user_data(user.id)
+            export = await ExportService(session).export_user_data(user)
             assert export.study_sessions == []
 
     asyncio.run(_run())

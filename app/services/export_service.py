@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import utcnow_naive
+from app.db.models.user import User
 from app.repositories.interview_practice_repository import (
     InterviewPracticeSessionRepository,
     InterviewPracticeTurnRepository,
@@ -24,6 +25,7 @@ from app.schemas.export import (
     StudySessionExport,
     UserDataExport,
 )
+from app.schemas.user import UserResponse
 
 
 class ExportService:
@@ -40,10 +42,12 @@ class ExportService:
         self._practice_turns = InterviewPracticeTurnRepository(session)
         self._reviews = InterviewReviewRepository(session)
 
-    async def export_user_data(self, user_id: uuid.UUID) -> UserDataExport:
+    async def export_user_data(self, user: User) -> UserDataExport:
+        user_id = user.id
         return UserDataExport(
             exported_at=utcnow_naive(),
             user_id=user_id,
+            user=UserResponse.model_validate(user),
             study_sessions=await self._build_study_sessions(user_id),
             quizzes=await self._build_quizzes(user_id),
             interview_practice_sessions=await self._build_practice_sessions(user_id),
