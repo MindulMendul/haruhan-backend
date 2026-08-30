@@ -93,6 +93,29 @@ class QuizAnswerRepository:
         await self._session.flush()
         return answer
 
+    async def create_many(
+        self, attempt_id: uuid.UUID, answers: list[tuple[uuid.UUID, int, bool]]
+    ) -> None:
+        """create()의 배치 버전 - QuizQuestionRepository.create_many()(136라운드)와
+        같은 이유로, 문항 하나씩 개별 flush()(=DB 왕복)하는 대신 add_all() + flush()
+        한 번으로 처리한다. 퀴즈 생성은 계정당 한 번이지만 이 메서드가 쓰이는
+        submit_answers()는 제출/재도전마다(퀴즈 재도전 이력 기능이 있어 반복
+        호출을 실제로 유도함) 매번 실행되는 훨씬 더 뜨거운 경로다.
+
+        answers의 각 항목은 (question_id, selected_index, is_correct) 3개 튜플이다.
+        """
+        session_answers = [
+            QuizAnswer(
+                attempt_id=attempt_id,
+                question_id=question_id,
+                selected_index=selected_index,
+                is_correct=is_correct,
+            )
+            for question_id, selected_index, is_correct in answers
+        ]
+        self._session.add_all(session_answers)
+        await self._session.flush()
+
     async def list_for_attempt(self, attempt_id: uuid.UUID) -> list[QuizAnswer]:
         """quiz_service.py의 submit_answers()는 클라이언트가 보낸 answers 배열
         순서 그대로 QuizAnswer 행을 INSERT한다 - 요청 스키마(QuizSubmitRequest)는

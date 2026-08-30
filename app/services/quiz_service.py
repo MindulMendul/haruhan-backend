@@ -362,13 +362,17 @@ class QuizService:
         attempt = await self._attempts.create(
             quiz_id=quiz_id, user_id=user_id, score=score, total=len(questions)
         )
-        for question, selected_index, is_correct in graded:
-            await self._answers.create(
-                attempt_id=attempt.id,
-                question_id=question.id,
-                selected_index=selected_index,
-                is_correct=is_correct,
-            )
+        # 문항마다 QuizAnswerRepository.create()를 개별 호출하면 매번 flush()
+        # (=DB 왕복)가 나갔다 - 퀴즈 생성 시 문항 저장(136라운드)과 같은 이유지만,
+        # 이쪽은 제출/재도전마다(퀴즈 재도전 이력 기능이 반복 호출을 실제로
+        # 유도함) 매번 실행되는 더 뜨거운 경로다. create_many로 한 번에 저장한다.
+        await self._answers.create_many(
+            attempt_id=attempt.id,
+            answers=[
+                (question.id, selected_index, is_correct)
+                for question, selected_index, is_correct in graded
+            ],
+        )
         await self._session.commit()
         return attempt, graded
 

@@ -1589,3 +1589,52 @@ def test_create_quiz_issues_a_single_batch_insert_for_questions(db_session_facto
             assert [q.order_index for q in questions] == [0, 1]
 
     asyncio.run(_run())
+
+
+def test_submit_answers_issues_a_single_batch_insert_for_answers(db_session_factory):
+    """예전엔 submit_answers가 채점된 답안을 하나씩 QuizAnswerRepository.create()
+    로 저장했는데, 그 메서드가 호출마다 개별 flush()(=DB 왕복)를 했다 - 퀴즈
+    생성 시 문항 저장(136라운드)과 같은 종류의 문제지만, 이쪽은 제출/재도전마다
+    (퀴즈 재도전 이력 기능이 반복 호출을 실제로 유도함) 매번 실행되는 더 뜨거운
+    경로다. create_many로 바꾼 뒤, 문항이 여러 개(SAMPLE_QUIZ_JSON은 2개)여도
+    quiz_answers에 대한 INSERT 문이 정확히 1번만 나가는지 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = QuizService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            quiz = await service.create_quiz(
+                user_id=user.id,
+                title="배치 저장 테스트",
+                study_session_id=None,
+                source_text="소스",
+                question_count=2,
+                model="qwen2.5:3b",
+            )
+            _, questions = await service.get_quiz_with_questions(quiz.id, user.id)
+
+            answer_insert_statements = []
+
+            def _record_insert(conn, cursor, statement, parameters, context, executemany):
+                if statement.strip().upper().startswith("INSERT") and "quiz_answers" in statement:
+                    answer_insert_statements.append(statement)
+
+            engine = session.bind.sync_engine
+            event.listen(engine, "before_cursor_execute", _record_insert)
+            try:
+                attempt, graded = await service.submit_answers(
+                    quiz.id, user.id, [(q.id, 0) for q in questions]
+                )
+            finally:
+                event.remove(engine, "before_cursor_execute", _record_insert)
+
+            assert len(answer_insert_statements) == 1
+            assert len(graded) == 2
+
+    asyncio.run(_run())

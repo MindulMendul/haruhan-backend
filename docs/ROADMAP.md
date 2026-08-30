@@ -5961,3 +5961,46 @@
       DB 스키마 변경/마이그레이션도, `FRONTEND_INTEGRATION.md` 갱신도
       필요 없었다.
 
+## 백로그 (168라운드)
+
+- [x] 192. `QuizService.submit_answers()`가 채점된 답안을 문항마다
+      `QuizAnswerRepository.create()`로 하나씩 개별 저장해(호출마다
+      `flush()` = DB 왕복 1회) 문항 수만큼 INSERT 왕복이 늘어나던 문제
+      해소 - 136라운드가 퀴즈 "생성" 시 문항 저장(`QuizQuestionRepository.
+      create_many()`)에 적용한 것과 정확히 같은 패턴인데, 그 라운드는
+      생성 쪽만 고치고 제출 쪽(`QuizAnswerRepository`)은 손대지 않았다.
+      `docs/ROADMAP.md`에서 `create_many`/`QuizAnswerRepository` 관련
+      과거 항목을 전부 확인했지만, 전부 `list_for_attempt(s)` 정렬
+      수정(154/157라운드)이었지 이 쓰기 경로를 다룬 적은 없었다.
+
+      이 경로가 136라운드가 고친 것보다 더 자주 실행된다는 점에서 더
+      값어치가 크다고 판단했다 - 퀴즈 생성은 계정당 한 번이지만, 제출은
+      매 제출/재도전마다(이 앱이 "재도전 이력"(항목 31)/오답노트
+      페이지네이션(항목 116)까지 갖춘, 반복 제출을 실제로 유도하는
+      기능이라) 훨씬 자주 실행되는 뜨거운 경로다.
+
+      `app/repositories/quiz_attempt_repository.py`의
+      `QuizAnswerRepository`에 `create_many(attempt_id, answers)`를
+      `QuizQuestionRepository.create_many()`와 똑같은 패턴(`add_all()`
+      + `flush()` 한 번)으로 추가했다. `app/services/quiz_service.py`의
+      `submit_answers()`에서 `for question, selected_index, is_correct
+      in graded: await self._answers.create(...)` 반복 호출을 이
+      `create_many()` 한 번으로 바꿨다 - 기존 루프는 `create()`의
+      반환값(생성된 `QuizAnswer`)을 어차피 버리고 있어 반환값 없는
+      배치 메서드로 바꿔도 안전했다.
+
+      `tests/test_quiz.py`에
+      `test_submit_answers_issues_a_single_batch_insert_for_answers`를
+      추가했다 - 136라운드의 같은 이름 테스트(퀴즈 생성용)와 똑같이
+      `before_cursor_execute` 이벤트로 실제 실행되는 SQL 문 개수를 세어,
+      문항이 여러 개(2개)여도 `quiz_answers` INSERT가 정확히 1번만
+      나가는지 확인한다. `git stash`로 리포지토리/서비스 파일만
+      되돌리면 이 테스트가 정확히 (INSERT 2번을 세어 기대한 1번과
+      다름) 실패하는 것까지 확인한 뒤 복원했다.
+
+      전체 561개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(`quiz_attempt_repository.py`/`quiz_service.py` 둘 다 100%
+      커버리지 유지). 최종 저장 결과(행 내용)는 이전과 동일해 순수
+      내부 구현 변경이라 DB 스키마 변경/마이그레이션도,
+      `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
