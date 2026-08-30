@@ -561,6 +561,62 @@ def test_rename_session_404_for_other_users_session(client):
     assert response.status_code == 404
 
 
+def test_rename_session_returns_404_when_session_deleted_during_request(db_session_factory, monkeypatch):
+    """rename_session()의 get_for_user() 조회는 잠금이 없어(get_for_user_locked()를
+    쓰는 다른 메서드와 달리), 그 조회와 update_title()의 UPDATE 사이에 다른 요청이
+    DELETE /study/sessions/{id}로 같은 세션을 지우면 UPDATE가 0행에 매치돼
+    StaleDataError가 난다 - 184라운드가 고친 "계정 자체가 지워지는" 경쟁과는
+    별개로, 계정은 멀쩡한 채 이 리소스만 지워지는 경우다. update_title()을
+    몽키패치해 그 안에서 별도 세션으로 실제 삭제를 수행해 이 좁은 타이밍을
+    결정적으로 재현한다."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            sessions_repo = StudySessionRepository(session)
+            study_session = await sessions_repo.create(user_id=user.id, title="세션", model="qwen2.5:3b")
+            await session.commit()
+            session_id = study_session.id
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            original_update_title = StudySessionRepository.update_title
+
+            async def _deleting_update_title(self, target_session, title):
+                async with db_session_factory() as session_b:
+                    sessions_b = StudySessionRepository(session_b)
+                    target = await sessions_b.get_for_user(session_id, user.id)
+                    await sessions_b.delete(target)
+                    await session_b.commit()
+                return await original_update_title(self, target_session, title)
+
+            monkeypatch.setattr(StudySessionRepository, "update_title", _deleting_update_title)
+
+            try:
+                await service.rename_session(session_id=session_id, user_id=user.id, title="새 제목")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
 class GroundingFakeOllamaService:
     """chat()에 전달된 메시지를 기록해두고, 태그가 포함된 텍스트만 서로 가까운 벡터로 임베딩한다."""
 

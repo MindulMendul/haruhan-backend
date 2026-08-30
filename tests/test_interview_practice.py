@@ -1087,6 +1087,59 @@ def test_rename_session_404_for_other_users_session(client):
     assert response.status_code == 404
 
 
+def test_rename_session_returns_404_when_session_deleted_during_request(db_session_factory, monkeypatch):
+    """rename_session()의 get_for_user() 조회는 잠금이 없어, 그 조회와
+    update_topic()의 UPDATE 사이에 다른 요청이 DELETE
+    /interview/practice-sessions/{id}로 같은 세션을 지우면 UPDATE가 0행에
+    매치돼 StaleDataError가 난다 - 184라운드가 고친 "계정 자체가 지워지는"
+    경쟁과는 별개로, 계정은 멀쩡한 채 이 리소스만 지워지는 경우다.
+    update_topic()을 몽키패치해 그 안에서 별도 세션으로 실제 삭제를 수행해
+    이 좁은 타이밍을 결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            settings = Settings(jwt_secret_key="a" * 32)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, _first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            session_id = practice_session.id
+
+            original_update_topic = InterviewPracticeSessionRepository.update_topic
+
+            async def _deleting_update_topic(self, target_session, topic):
+                async with db_session_factory() as session_b:
+                    sessions_b = InterviewPracticeSessionRepository(session_b)
+                    target = await sessions_b.get_for_user(session_id, user.id)
+                    await sessions_b.delete(target)
+                    await session_b.commit()
+                return await original_update_topic(self, target_session, topic)
+
+            monkeypatch.setattr(
+                InterviewPracticeSessionRepository, "update_topic", _deleting_update_topic
+            )
+
+            try:
+                await service.rename_session(session_id=session_id, user_id=user.id, topic="새 주제")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
 def test_delete_session(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client, email="delete-practice@example.com")

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.clock import utcnow_naive
 from app.core.config import Settings
@@ -399,8 +400,15 @@ class QuizService:
         quiz = await self._quizzes.get_for_user(quiz_id, user_id)
         if quiz is None:
             raise _QUIZ_NOT_FOUND
-        await self._quizzes.update_title(quiz, title)
-        await self._session.commit()
+        # study_service.rename_session()과 같은 이유(get_for_user_locked를 쓰지
+        # 않는 잠금 없는 조회) - 이 조회와 update_title() 사이에 다른 요청이
+        # DELETE /quizzes/{id}로 같은 퀴즈를 지우면 StaleDataError가 난다.
+        try:
+            await self._quizzes.update_title(quiz, title)
+            await self._session.commit()
+        except StaleDataError:
+            await self._session.rollback()
+            raise _QUIZ_NOT_FOUND from None
         return quiz
 
     async def delete_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> None:

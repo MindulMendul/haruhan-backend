@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import Settings
 from app.db.models.study_message import StudyMessage
@@ -101,8 +102,17 @@ class StudyService:
         study_session = await self._sessions.get_for_user(session_id, user_id)
         if study_session is None:
             raise _SESSION_NOT_FOUND
-        await self._sessions.update_title(study_session, title)
-        await self._session.commit()
+        # get_for_user()는 잠금 없는 조회라, 이 조회와 아래 update_title()의
+        # UPDATE 사이에 다른 요청이 DELETE /study/sessions/{id}로 같은 세션을
+        # 지워버리면 0행에 매치되어 StaleDataError가 난다 - 184라운드가 고친
+        # "계정이 지워지는" 경쟁과는 별개로, 계정은 멀쩡한 채 이 리소스 자체가
+        # 지워지는 경우다. 이미 없는 세션을 상대로 한 요청과 같은 404로 맞춘다.
+        try:
+            await self._sessions.update_title(study_session, title)
+            await self._session.commit()
+        except StaleDataError:
+            await self._session.rollback()
+            raise _SESSION_NOT_FOUND from None
         return study_session
 
     async def delete_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> None:

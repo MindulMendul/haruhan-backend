@@ -980,6 +980,62 @@ def test_rename_quiz_404_for_other_users_quiz(client):
     assert response.status_code == 404
 
 
+def test_rename_quiz_returns_404_when_quiz_deleted_during_request(db_session_factory, monkeypatch):
+    """rename_quiz()의 get_for_user() 조회는 잠금이 없어, 그 조회와
+    update_title()의 UPDATE 사이에 다른 요청이 DELETE /quizzes/{id}로 같은
+    퀴즈를 지우면 UPDATE가 0행에 매치돼 StaleDataError가 난다 - 184라운드가
+    고친 "계정 자체가 지워지는" 경쟁과는 별개로, 계정은 멀쩡한 채 이 리소스만
+    지워지는 경우다. update_title()을 몽키패치해 그 안에서 별도 세션으로 실제
+    삭제를 수행해 이 좁은 타이밍을 결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            from fastapi import HTTPException
+
+            from app.repositories.quiz_repository import QuizRepository
+
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            settings = get_settings()
+            ollama = FakeOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = QuizService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            quiz = await service.create_quiz(
+                user_id=user.id,
+                title="퀴즈",
+                study_session_id=None,
+                source_text="소스",
+                question_count=2,
+                model="qwen2.5:3b",
+            )
+            quiz_id = quiz.id
+
+            original_update_title = QuizRepository.update_title
+
+            async def _deleting_update_title(self, target_quiz, title):
+                async with db_session_factory() as session_b:
+                    quizzes_b = QuizRepository(session_b)
+                    target = await quizzes_b.get_for_user(quiz_id, user.id)
+                    await quizzes_b.delete(target)
+                    await session_b.commit()
+                return await original_update_title(self, target_quiz, title)
+
+            monkeypatch.setattr(QuizRepository, "update_title", _deleting_update_title)
+
+            try:
+                await service.rename_quiz(quiz_id=quiz_id, user_id=user.id, title="새 제목")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
 def test_delete_quiz(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)

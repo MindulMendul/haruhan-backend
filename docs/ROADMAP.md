@@ -5595,3 +5595,51 @@
       같은 코드로 401을 내고 있어 `FRONTEND_INTEGRATION.md`가 이미
       문서화한 계약과 일치하므로 갱신도 필요 없었다.
 
+## 백로그 (161라운드)
+
+- [x] 185. 학습챗/퀴즈/면접연습 이름변경(rename) 세 엔드포인트가 그 리소스
+      자체가 요청 도중 지워지면 처리되지 않은 `StaleDataError`(500)로
+      끝나던 문제 해소 - 184라운드가 고친 "계정 자체가 지워지는" 경쟁과는
+      다른 종류다. `StudyService.rename_session()`/`QuizService.
+      rename_quiz()`/`InterviewPracticeService.rename_session()` 셋 다
+      `get_for_user()`(잠금 없는 조회)로 리소스를 읽은 뒤
+      `update_title()`/`update_topic()`으로 속성만 바꾸는 구조인데
+      (`submit_answer`/`complete_session`/`update_review`가 쓰는
+      `get_for_user_locked()`와 다름), 이 조회와 그 UPDATE 사이에 다른
+      요청이 `DELETE /study/sessions/{id}`(또는 퀴즈/면접연습 버전)로
+      같은 리소스를 지워버리면 UPDATE가 0행에 매치돼 `StaleDataError`가
+      난다 - 계정은 멀쩡한 채 이 리소스 하나만 지워지는 경우라 184라운드의
+      수정이 커버하지 못한다.
+
+      직접 재현 스크립트로 확인했다: 세션 A에서 학습챗 세션을 읽어두고
+      세션 B로 같은 세션을 완전히 지운 뒤, 세션 A에서
+      `StudySessionRepository.update_title()`을 부르면 정확히
+      `StaleDataError: UPDATE statement on table 'study_sessions'
+      expected to update 1 row(s); 0 were matched.`가 난다는 것도
+      확인했다 - 예외가 실제로 나는 지점은 나중의 `session.commit()`이
+      아니라 `update_title()`/`update_topic()` 내부의 `flush()` 호출
+      이라, 그 호출까지 함께 `try` 블록으로 감싸야 한다는 걸 이 재현으로
+      알아냈다. `grep -rn StaleDataError app/`로 `user_service.py`
+      외엔 아무 데도 이 예외가 다뤄지지 않고 있음을 재확인했다.
+
+      세 서비스 파일 모두 `update_title()`/`update_topic()` 호출과
+      `commit()`을 `try: ... except StaleDataError:` 블록으로 감싸,
+      이미 있는 "리소스 없음" 404(`_SESSION_NOT_FOUND`/`_QUIZ_NOT_FOUND`
+      /`_NOT_FOUND`)로 변환하도록 고쳤다 - 계정이 아니라 리소스가
+      사라진 경우라 184라운드의 401(`_ACCOUNT_GONE`)이 아니라, 존재하지
+      않는 리소스를 상대로 한 다른 요청과 같은 404가 맞다.
+
+      `tests/test_study.py`/`tests/test_quiz.py`/
+      `tests/test_interview_practice.py`에 각각 회귀 테스트를 추가했다 -
+      143라운드 계열이 확립한 "리포지토리 메서드를 몽키패치해 그 안에서
+      별도 세션으로 실제 삭제를 수행" 기법을 그대로 썼다(`update_title`/
+      `update_topic` 호출 직전에 리소스를 지우도록). `git stash`로 세
+      서비스 파일만 되돌리면 세 테스트 모두 (500으로 새어나가는
+      `StaleDataError`를 pytest가 그대로 잡아) 정확히 실패하는 것까지
+      확인한 뒤 복원했다.
+
+      전체 528개 테스트 통과(회귀 없음), `mypy app tests scripts`
+      클린(세 서비스 파일 전부 100% 커버리지 유지). 스키마 변경이 없어
+      마이그레이션은 필요 없었고, 이미 존재하는 404 응답과 코드/의미가
+      동일해 `FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+

@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import Settings
 from app.db.models.interview_practice_session import InterviewPracticeSession
@@ -185,8 +186,15 @@ class InterviewPracticeService:
         practice_session = await self._sessions.get_for_user(session_id, user_id)
         if practice_session is None:
             raise _NOT_FOUND
-        await self._sessions.update_topic(practice_session, topic)
-        await self._session.commit()
+        # study_service.rename_session()과 같은 이유(잠금 없는 조회) - 이 조회와
+        # update_topic() 사이에 다른 요청이 DELETE /interview/practice-sessions/{id}
+        # 로 같은 세션을 지우면 StaleDataError가 난다.
+        try:
+            await self._sessions.update_topic(practice_session, topic)
+            await self._session.commit()
+        except StaleDataError:
+            await self._session.rollback()
+            raise _NOT_FOUND from None
         return practice_session
 
     async def delete_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> None:
