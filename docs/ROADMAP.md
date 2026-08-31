@@ -6784,3 +6784,62 @@
       스키마/API 응답에 영향이 없어 `docs/FRONTEND_INTEGRATION.md`
       갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (184라운드)
+
+- [x] 208. 되돌릴 수 없는 상태에서 실행되면 로우레벨 asyncpg 스택트레이스로
+      아무 안내 없이 죽던 마이그레이션 downgrade 2개 수정 -
+      `migrations/versions/*.py` 11개 파일 전부를 `docs/ROADMAP.md` 전체와
+      대조해, 지금까지 단 한 번도 언급된 적 없는 리비전 7개
+      (`2d17302be641`/`c5b82ba7af0f`/`51cbc4b159fd`/`01c18c1bed6a`/
+      `e759333dc5dc`/`f1c5ccb154c6`/`e220f5de306a`)를 찾아 직접 검토했다.
+
+      `e220f5de306a`(users.email/hashed_password를 nullable로 바꿈 -
+      `AuthService.create_guest_session()`이 만드는, 로그인 폼 없이
+      시작하는 이 앱의 기본/추천 온보딩 경로인 게스트 계정을 위한 변경)의
+      `downgrade()`는 그 이유를 무시하고 두 컬럼을 그냥 `NOT NULL`로
+      되돌리려 한다. 로컬 Postgres 16에 `email`/`hashed_password`가
+      둘 다 NULL인 게스트 행 하나만 넣고 이 리비전까지 downgrade해보면
+      `NotNullViolationError`로 그 자리에서 실패하는 것을 직접 재현했다 -
+      게스트 계정은 159라운드가 확인했듯 실사용 배포에서는 사실상 항상
+      존재하는 행 모양이라, 드문 예외가 아니라 "이 리비전 아래로
+      되돌리려는 시도는 사실상 항상 실패한다"에 가깝다. `089b9a2d134f`
+      (quiz_questions.correct_answer를 `Text`로 넓힘 - AI가 생성하는
+      값이라 길이 제한이 없어서, 모델 자신의 주석에 명시됨)의
+      `downgrade()`도 같은 결함 모양이다 - 500자 넘는 `correct_answer`를
+      가진 문항 하나만 있어도 `VARCHAR(500)`으로 되돌리다
+      `StringDataRightTruncationError`로 실패하는 것을 마찬가지로
+      직접 재현했다.
+
+      두 경우 다 CI의 `migrations` job(62라운드)이 `alembic upgrade
+      head`/`alembic check`만 돌릴 뿐 `downgrade`는 전혀 실행하지 않고,
+      이 두 리비전을 실제로 검증했던 당시 라운드(104/115/171/195, 그리고
+      `089b9a2d134f` 자신이 만들어진 89라운드)도 방금 새로 올린, 아직
+      해당 데이터가 없는 빈 DB로만 확인해서 지금까지 드러난 적이 없었다.
+      QA/스테이징 리셋이나 사고 대응 중 체이닝된 롤백처럼 실제로
+      downgrade를 실행해야 하는 드문 상황에서만 터지는, 오랫동안 잠복해
+      있던 결함이다.
+
+      두 `downgrade()` 다 `op.get_bind()`로 문제가 되는 행이 있는지 먼저
+      확인하고(각각 `email/hashed_password IS NULL`, `length(correct_
+      answer) > 500`), 있으면 원인과 대응 방법을 그대로 설명하는
+      `RuntimeError`로 먼저 막도록 고쳤다 - 게스트 계정을 자동으로
+      지우거나 긴 정답을 자동으로 잘라내는 건 데이터 손실이라 운영자의
+      명시적 판단 없이는 하지 않는다(180라운드가 `CREATE INDEX
+      CONCURRENTLY` 마이그레이션을 "강제로 성공"시키는 대신 재배포로
+      스스로 복구되게 고친 것과 같은, "억지로 성공시키지 말고 실패를
+      명확하게 만든다"는 철학).
+
+      로컬 Postgres 16으로 왕복 전체를 직접 검증했다 - 문제 되는 행이
+      있는 상태에서 downgrade 시도 시 새 `RuntimeError`가 원인 그대로
+      뜨는 것, 그 행을 정리한 뒤에는 downgrade가 정상적으로 성공하는
+      것, `alembic upgrade head`로 되돌아온 뒤 `alembic check`가
+      드리프트 없음을 확인하는 것까지 전부 확인했다.
+
+      순수 마이그레이션 파일 수정이라 SQLite 기반 pytest 스위트에는
+      변화가 없다(104/139/171/180/195라운드와 같은 관례를 그대로 따름) -
+      전체 597개 테스트 통과, 전체 커버리지 99%, `mypy app tests
+      scripts` 클린(마이그레이션 디렉터리는 CI의 mypy 대상에도 원래
+      없음). 스키마/API 응답은 전혀 안 바뀌는(오직 downgrade 실패
+      방식만 바뀜) 변경이라 `docs/FRONTEND_INTEGRATION.md` 갱신도
+      필요 없었다.
+
