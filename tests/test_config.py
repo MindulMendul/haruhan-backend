@@ -294,3 +294,18 @@ def test_settings_rejects_negative_rag_settings(field_name):
     with pytest.raises(ValidationError) as exc_info:
         Settings(jwt_secret_key="a" * 32, **{field_name: -1})
     assert field_name.upper() in str(exc_info.value)
+
+
+def test_settings_strips_trailing_slash_from_ollama_base_url():
+    """OllamaService의 모든 메서드가 이 값 뒤에 곧바로 `/api/...`를 이어붙인다
+    (예: `f"{base_url}/api/generate"`) - 트레일링 슬래시가 붙어 있으면 요청
+    경로가 `//api/generate`처럼 슬래시 두 개로 나가고, 실제 서버는 이걸 별개
+    경로로 취급해 404를 낸다(직접 재현해 확인함). 브라우저 주소창에서 그대로
+    복사하는 등 흔한 실수라 거부 대신 조용히 정규화한다."""
+    settings = Settings(jwt_secret_key="a" * 32, ollama_base_url="http://localhost:11434/")
+    assert settings.ollama_base_url == "http://localhost:11434"
+
+
+def test_settings_leaves_ollama_base_url_without_trailing_slash_unchanged():
+    settings = Settings(jwt_secret_key="a" * 32, ollama_base_url="http://localhost:11434")
+    assert settings.ollama_base_url == "http://localhost:11434"

@@ -6692,3 +6692,45 @@
       FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (182라운드)
+
+- [x] 206. `OLLAMA_BASE_URL`에 트레일링 슬래시가 붙으면 학습챗/퀴즈 생성/
+      RAG 임베딩/`GET /models`/`/health/ready`의 Ollama 확인까지 이
+      서비스에 의존하는 기능 전부가 동시에 조용히 깨지던 문제 해소 -
+      `OllamaService`(services/ollama_service.py)의 모든 메서드가
+      `f"{self._base_url}/api/generate"`처럼 이 값 뒤에 곧바로
+      `/api/...`를 이어붙이는데, 이 값 끝에 슬래시가 있으면 요청 경로가
+      `//api/generate`처럼 슬래시 두 개로 나간다. `app/core/config.py`
+      는 지금까지 이 필드에 검증이 전혀 없었다 - `max_prompt_length`/
+      `jwt_secret_key`/205라운드의 `DATABASE_URL` 등 나머지 접속/설정
+      문자열은 전부 이런 검증을 거쳐왔는데 `ollama_base_url`만 그
+      스윕에서 빠져 있었다.
+
+      직접 재현했다 - 실제 uvicorn/FastAPI 서버(그리고 174라운드가 쓴
+      것과 같은 실제 Caddy 바이너리로도)에 슬래시 하나짜리 경로로
+      요청하면 200, 슬래시 두 개(트레일링 슬래시가 있는 base_url에서
+      나오는 그 경로)로 요청하면 404가 나는 것을 확인했다. 실제
+      `OllamaService.generate()`를 트레일링 슬래시가 있는/없는
+      base_url 각각으로 호출해보면 있는 쪽만 `Client error '404 Not
+      Found' for url '.../api/generate'`로 `OllamaServiceError`가
+      나고 없는 쪽은 정상 응답하는 것까지 end-to-end로 확인했다.
+      `Settings()` 생성 자체는 성공해 앱도 멀쩡히 뜨고 로그인/DB 등
+      나머지 기능도 전혀 문제 없어 보이는데, Ollama에 의존하는 기능만
+      전부 동시에 깨지는, 시작 시점에는 전혀 티가 안 나는 부류의
+      문제다 - `/health/ready`의 Ollama 확인(`list_models()`를 거침)도
+      결국 같은 base_url을 쓰므로 결국엔 "ollama: disconnected"로
+      드러나긴 하지만, 그 전까지 이미 요청들이 실패한 뒤다.
+
+      `app/core/config.py`에 `_strip_trailing_slash_from_ollama_
+      base_url` field_validator를 추가했다 - ENVIRONMENT/LOG_LEVEL처럼
+      "의도를 알 수 없어 거부"하는 값이 아니라 흔한 표기 차이일 뿐이라,
+      거부 대신 `value.rstrip("/")`로 조용히 정규화한다.
+      `tests/test_config.py`에 트레일링 슬래시가 제거되는지, 이미 없는
+      경우는 그대로 유지되는지 확인하는 테스트 2개를 추가했다. `git
+      stash`로 `config.py`만 되돌리면 정확히 실패하는 것까지 확인했다.
+
+      전체 594개 테스트 통과, `app/core/config.py` 커버리지 100%,
+      `mypy app tests scripts` 클린. 설정값 정규화만 하는 변경이라
+      스키마/API 응답에 영향이 없어 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

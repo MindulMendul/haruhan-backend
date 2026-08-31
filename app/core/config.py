@@ -222,6 +222,25 @@ class Settings(BaseSettings):
             )
         return normalized
 
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _strip_trailing_slash_from_ollama_base_url(cls, value: str) -> str:
+        """`OllamaService`(services/ollama_service.py)의 모든 메서드가
+        `f"{self._base_url}/api/generate"`처럼 이 값 뒤에 곧바로 `/api/...`를
+        이어붙인다 - 이 값 끝에 슬래시가 붙어 있으면(브라우저 주소창에서
+        그대로 복사하거나 ngrok/터널 루트 URL을 그대로 쓰는 등 흔한 실수)
+        요청 경로가 `//api/generate`처럼 슬래시 두 개로 나가고, 실제 uvicorn/
+        Caddy 서버 둘 다 이걸 별개 경로로 취급해 404를 낸다(직접 재현해
+        확인함 - 슬래시 하나면 200, 두 개면 404). `Settings()` 생성 자체는
+        성공해 앱도 정상적으로 뜨고, 로그인/DB 등 나머지 기능은 전혀 문제
+        없어 보이는데, 학습챗/퀴즈 생성/RAG 임베딩/`GET /models`/`/health/
+        ready`의 Ollama 확인까지 이 서비스에 의존하는 기능 전부가 동시에
+        조용히 깨진다 - `OLLAMA_BASE_URL`엔 지금까지 검증이 전혀 없었다.
+        거부하는 대신 조용히 정규화한다 - 트레일링 슬래시는 사용자 의도를
+        해치지 않는 흔한 표기 차이일 뿐이라, 다른 이름 오타(ENVIRONMENT
+        등)처럼 "무엇을 의도했는지 알 수 없는" 경우가 아니다."""
+        return value.rstrip("/")
+
     @field_validator("chat_rate_limit", "auth_rate_limit", "export_rate_limit", "models_rate_limit")
     @classmethod
     def _validate_rate_limit_string(cls, value: str) -> str:
