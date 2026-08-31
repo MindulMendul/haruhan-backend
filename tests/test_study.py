@@ -764,6 +764,58 @@ def test_rename_session_returns_404_when_session_deleted_during_request(db_sessi
     assert exc.status_code == 404
 
 
+def test_send_message_survives_rag_db_error_without_missing_greenlet(db_session_factory, monkeypatch):
+    """198라운드: RagService.retrieve_relevant()가 자기 자신의 list_for_user()
+    DB 조회 실패(커넥션 드롭 등)를 삼킬 때, 예전엔 `await self._session.
+    rollback()`을 불렀다 - Session.rollback()은 expire_on_commit 설정과 무관하게
+    이 세션에 이미 로드된 study_session/user_message 같은, retrieve_relevant()와
+    전혀 무관한 다른 객체까지 전부 expire시킨다. send_message()가 retrieve_
+    relevant() 바로 다음 study_session.model에 동기적으로 접근하는데(chat()
+    호출 인자로), 그게 expire된 상태라 SQLAlchemy가 MissingGreenlet으로 죽였다 -
+    "RAG 실패는 절대 본 기능을 막지 않는다"는 이 클래스의 약속과 정반대로,
+    부가 기능의 일시적 DB 오류가 본 기능을 확실히 크래시시켰다. list_for_user를
+    몽키패치해 세션에 실제 쿼리를 한 번 날려 진짜 트랜잭션을 연 뒤 실패하게
+    만들어(트랜잭션을 전혀 안 연 채 즉시 raise하면 rollback()이 애초에 아무것도
+    expire 안 시켜 이 버그가 재현되지 않는다) send_message()가 크래시 없이
+    정상 응답을 돌려주는지 확인한다."""
+    import asyncio
+
+    from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    async def _broken_list_for_user(self, *args, **kwargs):
+        from sqlalchemy import text
+
+        await self._session.execute(text("SELECT 1"))
+        raise RuntimeError("simulated mid-query DB connection drop")
+
+    monkeypatch.setattr(KnowledgeChunkRepository, "list_for_user", _broken_list_for_user)
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen2.5:3b"
+            )
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            return await service.send_message(session_id=study_session.id, user_id=user.id, content="안녕")
+
+    user_message, assistant_message = asyncio.run(_run())
+
+    assert user_message.content == "안녕"
+    assert assistant_message.content == "assistant reply to: 안녕"
+
+
 class GroundingFakeOllamaService:
     """chat()에 전달된 메시지를 기록해두고, 태그가 포함된 텍스트만 서로 가까운 벡터로 임베딩한다."""
 

@@ -7698,3 +7698,63 @@
       `docs/FRONTEND_INTEGRATION.md`가 이미 문서화한 패턴과 일치) DB
       스키마 변경도 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (198라운드)
+
+- [x] 222. `RagService`의 네 메서드(`index_content`/`retrieve_relevant`/
+      `forget_content`/`forget_content_bulk`)는 전부 "부가 기능은 실패해도
+      본 기능을 절대 막지 않는다"는 원칙으로 예상 못한 DB 오류를 삼키는데,
+      그 삼키는 방법이 전부 `await self._session.rollback()`이었다.
+      `Session.rollback()`은 `expire_on_commit` 설정과 무관하게 이 세션에
+      이미 로드된 "이 메서드와 전혀 무관한" 다른 객체까지 전부 expire시킨다
+      (193라운드가 커넥션 해제에 `commit()`을 쓰기로 한 것과 같은
+      SQLAlchemy 동작). 이 세션은 항상 호출부(`study_service.send_message`의
+      `study_session`/`user_message`, `interview_practice_service.
+      submit_answer`의 `practice_session` 등)가 이미 로드해둔 객체를 그대로
+      공유하는데, `RagService`의 DB 조회가 (커넥션 드롭 등으로) 실패해 여기서
+      `rollback()`하면 그 객체들이 expire되고, 바로 다음 줄에서(예:
+      `study_session.model`) 동기적으로 접근하는 순간 SQLAlchemy가
+      `MissingGreenlet`으로 죽는다 - "RAG 실패는 본 기능을 막지 않는다"는
+      이 클래스 자신의 약속과 정반대로, 부가 기능의 일시적 DB 오류가 본
+      기능을 확실히 크래시시켰다. `release_connection=False`로 잠금을 쥔
+      호출부(`submit_answer`/`complete_session`)는 한술 더 떠 `rollback()`이
+      그 트랜잭션 자체를 끝내버려 `get_for_user_locked()`의 FOR UPDATE
+      잠금까지 조기에 풀어버린다.
+
+      파일 기반 SQLite로 재현하던 기존 패턴 대신, 세션에 실제 쿼리를 한 번
+      날려 진짜 트랜잭션을 연 뒤 실패하게 만드는 방식(`_MidQueryBroken
+      ChunkRepository`)으로 재현했다 - 기존 `tests/test_rag_service_best_
+      effort.py`의 `_BrokenChunkRepository`는 세션에 손도 안 대고 곧바로
+      예외를 던져서 애초에 롤백할 트랜잭션이 없었기 때문에, 이 버그를
+      한 번도 못 잡고 있었다. `study_service.send_message()`가
+      `retrieve_relevant()`의 `list_for_user()` 실패로 `MissingGreenlet`
+      째로 죽는 것과, `RagService` 단위로 "호출 전에" 로드해둔 다른 객체가
+      `sqlalchemy.inspect(...).expired`로 확인했을 때 실제로 expire되는
+      것까지 재현해 확인했다.
+
+      네 메서드 전부, `session.rollback()` 대신 위험한 DB 쿼리 하나하나를
+      `SAVEPOINT`(`session.begin_nested()`)로 감쌌다 - 실패하면 그
+      SAVEPOINT까지만 롤백되고 세션의 나머지 상태(이미 로드된 다른 객체,
+      열려 있는 바깥 트랜잭션과 그 잠금)는 전혀 건드리지 않는다는 것을
+      별도 재현 스크립트로 확인했다(SAVEPOINT 롤백 후에도 loaded 객체의
+      `expired`가 그대로 `False`로 유지되고, 같은 세션으로 다른 조회도
+      문제없이 계속 됨). `commit()` 자체가 실패하는 훨씬 드문 잔여 위험은
+      (SAVEPOINT로 막을 수 없는 경우라 그 부작용을 감수할 수밖에 없다)
+      새 헬퍼 `_safe_commit()`으로 모아 기존과 같이 `rollback()` 후 조용히
+      건너뛴다.
+
+      `tests/test_rag_service_best_effort.py`에 `_MidQueryBrokenChunk
+      Repository`와 새 테스트 6개를 추가했다(네 메서드 각각의 "호출 전
+      로드된 객체가 expire되지 않는다" 확인 + `_chunks.create()` 실패 +
+      `_safe_commit()` 실패 경로), `tests/test_study.py`에 `send_message()`
+      전체가 크래시 없이 정상 응답을 돌려주는지 확인하는 엔드투엔드
+      테스트 1개를 추가했다. `git stash`로 `rag_service.py` 수정만
+      되돌리면 새 테스트 5개가 정확히 위에서 재현한 증상
+      (`MissingGreenlet` 또는 `expired == True`)으로 실패하는 것까지
+      확인했다.
+
+      전체 635개 테스트 통과(628 → 635), `services/rag_service.py`
+      커버리지 100% 유지, `mypy app tests scripts` 클린. 클라이언트에게
+      보내는 응답/프로토콜은 전혀 안 바뀌는(내부 예외 처리 방식만
+      바뀌는) 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

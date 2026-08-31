@@ -65,6 +65,24 @@ class RagService:
         self._ollama = ollama_service
         self._settings = settings
 
+    async def _safe_commit(self, log_context: str) -> None:
+        """198라운드: index_content/forget_content(_bulk)가 delete_for_source()/
+        _chunks.create() 같은 개별 쿼리는 SAVEPOINT(begin_nested())로 감싸 실패해도
+        세션의 다른 객체를 expire시키지 않도록 고쳤지만(retrieve_relevant()
+        docstring 참고), commit() 자체가 실패하는 경우는(진짜 커밋 시점의 DB 오류)
+        SAVEPOINT로 격리할 수 없다 - 커밋이 실패했다는 건 이미 그 트랜잭션 자체가
+        깨졌다는 뜻이라, session.rollback()으로 실제로 되돌리는 것 말고는 복구할
+        방법이 없다. list_for_user/delete_for_source/_chunks.create처럼 "쿼리
+        자체가 실패하는" 훨씬 흔한 경우는 이미 SAVEPOINT로 객체 expire 없이
+        처리되므로, 이 헬퍼가 다루는 commit() 자체의 실패는 그보다 훨씬 드문
+        잔여 위험이다 - 그래도 어떤 이유로든 실패해도 조용히 건너뛴다는 이
+        클래스의 원칙(각 메서드 docstring 참고)은 여기서도 지킨다."""
+        try:
+            await self._session.commit()
+        except Exception:
+            logger.exception("RAG 부가 기능 커밋 실패 (예상 못한 DB 오류 - %s)", log_context)
+            await self._session.rollback()
+
     async def index_content(
         self, user_id: uuid.UUID, source_type: str, source_id: uuid.UUID, content: str
     ) -> None:
@@ -83,54 +101,82 @@ class RagService:
         본 기능이 이미 커밋된 뒤 호출되어(위 문단 참고) 이 시점에 남아있는 잠금이
         없으므로, retrieve_relevant()와 달리 release_connection 같은 조건부 분기 없이
         항상 커밋해도 안전하다.
+
+        198라운드: 예전엔 delete_for_source()/_chunks.create() 실패를 하나의 큰
+        try/except가 묶어서 잡고 `await self._session.rollback()`으로 처리했는데,
+        retrieve_relevant()의 같은 문제(그쪽 docstring 참고)와 정확히 같은 이유로
+        위험하다 - 이 메서드는 항상 호출부가 본 기능을 이미 커밋한 "뒤"(위 문단
+        참고) 같은 세션으로 불리므로, 그 세션엔 호출부가 로드해둔 assistant_
+        message 등 이 메서드와 무관한 객체가 남아있다. rollback()은 그 객체들을
+        전부 expire시켜서, 이 메서드가 조용히 실패를 삼키고 리턴해도 그 직후
+        호출부(예: study_service.send_message가 곧바로 잇달아 부르는 두 번째
+        index_content() 호출의 인자로 쓰는 assistant_message.id)가 그 expire된
+        객체에 동기적으로 접근하는 순간 MissingGreenlet으로 죽는다 - "색인 실패는
+        조용히 건너뛴다"는 이 메서드 자신의 약속과 반대로 본 기능이 이미 끝난
+        뒤인데도 크래시가 나는 것까지 재현해 확인했다. delete_for_source()/
+        _chunks.create() 각각을 SAVEPOINT(session.begin_nested())로 감싸 실패해도
+        그 SAVEPOINT까지만 롤백되게 한다 - 이미 커밋된 이전 단계나 세션의 다른
+        객체는 전혀 건드리지 않는다(retrieve_relevant()에서 별도 재현 스크립트로
+        확인한 것과 같은 SAVEPOINT 동작).
         """
         try:
-            await self._chunks.delete_for_source(source_type, source_id)
-
-            if not content.strip():
-                await self._session.commit()
-                return
-
-            await self._session.commit()
-
-            model = self._settings.embedding_model
-            try:
-                embedding = await self._ollama.embed(text=content, model=model)
-            except OllamaServiceError:
-                logger.error(
-                    "RAG 색인 실패 (임베딩 호출 에러): user_id=%s source_type=%s source_id=%s",
-                    user_id,
-                    source_type,
-                    source_id,
-                )
-                await self._session.commit()
-                return
-
-            if embedding:
-                await self._chunks.create(
-                    user_id=user_id,
-                    source_type=source_type,
-                    source_id=source_id,
-                    content=content,
-                    embedding=embedding,
-                    embedding_model=model,
-                )
-            else:
-                logger.warning(
-                    "RAG 색인 건너뜀 (빈 임베딩 반환): user_id=%s source_type=%s source_id=%s",
-                    user_id,
-                    source_type,
-                    source_id,
-                )
-            await self._session.commit()
+            async with self._session.begin_nested():
+                await self._chunks.delete_for_source(source_type, source_id)
         except Exception:
             logger.exception(
-                "RAG 색인 실패 (예상 못한 오류): user_id=%s source_type=%s source_id=%s",
+                "RAG 색인 실패 (예상 못한 DB 오류 - 기존 색인 삭제): user_id=%s source_type=%s source_id=%s",
                 user_id,
                 source_type,
                 source_id,
             )
-            await self._session.rollback()
+            return
+
+        if not content.strip():
+            await self._safe_commit(f"index_content 빈 콘텐츠: source_id={source_id}")
+            return
+
+        await self._safe_commit(f"index_content 삭제: source_id={source_id}")
+
+        model = self._settings.embedding_model
+        try:
+            embedding = await self._ollama.embed(text=content, model=model)
+        except OllamaServiceError:
+            logger.error(
+                "RAG 색인 실패 (임베딩 호출 에러): user_id=%s source_type=%s source_id=%s",
+                user_id,
+                source_type,
+                source_id,
+            )
+            await self._safe_commit(f"index_content 임베딩 실패: source_id={source_id}")
+            return
+
+        if embedding:
+            try:
+                async with self._session.begin_nested():
+                    await self._chunks.create(
+                        user_id=user_id,
+                        source_type=source_type,
+                        source_id=source_id,
+                        content=content,
+                        embedding=embedding,
+                        embedding_model=model,
+                    )
+            except Exception:
+                logger.exception(
+                    "RAG 색인 실패 (예상 못한 DB 오류 - 색인 생성): user_id=%s source_type=%s source_id=%s",
+                    user_id,
+                    source_type,
+                    source_id,
+                )
+                return
+        else:
+            logger.warning(
+                "RAG 색인 건너뜀 (빈 임베딩 반환): user_id=%s source_type=%s source_id=%s",
+                user_id,
+                source_type,
+                source_id,
+            )
+        await self._safe_commit(f"index_content 최종: source_id={source_id}")
 
     async def retrieve_relevant(
         self, user_id: uuid.UUID, query: str, release_connection: bool = True
@@ -162,15 +208,41 @@ class RagService:
         False를 넘겨 이 메서드 안에서 조기에 커밋하지 않게 한다 - 그렇지
         않으면 그 잠금이 여기서 먼저 풀려 193라운드가 명시적으로 지키기로 한
         직렬화 트레이드오프가 깨진다.
+
+        198라운드: list_for_user() 실패를 삼키는 이 except가 예전엔 `await
+        self._session.rollback()`을 불렀는데, Session.rollback()은
+        expire_on_commit 설정과 무관하게 이 세션에 이미 로드된 "이 메서드와
+        전혀 무관한" 다른 객체까지 전부 expire시킨다(193라운드가 커넥션 해제에
+        commit()을 쓰기로 한 것과 같은 SQLAlchemy 동작). 이 세션은 study_
+        service.send_message의 study_session/user_message, interview_
+        practice_service.submit_answer의 practice_session처럼 호출부가 이미
+        로드해둔 객체를 그대로 공유하는데, list_for_user()가 (커넥션 드롭 등으로)
+        실패해 여기서 rollback()하면 그 객체들이 expire되고, 바로 다음 줄에서
+        (예: study_session.model처럼) 동기적으로 접근하는 순간 SQLAlchemy가
+        MissingGreenlet으로 죽는다 - "RAG 실패는 본 기능을 막지 않는다"는 이
+        메서드 자신의 약속과 정반대로, 부가 기능의 일시적 DB 오류가 본 기능을
+        확실히 크래시시켰다(파일 기반 SQLite로 세션이 실제 트랜잭션을 문 상태에서
+        list_for_user()가 실패하게 만들어 study_service.send_message가
+        MissingGreenlet으로 죽는 것까지 재현해 확인했다). release_connection=
+        False인 잠긴 호출부(submit_answer/complete_session)는 한술 더 떠
+        rollback()이 이 트랜잭션 자체를 끝내버려 get_for_user_locked()의 FOR
+        UPDATE 잠금까지 조기에 풀어버린다.
+
+        session.rollback() 대신 이 조회 하나만 SAVEPOINT(session.begin_nested())로
+        감싼다 - 실패하면 이 SAVEPOINT까지만 롤백되고 세션의 나머지 상태(이미
+        로드된 다른 객체, 열려 있는 바깥 트랜잭션과 그 잠금)는 전혀 건드리지
+        않는다는 것을 별도 재현 스크립트로 확인했다(SAVEPOINT 롤백 후에도
+        loaded 객체의 expired 상태가 그대로 False로 유지되고, 같은 세션으로
+        다른 조회도 문제없이 계속 됨).
         """
         model = self._settings.embedding_model
         try:
-            candidates = await self._chunks.list_for_user(
-                user_id, embedding_model=model, limit=self._settings.rag_max_candidate_chunks
-            )
+            async with self._session.begin_nested():
+                candidates = await self._chunks.list_for_user(
+                    user_id, embedding_model=model, limit=self._settings.rag_max_candidate_chunks
+                )
         except Exception:
             logger.exception("RAG 검색 실패 (예상 못한 DB 오류): user_id=%s", user_id)
-            await self._session.rollback()
             return []
         if not candidates:
             return []
@@ -204,29 +276,39 @@ class RagService:
         index_content와 같은 이유로 여기도 항상 원본(세션/복기 등)이 이미 커밋으로
         삭제된 "뒤" 호출되므로, 이 정리 단계에서 나는 예상 못한 DB 오류를 그대로
         전파하면 실제로는 성공한 삭제 요청이 500으로 보인다 - 조용히 삼키고 로그만
-        남긴다."""
+        남긴다.
+
+        198라운드: delete_for_source()를 SAVEPOINT(begin_nested())로 감싸고
+        commit()은 _safe_commit()으로 분리했다 - index_content()의 같은 수정과
+        정확히 같은 이유(그쪽 docstring 참고)로, 예전 `await self._session.
+        rollback()`이 이 세션에 호출부(예: study_session 삭제 요청)가 이미
+        로드해둔 다른 객체까지 expire시켜 MissingGreenlet을 유발할 수 있었다."""
         try:
-            await self._chunks.delete_for_source(source_type, source_id)
-            await self._session.commit()
+            async with self._session.begin_nested():
+                await self._chunks.delete_for_source(source_type, source_id)
         except Exception:
             logger.exception(
-                "RAG 색인 정리 실패 (예상 못한 오류): source_type=%s source_id=%s", source_type, source_id
+                "RAG 색인 정리 실패 (예상 못한 DB 오류 - 삭제): source_type=%s source_id=%s",
+                source_type,
+                source_id,
             )
-            await self._session.rollback()
+            return
+        await self._safe_commit(f"forget_content: source_id={source_id}")
 
     async def forget_content_bulk(self, source_type: str, source_ids: list[uuid.UUID]) -> None:
         """forget_content의 배치 버전 - 세션/연습 하나를 지울 때 그 안의 메시지/턴
         전부를 한 번의 DELETE+commit으로 처리한다(호출부마다 반복 호출하지 않도록).
-        예외 처리 이유는 forget_content와 동일."""
+        예외 처리 이유는 forget_content와 동일(198라운드의 SAVEPOINT 분리 포함)."""
         if not source_ids:
             return
         try:
-            await self._chunks.delete_for_sources(source_type, source_ids)
-            await self._session.commit()
+            async with self._session.begin_nested():
+                await self._chunks.delete_for_sources(source_type, source_ids)
         except Exception:
             logger.exception(
-                "RAG 색인 일괄 정리 실패 (예상 못한 오류): source_type=%s source_id_count=%d",
+                "RAG 색인 일괄 정리 실패 (예상 못한 DB 오류 - 삭제): source_type=%s source_id_count=%d",
                 source_type,
                 len(source_ids),
             )
-            await self._session.rollback()
+            return
+        await self._safe_commit(f"forget_content_bulk: source_type={source_type}")
