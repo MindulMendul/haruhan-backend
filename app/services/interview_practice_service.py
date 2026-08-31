@@ -379,20 +379,22 @@ class InterviewPracticeService:
         # (study_service의 메시지 저장과 달리, 여기서는 반쯤 처리된 상태로 멈추는 것을 피하기 위함).
         history = [(t.question, t.answer) for t in turns[:-1] if t.answer is not None]
 
-        # create_session()과 달리 여기서는 retrieve_relevant() 직후에 일부러
-        # commit()하지 않는다 - 바로 위 get_for_user_locked()가 잡은 FOR
-        # UPDATE 잠금이 이 메서드 끝(mark_answered_if_pending 이후 commit)
-        # 까지 살아있어야 동시 제출을 직렬화한다는 게 이 메서드의 핵심
-        # 설계인데(377번째 줄 주석 참고), commit()/rollback() 둘 다 지금
-        # 트랜잭션을 끝내버려 그 잠금을 여기서 조기에 풀어버린다. 즉 이
-        # 경로는 study_service.send_message 등과 같은 이유로 AI 호출
-        # 동안 DB 커넥션을 계속 붙드는 문제가 여전히 남아있지만(동시
-        # 제출이 많으면 커넥션 풀을 고갈시킬 수 있음), 그 대가로 직렬화
-        # 정합성을 지키는 의도적인 트레이드오프다 - 잠금을 DB 트랜잭션이
-        # 아닌 애플리케이션 레벨 잠금으로 바꾸는 더 큰 리팩터링 없이는
-        # 두 문제를 동시에 해결할 수 없다.
+        # create_session()과 달리 여기서는 release_connection=False를 넘겨
+        # retrieve_relevant() 내부(list_for_user 직후, embed() 호출 전)에서도
+        # 일부러 commit()하지 않는다 - 바로 위 get_for_user_locked()가 잡은
+        # FOR UPDATE 잠금이 이 메서드 끝(mark_answered_if_pending 이후
+        # commit)까지 살아있어야 동시 제출을 직렬화한다는 게 이 메서드의
+        # 핵심 설계인데(377번째 줄 주석 참고), commit()/rollback() 둘 다
+        # 지금 트랜잭션을 끝내버려 그 잠금을 여기서 조기에 풀어버린다. 즉
+        # 이 경로는 study_service.send_message 등과 같은 이유로 AI 호출
+        # 동안(retrieve_relevant() 내부의 embed() 호출 포함) DB 커넥션을
+        # 계속 붙드는 문제가 여전히 남아있지만(동시 제출이 많으면 커넥션
+        # 풀을 고갈시킬 수 있음), 그 대가로 직렬화 정합성을 지키는 의도적인
+        # 트레이드오프다 - 잠금을 DB 트랜잭션이 아닌 애플리케이션 레벨
+        # 잠금으로 바꾸는 더 큰 리팩터링 없이는 두 문제를 동시에 해결할 수
+        # 없다.
         relevant_chunks = await self._rag.retrieve_relevant(
-            user_id=user_id, query=f"{current_turn.question}\n{answer}"
+            user_id=user_id, query=f"{current_turn.question}\n{answer}", release_connection=False
         )
         grounding = _build_grounding_section(relevant_chunks)
 
@@ -452,10 +454,13 @@ class InterviewPracticeService:
                 detail="답변한 질문이 없어 종합 피드백을 생성할 수 없습니다.",
             )
 
-        # submit_answer()와 같은 이유(그쪽 주석 참고)로 여기서도 retrieve_
-        # relevant() 직후에 일부러 commit()하지 않는다 - 위 get_for_user_
-        # locked()의 FOR UPDATE 잠금이 이 메서드 끝까지 살아있어야 한다.
-        relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=practice_session.topic)
+        # submit_answer()와 같은 이유(그쪽 주석 참고)로 여기서도
+        # release_connection=False를 넘겨 retrieve_relevant() 내부에서도
+        # 일부러 commit()하지 않는다 - 위 get_for_user_locked()의 FOR
+        # UPDATE 잠금이 이 메서드 끝까지 살아있어야 한다.
+        relevant_chunks = await self._rag.retrieve_relevant(
+            user_id=user_id, query=practice_session.topic, release_connection=False
+        )
         grounding = _build_grounding_section(relevant_chunks)
 
         prompt = _build_overall_feedback_prompt(

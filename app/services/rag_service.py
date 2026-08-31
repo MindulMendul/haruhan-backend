@@ -74,6 +74,15 @@ class RagService:
         조용히 건너뛴다 - 이 메서드는 항상 본 기능(채팅/복기 저장 등)이 이미 커밋된 "뒤"
         마지막 단계로 호출되므로, 여기서 잡지 못한 예외가 그대로 위로 전파되면 실제로는
         성공한 요청이 500으로 보여 클라이언트가 재시도하다 중복 리소스를 만들 위험이 있다.
+
+        196라운드: retrieve_relevant()와 같은 이유로(그쪽 docstring 참고) 이 메서드도
+        delete_for_source() 조회 직후, embed()(Ollama 호출) 전에 commit()해서 커넥션을
+        풀에 돌려준다 - study_service.send_message가 AI 응답을 받은 뒤 호출하는 이
+        메서드 자신이 delete_for_source()로 커넥션을 붙든 채 곧바로 embed()로 넘어가고
+        있었다(파일 기반 SQLite 풀로 이 메서드를 직접 재현해 확인). 이 메서드는 항상
+        본 기능이 이미 커밋된 뒤 호출되어(위 문단 참고) 이 시점에 남아있는 잠금이
+        없으므로, retrieve_relevant()와 달리 release_connection 같은 조건부 분기 없이
+        항상 커밋해도 안전하다.
         """
         try:
             await self._chunks.delete_for_source(source_type, source_id)
@@ -81,6 +90,8 @@ class RagService:
             if not content.strip():
                 await self._session.commit()
                 return
+
+            await self._session.commit()
 
             model = self._settings.embedding_model
             try:
@@ -121,7 +132,9 @@ class RagService:
             )
             await self._session.rollback()
 
-    async def retrieve_relevant(self, user_id: uuid.UUID, query: str) -> list[str]:
+    async def retrieve_relevant(
+        self, user_id: uuid.UUID, query: str, release_connection: bool = True
+    ) -> list[str]:
         """query와 의미적으로 가까운 사용자 본인의 기존 기록 상위 K개를 반환한다.
 
         검색 실패는 전부 빈 리스트로 처리한다 - RAG는 답변 품질을 보강하는 부가 기능이라
@@ -132,6 +145,23 @@ class RagService:
         "부가 기능" 조회 하나가 그대로 채팅 자체를 500(REST)/비정상 종료(WS)로 만들어버려,
         이 클래스의 다른 세 메서드가 지키는 "RAG 실패는 절대 본 기능을 막지 않는다"는
         약속이 정작 가장 자주 불리는 이 메서드에서만 깨져 있었다.
+
+        193라운드가 study_service.send_message 등 세 호출부에 이 메서드가
+        "돌아온 뒤" commit()을 추가했는데, 정작 이 메서드 자신도 list_for_user()
+        조회 뒤 곧바로 embed()(Ollama HTTP 호출)로 넘어가면서 그 사이 커밋을
+        한 번도 안 해 - 호출부의 그 수정과 별개로 - 이 메서드 안에서 이미 DB
+        커넥션을 embed() 호출 내내 붙들고 있었다(파일 기반 SQLite 풀로 실제
+        재현해 확인). candidates가 있어 embed()까지 실제로 가는 경우에만
+        해당한다. release_connection=True(기본값)면 이 조회 직후 commit()해서
+        embed() 동안 커넥션을 풀에 돌려준다 - study_service.send_message/
+        stream_message, interview_practice_service.create_session처럼 이
+        메서드를 부르는 시점에 잠금을 붙들고 있지 않은 호출부용이다.
+        interview_practice_service.submit_answer/complete_session은 get_for_
+        user_locked()의 FOR UPDATE 잠금을 AI 호출 전체(이 메서드 포함) 동안
+        의도적으로 붙들고 있어야 하므로(그쪽 주석 참고) release_connection=
+        False를 넘겨 이 메서드 안에서 조기에 커밋하지 않게 한다 - 그렇지
+        않으면 그 잠금이 여기서 먼저 풀려 193라운드가 명시적으로 지키기로 한
+        직렬화 트레이드오프가 깨진다.
         """
         model = self._settings.embedding_model
         try:
@@ -144,6 +174,9 @@ class RagService:
             return []
         if not candidates:
             return []
+
+        if release_connection:
+            await self._session.commit()
 
         try:
             query_embedding = await self._ollama.embed(text=query, model=model)

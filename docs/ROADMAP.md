@@ -7588,3 +7588,67 @@
       조정하는) 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md`
       갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (196라운드)
+
+- [x] 220. 193~195라운드가 고친 "AI 호출 내내 DB 커넥션을 붙드는" 문제의
+      수정이 호출부(`study_service`/`interview_practice_service`/
+      `quiz_service`)에서 `retrieve_relevant()`가 "돌아온 뒤" commit()하는
+      것만 다뤘을 뿐, `RagService` 자기 자신의 내부 메서드 두 개
+      (`retrieve_relevant()`의 `list_for_user()` → `embed()` 구간,
+      `index_content()`의 `delete_for_source()` → `embed()` 구간)는 그
+      사이 커밋을 한 번도 안 해서 각자의 `embed()`(Ollama 임베딩 HTTP
+      호출) 도중에도 이미 DB 커넥션을 붙들고 있었던 문제를 고쳤다. 즉
+      193라운드의 수정 자체가 절반만 맞았다 - 호출부가 "AI 호출 전에
+      커밋했다"고 믿었던 그 지점 이후에도, `RagService` 안에서 또 한 번
+      커밋 없이 넘어가는 AI 호출(embed)이 숨어 있었다.
+
+      `tests/test_ai_call_releases_db_connection.py`와 같은 재현 기법
+      (파일 기반 SQLite + `pool_size=1` 엔진, AI 호출 시점의 `engine.
+      pool.checkedout()` 직접 확인)으로 재현했다 - 다만 기존 fake
+      (`_CheckingOllamaService`)의 `embed()`는 `chat`/`chat_stream`/
+      `generate`/`generate_json`과 달리 체크아웃 상태를 전혀 기록하지
+      않아서, 이 문제를 잡도록 만들어진 바로 그 테스트 파일이 정작 이
+      gap만은 놓치고 있었다 - 먼저 `embed()`도 기록하도록 fake를 고친
+      뒤에야 재현할 수 있었다. 청크를 하나 미리 색인해 candidates가
+      있는 상태로 `retrieve_relevant()`가 실제로 `embed()` 분기까지
+      가도록 만들어 확인했다(candidates가 없으면 `embed()` 자체가
+      생략돼 이 gap이 드러나지 않는다).
+
+      `retrieve_relevant()`는 다른 세 호출부(`study_service.send_
+      message`/`stream_message`, `interview_practice_service.create_
+      session`)에서는 이 시점에 잠금을 붙들고 있지 않아 곧바로 commit()
+      해도 안전하지만, `interview_practice_service.submit_answer`/
+      `complete_session`은 `get_for_user_locked()`의 `FOR UPDATE` 잠금을
+      AI 호출 전체(이 메서드 포함) 동안 의도적으로 붙들고 있어야 한다
+      (193라운드가 명시적으로 지키기로 한 직렬화 트레이드오프) - 여기서
+      무조건 commit()하면 그 잠금이 조기에 풀려 이 두 메서드가 막으려는
+      동시 제출 경쟁이 재현된다. 그래서 `retrieve_relevant()`에
+      `release_connection: bool = True` 매개변수를 추가해, 기본값
+      (안전한 세 호출부)은 그대로 조기 commit()하고, 잠금을 지켜야 하는
+      두 호출부만 `release_connection=False`를 명시적으로 넘겨 조기
+      commit을 건너뛰게 했다. `index_content()`는 모든 호출부가 항상
+      본 기능이 이미 커밋된 "뒤" 마지막 단계로만 부르므로(기존
+      docstring이 이미 명시) 이런 조건 분기 없이 항상 commit()해도
+      안전하다.
+
+      `tests/test_ai_call_releases_db_connection.py`의 `_CheckingOllama
+      Service.embed()`가 이제 체크아웃 상태를 기록하도록 고치고
+      (`checked_out_during_embed_calls` 리스트 - `send_message` 한 번에
+      `retrieve_relevant()` 1번 + `index_content()` 2번=`embed()` 총
+      3번이 불릴 수 있어 마지막 호출만 보면 앞선 호출의 회귀를 놓칠 수
+      있다), 새 테스트 2개를 추가했다: (1) `send_message`가 셋 다
+      (`[0, 0, 0]`) 커넥션을 반납한 채 `embed()`를 부르는지, (2)
+      `complete_session`은 반대로 `embed()` 도중에도 커넥션(=잠금)이
+      여전히 체크아웃(`[1]`)돼 있는지 - 후자는 그 직렬화 트레이드오프가
+      앞으로 실수로 "고쳐지지" 않도록 고정해두는 회귀 방지 테스트다.
+      `git stash`로 `rag_service.py`/`interview_practice_service.py`
+      수정만 되돌리면 (1)번 테스트가 정확히 재현한 증상(`[1, 1, 1]`)
+      으로 실패하는 것까지 확인했다.
+
+      전체 627개 테스트 통과(625 → 627), `services/rag_service.py`/
+      `services/interview_practice_service.py` 커버리지 100% 유지,
+      `mypy app tests scripts` 클린. 클라이언트에게 보내는 응답/프로토콜은
+      전혀 안 바뀌는(내부 트랜잭션 경계만 조정하는) 순수 견고성
+      개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이
+      없어 마이그레이션도 필요 없었다.
+
