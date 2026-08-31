@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import urllib.parse
 from unittest.mock import AsyncMock
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,63 @@ def test_to_asyncpg_url_converts_known_postgres_schemes():
 
 def test_to_asyncpg_url_leaves_other_schemes_unchanged():
     assert db_session.to_asyncpg_url("sqlite+aiosqlite:///./x.db") == "sqlite+aiosqlite:///./x.db"
+
+
+def test_to_asyncpg_url_renames_sslmode_query_param_to_ssl():
+    """SQLAlchemy의 asyncpg 방언은 URL 쿼리 문자열의 키를 전부 그대로
+    asyncpg.connect()의 키워드 인자로 넘긴다 - Supabase 등 관리형 Postgres가
+    "SSL 필수" 접속 문자열에 흔히 붙여주는 `sslmode=`는 libpq 계열 관례일 뿐
+    asyncpg.connect()에는 그런 키워드 인자가 없어(`ssl`만 있음)
+    `TypeError: unexpected keyword argument 'sslmode'`로 그대로 터진다(직접
+    재현해 확인함). asyncpg는 `ssl=` 값이 문자열이면 libpq와 같은 어휘
+    (disable/allow/prefer/require/verify-ca/verify-full)로 해석하므로, 키
+    이름만 `ssl`로 바꾸면 의미는 그대로 유지된다."""
+    assert (
+        db_session.to_asyncpg_url("postgresql://u:p@host/db?sslmode=require")
+        == "postgresql+asyncpg://u:p@host/db?ssl=require"
+    )
+    assert (
+        db_session.to_asyncpg_url("postgres://u:p@host/db?sslmode=disable")
+        == "postgresql+asyncpg://u:p@host/db?ssl=disable"
+    )
+
+
+def test_to_asyncpg_url_preserves_other_query_params_alongside_sslmode():
+    result = db_session.to_asyncpg_url("postgresql://u:p@host/db?sslmode=require&target_session_attrs=read-write")
+    parsed = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(result).query))
+    assert parsed == {"ssl": "require", "target_session_attrs": "read-write"}
+
+
+def test_to_asyncpg_url_leaves_query_string_unchanged_when_no_sslmode():
+    assert (
+        db_session.to_asyncpg_url("postgresql://u:p@host/db?application_name=haruhan")
+        == "postgresql+asyncpg://u:p@host/db?application_name=haruhan"
+    )
+
+
+def test_to_asyncpg_url_with_sslmode_actually_passes_asyncpg_keyword_validation():
+    """단순히 문자열 치환이 맞는지가 아니라, 실제로 asyncpg.connect()의 키워드
+    인자 검증을 통과하는지까지 확인한다 - 서버가 없는 포트로 연결을 시도했을 때
+    (네트워크 I/O가 실제로 일어나기 전 단계인) TypeError가 아니라
+    ConnectionRefusedError/OSError로 넘어가야 키워드 인자 자체는 문제없다는 뜻이다."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    async def _run() -> BaseException | None:
+        engine = create_async_engine(
+            db_session.to_asyncpg_url("postgresql://u:p@127.0.0.1:1/db?sslmode=require")
+        )
+        try:
+            async with engine.connect():
+                pass
+        except Exception as exc:  # noqa: BLE001 - 정확히 어떤 예외인지가 이 테스트의 확인 대상
+            return exc
+        finally:
+            await engine.dispose()
+        return None
+
+    exc = asyncio.run(_run())
+    assert exc is not None
+    assert not isinstance(exc, TypeError)
 
 
 def test_init_engine_without_database_url_leaves_factory_uninitialized(caplog):

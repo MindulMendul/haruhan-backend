@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import urllib.parse
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -17,14 +18,50 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def to_asyncpg_url(url: str) -> str:
-    """Supabase 등에서 주는 postgresql:// 접속 문자열을 SQLAlchemy async 드라이버 스킴으로 바꾼다."""
+    """Supabase 등에서 주는 postgresql:// 접속 문자열을 SQLAlchemy async 드라이버 스킴으로 바꾼다.
+
+    SQLAlchemy의 asyncpg 방언(`create_connect_args`)은 URL 쿼리 문자열에 있는
+    키를 전부 그대로 `asyncpg.connect()`의 키워드 인자로 넘긴다. 그런데
+    `sslmode=`는 libpq/psql/psycopg2 계열(그리고 Supabase 등 관리형 Postgres가
+    "SSL 필수" 접속 문자열을 안내할 때 흔히 붙여주는 바로 그 파라미터)의
+    관례일 뿐, asyncpg의 실제 `connect()` 시그니처에는 그런 키워드 인자가
+    없다(`ssl`만 있음) - `sslmode=require`가 붙은 DATABASE_URL로 연결을
+    시도하면 네트워크 I/O 전에 `TypeError: connect() got an unexpected
+    keyword argument 'sslmode'`가 그대로 난다는 것을 실제 asyncpg 0.31.0로
+    직접 재현해 확인했다. 이 예외는 이 앱이 세심하게 다뤄온 IntegrityError/
+    StaleDataError 같은 종류가 아니라 완전히 다른 계층(DB 드라이버 자체의
+    키워드 인자 검증)에서 나서, 매 요청마다(로그인/회원가입 등 DB를 만지는
+    모든 경로) 처리되지 않은 예외로 500이 된다 - `keep_supabase_alive()`가
+    부팅 시점 핑을 넓은 except로 감싸둔 덕에 앱 자체는 뜨지만, 그 뒤 실제
+    요청은 전부 실패한다. asyncpg 내부적으로는 `ssl=` 값이 문자열이면
+    `SSLMode.parse()`로 해석하는데, 이게 정확히 libpq의 `sslmode` 값
+    어휘(disable/allow/prefer/require/verify-ca/verify-full)와 같다는 것도
+    asyncpg 소스(`connect_utils.py`)로 확인했다 - 즉 `sslmode` 쿼리 키를
+    `ssl`로 이름만 바꾸면 값 해석은 그대로 유지된다(의미 재해석이 아니라
+    순수 키 이름 교정). `ssl=require`로 바꾼 뒤 실제로 연결을 시도해보면
+    (서버가 없는 포트라도) `TypeError`가 아니라 `ConnectionRefusedError`로
+    넘어간다는 것까지 재현해 확인했다 - 키워드 인자 검증은 통과했다는 뜻.
+    """
     if url.startswith("postgresql+asyncpg://"):
+        pass
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+    elif url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://") :]
+    else:
         return url
-    if url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url[len("postgresql://") :]
-    if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url[len("postgres://") :]
-    return url
+    return _rename_sslmode_query_param(url)
+
+
+def _rename_sslmode_query_param(url: str) -> str:
+    split = urllib.parse.urlsplit(url)
+    query_pairs = urllib.parse.parse_qsl(split.query, keep_blank_values=True)
+    if not any(key == "sslmode" for key, _ in query_pairs):
+        # 대부분의 접속 문자열엔 sslmode가 아예 없다 - 그런 경우는 쿼리 문자열을
+        # 굳이 다시 인코딩하지 않고 원본 그대로 돌려준다(불필요한 변형 방지).
+        return url
+    renamed_pairs = [("ssl" if key == "sslmode" else key, value) for key, value in query_pairs]
+    return urllib.parse.urlunsplit(split._replace(query=urllib.parse.urlencode(renamed_pairs)))
 
 
 def enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:

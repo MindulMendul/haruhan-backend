@@ -6634,3 +6634,61 @@
       원래 없음). 스키마/API 응답은 전혀 안 바뀌는 배포 견고성 수정이라
       `docs/FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (181라운드)
+
+- [x] 205. `DATABASE_URL`에 `sslmode=` 쿼리 파라미터가 붙으면 앱 부팅 뒤
+      모든 실제 요청이 처리되지 않은 `TypeError`로 실패하던 문제 해소 -
+      `to_asyncpg_url()`은 `postgresql://`/`postgres://` 스킴을
+      `postgresql+asyncpg://`로만 바꿀 뿐 쿼리 문자열은 전혀 건드리지
+      않는데, SQLAlchemy의 asyncpg 방언(`create_connect_args`)은 URL
+      쿼리 문자열의 키를 전부 그대로 `asyncpg.connect()`의 키워드
+      인자로 넘긴다. `sslmode=`는 libpq/psql/psycopg2 계열의 관례이자
+      Supabase 등 관리형 Postgres가 "SSL 필수" 접속 문자열에 흔히
+      붙여주는 바로 그 파라미터인데, asyncpg의 실제 `connect()`
+      시그니처에는 그런 키워드 인자가 아예 없다(`ssl`만 있음).
+
+      실제 asyncpg 0.31.0으로 직접 재현했다 - `sslmode=require`가 붙은
+      URL로 `create_async_engine(...).connect()`를 시도하면 네트워크
+      I/O가 시작되기도 전에 `TypeError: connect() got an unexpected
+      keyword argument 'sslmode'`가 그대로 난다(서버가 없는 포트로도
+      재현되므로 순수 키워드 인자 검증 단계의 문제임을 확인). 이 예외는
+      이 앱이 세심하게 다뤄온 `IntegrityError`/`StaleDataError`와 전혀
+      다른 계층(DB 드라이버 자체의 키워드 인자 검증)에서 나서, 로그인/
+      회원가입 등 DB를 만지는 모든 요청 경로에서 처리되지 않은 예외로
+      500이 된다 - `keep_supabase_alive()`가 부팅 시점 핑을 넓은
+      except로 감싸둔 덕에 앱 자체는 멀쩡히 뜨지만, 그 뒤 실제 요청은
+      전부 실패하는 상태라 시작 시점에는 전혀 티가 안 난다. CI의
+      Postgres URL과 62/89/113/115/116/120/171/180라운드의 로컬 검증이
+      전부 쿼리 문자열 없는 URL만 써서 지금까지 드러나지 않았고,
+      `tests/test_db_session.py`의 기존 `to_asyncpg_url` 테스트들도
+      쿼리 문자열이 있는 URL을 한 번도 넣어보지 않았다.
+
+      asyncpg 소스(`connect_utils.py`)로 확인했다 - `ssl=` 값이
+      문자열이면 `SSLMode.parse()`로 해석하는데, 이게 정확히 libpq의
+      `sslmode` 값 어휘(disable/allow/prefer/require/verify-ca/
+      verify-full)와 같다. 즉 `sslmode` 쿼리 키를 `ssl`로 이름만
+      바꾸면 값 해석은 그대로 유지되는 순수 키 이름 교정이다. `ssl=
+      require`로 바꾼 뒤 실제로 연결을 시도해보면(서버가 없는 포트라도)
+      `TypeError`가 아니라 `ConnectionRefusedError`로 넘어간다는 것까지
+      재현해 확인했다 - 키워드 인자 검증은 통과했다는 뜻이다.
+
+      `app/db/session.py`의 `to_asyncpg_url()`에 `_rename_sslmode_
+      query_param()` 헬퍼를 추가했다 - `urllib.parse`로 쿼리 문자열만
+      파싱해 `sslmode` 키가 있을 때만 `ssl`로 바꾸고(다른 쿼리 파라미터/
+      URL의 나머지 부분은 그대로), `sslmode`가 아예 없는(=대부분의)
+      URL은 굳이 다시 인코딩하지 않고 원본 그대로 돌려준다.
+
+      `tests/test_db_session.py`에 4개를 추가했다 - `sslmode`→`ssl`
+      변환 자체, 다른 쿼리 파라미터와 같이 있어도 그것만 남기는지,
+      `sslmode`가 없으면 쿼리 문자열을 안 건드리는지, 그리고 실제
+      `create_async_engine(...).connect()`로 asyncpg 키워드 인자
+      검증까지 통과하는지(`TypeError`가 아닌 다른 예외로 넘어가는지).
+      `git stash`로 `session.py`만 되돌리면 3개가 정확히 (여전히
+      `TypeError`가 나서) 실패하는 것까지 확인했다.
+
+      전체 592개 테스트 통과, `app/db/session.py` 커버리지 100%,
+      `mypy app tests scripts` 클린. DB 연결 문자열 파싱만 고치는
+      변경이라 스키마/API 응답에 영향이 없어 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+
