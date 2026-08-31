@@ -816,6 +816,78 @@ def test_send_message_survives_rag_db_error_without_missing_greenlet(db_session_
     assert assistant_message.content == "assistant reply to: 안녕"
 
 
+def test_send_message_survives_rag_index_content_commit_failure_without_missing_greenlet(
+    db_session_factory, monkeypatch
+):
+    """199라운드: send_message()의 두 번째(마지막) index_content() 호출은 이 요청의
+    진짜 마지막 DB 작업이라 is_final_session_use=True를 넘긴다(rag_service.py의
+    _safe_commit()/index_content() docstring 참고) - 그 안의 commit() 자체가
+    실패하면(SAVEPOINT로 이미 flush를 끝내둔 뒤라 순수하게 COMMIT 실행 자체만
+    실패하는 경우), rollback() 없이는 세션이 "prepared" 상태로 남지만, 이
+    호출부는 그 뒤로 같은 세션을 더 쓰지 않으므로 rollback()을 생략해 study_
+    session/user_message/assistant_message 같은 이미 로드된 다른 객체가
+    expire되지 않게 한다. 두 번째 색인 대상 청크가 실제로 생성된(create() 호출)
+    직후의 첫 commit()만 실패하도록 몽키패치해(첫 번째 index_content() 호출의
+    commit들은 정상 통과) 정확히 그 지점을 재현하고, send_message()가 크래시
+    없이 정상 응답을 돌려주는지 확인한다."""
+    import asyncio
+
+    from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    create_call_count = {"value": 0}
+    fail_next_commit = {"value": False}
+
+    original_create = KnowledgeChunkRepository.create
+
+    async def _tracking_create(self, **kwargs):
+        create_call_count["value"] += 1
+        result = await original_create(self, **kwargs)
+        if create_call_count["value"] == 2:
+            # 두 번째 index_content() 호출(assistant_message, is_final_session_
+            # use=True)의 청크 생성 - 이 SAVEPOINT가 끝난 직후 나오는 "최종"
+            # _safe_commit()의 commit()만 실패하게 만든다.
+            fail_next_commit["value"] = True
+        return result
+
+    monkeypatch.setattr(KnowledgeChunkRepository, "create", _tracking_create)
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen2.5:3b"
+            )
+            await session.commit()
+
+            original_commit = session.commit
+
+            async def _flaky_commit():
+                if fail_next_commit["value"]:
+                    fail_next_commit["value"] = False
+                    raise RuntimeError("commit 자체가 실패했다고 가정")
+                return await original_commit()
+
+            monkeypatch.setattr(session, "commit", _flaky_commit)
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            return await service.send_message(session_id=study_session.id, user_id=user.id, content="안녕")
+
+    user_message, assistant_message = asyncio.run(_run())
+
+    assert user_message.content == "안녕"
+    assert assistant_message.content == "assistant reply to: 안녕"
+    assert create_call_count["value"] == 2
+
+
 class GroundingFakeOllamaService:
     """chat()에 전달된 메시지를 기록해두고, 태그가 포함된 텍스트만 서로 가까운 벡터로 임베딩한다."""
 

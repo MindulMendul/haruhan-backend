@@ -351,3 +351,53 @@ def test_safe_commit_swallows_commit_failure_and_leaves_session_usable(db_sessio
             assert other_user.id is not None
 
     asyncio.run(_run())
+
+
+def test_safe_commit_with_is_final_session_use_does_not_expire_other_objects_on_commit_failure(
+    db_session_factory, monkeypatch
+):
+    """199라운드: round 198이 SAVEPOINT로 고친 건 delete_for_source()/_chunks.create()
+    같은 "쿼리 자체의" 실패였다 - _safe_commit()이 다루는 commit() 자체의 실패는
+    SAVEPOINT로 격리할 수 없어 여전히 session.rollback()이 필요했는데, 그 rollback()
+    도 똑같이 이 세션에 이미 로드된 다른 객체(user)를 expire시켜 호출부를
+    MissingGreenlet으로 크래시시킬 수 있었다. 재현/검증으로 확인한 사실: (1) commit()
+    실패 자체는(앞서 SAVEPOINT가 이미 flush를 끝내둔 상태라) 아무것도 expire시키지
+    않는다, (2) rollback()을 안 부르면 세션은 "prepared" 상태로 남지만 이미 로드된
+    객체의 속성 읽기는 멀쩡하다, (3) session.close()도 rollback() 없이 커넥션을
+    정상적으로 반납한다. is_final_session_use=True(이 세션으로 더 이상 쿼리를
+    안 할 호출부용)를 넘기면 실패해도 rollback()을 생략해 user가 expire되지 않는지
+    확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            settings = get_settings()
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            original_commit = session.commit
+            state = {"should_fail": True}
+
+            async def _flaky_commit():
+                if state["should_fail"]:
+                    state["should_fail"] = False
+                    raise RuntimeError("commit 자체가 실패했다고 가정")
+                return await original_commit()
+
+            monkeypatch.setattr(session, "commit", _flaky_commit)
+
+            rag = RagService(session=session, ollama_service=FakeOllamaService(), settings=settings)
+
+            await rag.index_content(
+                user_id=user.id,
+                source_type="study_message",
+                source_id=user.id,
+                content="",
+                is_final_session_use=True,
+            )
+
+            # is_final_session_use=True였으므로 rollback()이 생략돼야 하고, 그래서
+            # 이 메서드와 전혀 무관한 user는 expire되지 않은 채 남아있어야 한다.
+            assert inspect(user).expired is False
+            assert user.id is not None  # 동기 속성 접근이 MissingGreenlet 없이 동작
+
+    asyncio.run(_run())

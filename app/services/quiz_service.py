@@ -197,8 +197,14 @@ class QuizService:
             # 내용이라 다른 곳에는 색인되어 있지 않다 - RAG 검색 대상에 포함시킨다.
             # study_session_id로 만든 퀴즈는 원본 메시지가 이미 study_message로
             # 색인돼 있으므로 중복 색인하지 않는다.
+            # is_final_session_use=True: REST 요청 한 번짜리라 이게 이 세션의
+            # 마지막 DB 작업이다(RagService._safe_commit() docstring 참고).
             await self._rag.index_content(
-                user_id=user_id, source_type="quiz_source", source_id=quiz.id, content=source_text
+                user_id=user_id,
+                source_type="quiz_source",
+                source_id=quiz.id,
+                content=source_text,
+                is_final_session_use=True,
             )
 
         return quiz
@@ -470,7 +476,11 @@ class QuizService:
         # source_text를 직접 붙여넣어 만든 퀴즈라면 RAG에 색인돼 있었을 수 있다
         # (study_session에서 만든 퀴즈는 원본 메시지 쪽에 이미 색인돼 있어 여기
         # 색인된 게 없다 - forget_content는 없는 걸 지워도 안전하다).
-        await self._rag.forget_content(source_type="quiz_source", source_id=quiz_id)
+        # is_final_session_use=True: REST 요청 한 번짜리라 이게 이 세션의 마지막
+        # DB 작업이다(RagService._safe_commit() docstring 참고).
+        await self._rag.forget_content(
+            source_type="quiz_source", source_id=quiz_id, is_final_session_use=True
+        )
 
     async def get_latest_result(
         self, quiz_id: uuid.UUID, user_id: uuid.UUID

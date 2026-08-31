@@ -65,28 +65,66 @@ class RagService:
         self._ollama = ollama_service
         self._settings = settings
 
-    async def _safe_commit(self, log_context: str) -> None:
+    async def _safe_commit(self, log_context: str, is_final_session_use: bool) -> None:
         """198라운드: index_content/forget_content(_bulk)가 delete_for_source()/
         _chunks.create() 같은 개별 쿼리는 SAVEPOINT(begin_nested())로 감싸 실패해도
         세션의 다른 객체를 expire시키지 않도록 고쳤지만(retrieve_relevant()
         docstring 참고), commit() 자체가 실패하는 경우는(진짜 커밋 시점의 DB 오류)
-        SAVEPOINT로 격리할 수 없다 - 커밋이 실패했다는 건 이미 그 트랜잭션 자체가
-        깨졌다는 뜻이라, session.rollback()으로 실제로 되돌리는 것 말고는 복구할
-        방법이 없다. list_for_user/delete_for_source/_chunks.create처럼 "쿼리
-        자체가 실패하는" 훨씬 흔한 경우는 이미 SAVEPOINT로 객체 expire 없이
-        처리되므로, 이 헬퍼가 다루는 commit() 자체의 실패는 그보다 훨씬 드문
-        잔여 위험이다 - 그래도 어떤 이유로든 실패해도 조용히 건너뛴다는 이
-        클래스의 원칙(각 메서드 docstring 참고)은 여기서도 지킨다."""
+        SAVEPOINT로 격리할 수 없다 - 이미 앞선 SAVEPOINT가 flush를 끝내둔 뒤라
+        보통 이 commit()은 새로 flush할 게 없는 순수한 COMMIT 실행 자체만 실패하는
+        경우다.
+
+        199라운드: 이 commit()이 실패하면 SQLAlchemy는 세션을 "prepared" 상태로
+        남겨(다음 쿼리를 시도하면 즉시 InvalidRequestError) rollback() 없이는
+        세션 자체를 더 못 쓰게 만든다는 것까지 확인했다 - 그런데 그 rollback()은
+        198라운드가 고친 것과 정확히 같은 부작용(이 세션에 이미 로드된, 이
+        메서드와 무관한 다른 객체까지 전부 expire시킴)을 낸다. 재현 스크립트로
+        직접 확인한 결과: (1) 이 commit() 실패 자체는 rollback() 전까지 아무것도
+        expire시키지 않는다, (2) rollback()을 부르지 않고 그냥 두면 세션은
+        "prepared" 상태로 남지만 이미 로드된 객체의 속성 읽기는 여전히 멀쩡히
+        동작한다(추가 쿼리가 필요 없으므로), (3) 이 세션을 나중에 close()할 때도
+        rollback()을 먼저 부를 필요가 없다(SQLAlchemy가 알아서 커넥션을 풀에
+        정상적으로 반납함, 커넥션 누수 없음).
+
+        즉 "이 세션으로 더 할 일이 없는"(is_final_session_use=True) 호출부에서는
+        rollback()을 아예 안 불러서 다른 객체의 expire 자체를 막을 수 있다 -
+        study_service.send_message/interview_review_service.create_review 같은
+        REST 한 번짜리 요청들이 여기 해당한다(색인은 항상 그 요청의 마지막
+        DB 작업이라 이후 이 세션으로 아무 쿼리도 안 함, 라우트는 이미 로드된
+        ORM 객체의 속성만 읽어 Pydantic으로 직렬화함). 반면 학습챗/면접복기
+        WebSocket 스트리밍(study_service.stream_message/interview_review_
+        service.stream_create_review)은 연결 하나가 여러 메시지 동안 같은
+        세션을 계속 재사용한다 - 이번 메시지의 색인이 이 commit()에서 실패한
+        채로 rollback() 없이 넘어가면, 세션이 "prepared" 상태로 남아 다음
+        메시지가 이 세션으로 쿼리를 하나만 날려도 InvalidRequestError로 죽는다
+        (RAG 실패 하나가 그 이후 전체 WS 연결을 조용히 망가뜨림 - 이 메서드가
+        원래 막으려던 것보다 더 나쁜 결과). rag_backfill_service.py의 예약
+        작업도 같은 이유로 세션 하나를 여러 색인 호출에 걸쳐 재사용해 위험하다
+        - 그래서 이 두 부류는 is_final_session_use=False(기본값)로 둬서 항상
+        rollback()해 세션을 다음 쿼리가 가능한 상태로 복구한다. 어느 쪽이든
+        "어떤 이유로든 실패해도 조용히 건너뛴다"는 이 클래스의 원칙은 지킨다 -
+        차이는 그 복구 방법(rollback 생략 vs rollback)뿐이다."""
         try:
             await self._session.commit()
         except Exception:
             logger.exception("RAG 부가 기능 커밋 실패 (예상 못한 DB 오류 - %s)", log_context)
-            await self._session.rollback()
+            if not is_final_session_use:
+                await self._session.rollback()
 
     async def index_content(
-        self, user_id: uuid.UUID, source_type: str, source_id: uuid.UUID, content: str
+        self,
+        user_id: uuid.UUID,
+        source_type: str,
+        source_id: uuid.UUID,
+        content: str,
+        is_final_session_use: bool = False,
     ) -> None:
         """레거시 데이터를 검색 대상으로 색인한다. 같은 source에 대한 기존 색인은 먼저 지운다.
+
+        is_final_session_use: 이 호출 이후 호출부가(그리고 이 요청/작업이 끝날 때까지)
+        같은 세션으로 더는 아무 쿼리도 안 하면 True를 넘긴다 - _safe_commit() docstring
+        참고. 기본값(False)은 세션이 이어서 재사용될 수 있는 경우(WebSocket 스트리밍
+        연결의 다음 메시지, rag_backfill_service의 다음 반복)를 위한 안전한 선택이다.
 
         색인은 부가 기능이라 어떤 이유로든(임베딩 호출 실패뿐 아니라 DB 오류까지) 실패해도
         조용히 건너뛴다 - 이 메서드는 항상 본 기능(채팅/복기 저장 등)이 이미 커밋된 "뒤"
@@ -132,10 +170,10 @@ class RagService:
             return
 
         if not content.strip():
-            await self._safe_commit(f"index_content 빈 콘텐츠: source_id={source_id}")
+            await self._safe_commit(f"index_content 빈 콘텐츠: source_id={source_id}", is_final_session_use)
             return
 
-        await self._safe_commit(f"index_content 삭제: source_id={source_id}")
+        await self._safe_commit(f"index_content 삭제: source_id={source_id}", is_final_session_use)
 
         model = self._settings.embedding_model
         try:
@@ -147,7 +185,7 @@ class RagService:
                 source_type,
                 source_id,
             )
-            await self._safe_commit(f"index_content 임베딩 실패: source_id={source_id}")
+            await self._safe_commit(f"index_content 임베딩 실패: source_id={source_id}", is_final_session_use)
             return
 
         if embedding:
@@ -176,7 +214,7 @@ class RagService:
                 source_type,
                 source_id,
             )
-        await self._safe_commit(f"index_content 최종: source_id={source_id}")
+        await self._safe_commit(f"index_content 최종: source_id={source_id}", is_final_session_use)
 
     async def retrieve_relevant(
         self, user_id: uuid.UUID, query: str, release_connection: bool = True
@@ -270,7 +308,9 @@ class RagService:
             logger.exception("RAG 검색 실패 (예상 못한 랭킹 오류): user_id=%s", user_id)
             return []
 
-    async def forget_content(self, source_type: str, source_id: uuid.UUID) -> None:
+    async def forget_content(
+        self, source_type: str, source_id: uuid.UUID, is_final_session_use: bool = False
+    ) -> None:
         """원본이 삭제될 때 색인도 함께 지운다.
 
         index_content와 같은 이유로 여기도 항상 원본(세션/복기 등)이 이미 커밋으로
@@ -282,7 +322,10 @@ class RagService:
         commit()은 _safe_commit()으로 분리했다 - index_content()의 같은 수정과
         정확히 같은 이유(그쪽 docstring 참고)로, 예전 `await self._session.
         rollback()`이 이 세션에 호출부(예: study_session 삭제 요청)가 이미
-        로드해둔 다른 객체까지 expire시켜 MissingGreenlet을 유발할 수 있었다."""
+        로드해둔 다른 객체까지 expire시켜 MissingGreenlet을 유발할 수 있었다.
+
+        is_final_session_use: index_content()와 같은 의미(그쪽 docstring 참고) -
+        commit() 자체가 실패했을 때 이 세션으로 더 할 일이 없으면 True를 넘긴다."""
         try:
             async with self._session.begin_nested():
                 await self._chunks.delete_for_source(source_type, source_id)
@@ -293,12 +336,15 @@ class RagService:
                 source_id,
             )
             return
-        await self._safe_commit(f"forget_content: source_id={source_id}")
+        await self._safe_commit(f"forget_content: source_id={source_id}", is_final_session_use)
 
-    async def forget_content_bulk(self, source_type: str, source_ids: list[uuid.UUID]) -> None:
+    async def forget_content_bulk(
+        self, source_type: str, source_ids: list[uuid.UUID], is_final_session_use: bool = False
+    ) -> None:
         """forget_content의 배치 버전 - 세션/연습 하나를 지울 때 그 안의 메시지/턴
         전부를 한 번의 DELETE+commit으로 처리한다(호출부마다 반복 호출하지 않도록).
-        예외 처리 이유는 forget_content와 동일(198라운드의 SAVEPOINT 분리 포함)."""
+        예외 처리 이유는 forget_content와 동일(198라운드의 SAVEPOINT 분리 포함).
+        is_final_session_use는 index_content()와 같은 의미(그쪽 docstring 참고)."""
         if not source_ids:
             return
         try:
@@ -311,4 +357,4 @@ class RagService:
                 len(source_ids),
             )
             return
-        await self._safe_commit(f"forget_content_bulk: source_type={source_type}")
+        await self._safe_commit(f"forget_content_bulk: source_type={source_type}", is_final_session_use)

@@ -7758,3 +7758,74 @@
       바뀌는) 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (199라운드)
+
+- [x] 223. 198라운드는 `index_content`/`retrieve_relevant`/`forget_content(_bulk)`가
+      *쿼리 자체*의 실패(`list_for_user`/`delete_for_source`/`_chunks.create`)를
+      SAVEPOINT(`session.begin_nested()`)로 격리해 `session.rollback()`이
+      호출부의 다른 객체를 expire시키는 문제를 고쳤지만, 네 메서드가 공유하는
+      `_safe_commit()` 헬퍼 자체의 `commit()` 실패는 SAVEPOINT로 격리할 수
+      없어(이미 이전 SAVEPOINT가 flush를 끝내둔 뒤라 그 `commit()`은 순수하게
+      COMMIT 실행 자체만 실패하는 경우) 여전히 `session.rollback()`으로
+      복구하고 있었다 - 198라운드 자신의 docstring이 "훨씬 드문 잔여 위험"
+      이라며 그대로 남겨둔 지점이다. 이 `rollback()`도 198라운드가 고친 것과
+      똑같이 이 세션에 이미 로드된 다른 객체(예: `study_service.send_message`
+      의 `assistant_message`)를 expire시켜, 그 직후 라우트가 `Pydantic.
+      model_validate()`로 동기 접근하는 순간 크래시를 유발할 수 있었다.
+
+      먼저 재현 스크립트로 `commit()` 자체가 실패하는 상황의 정확한 동작을
+      규명했다: (1) 앞선 SAVEPOINT가 flush를 이미 끝내둔 상태라 `commit()`
+      실패 자체는 `rollback()` 전까지 아무것도 expire시키지 않는다, (2)
+      `rollback()`을 안 부르면 세션은 SQLAlchemy의 "prepared" 상태로 남아
+      다음 쿼리 시도 시 `InvalidRequestError`를 내지만, 이미 로드된 객체의
+      속성 읽기(추가 쿼리 불필요)는 멀쩡히 동작한다, (3) 이 세션을 나중에
+      `close()`할 때도 `rollback()`을 먼저 부를 필요가 없다(커넥션이
+      정상적으로 풀에 반납됨, 누수 없음). 즉 "이 세션으로 더 이상 쿼리를
+      안 하는" 호출부라면 `rollback()`을 생략해도 안전하다.
+
+      다만 이게 전체 호출부에 안전한지 별도 조사 에이전트로 전수 검증했다 -
+      `index_content`/`forget_content(_bulk)`의 모든 호출부(REST 9곳 + WS
+      스트리밍 2곳 + `rag_backfill_service`의 예약 작업 5곳)를 추적한 결과,
+      REST 요청 한 번짜리(`study_service.send_message`/`delete_session`,
+      `interview_practice_service.submit_answer`/`delete_session`,
+      `interview_review_service.create_review`/`update_review`/
+      `delete_review`, `quiz_service.create_quiz`/`delete_quiz`)는 이 색인
+      호출 뒤로 같은 세션에 쿼리가 전혀 없어(라우트는 이미 로드된 객체의
+      속성만 읽어 응답을 직렬화) 안전하지만, WebSocket 스트리밍(`study_
+      service.stream_message`/`interview_review_service.stream_create_
+      review`)은 연결 하나가 여러 메시지 동안 같은 세션을 재사용해 다음
+      메시지가 곧바로 같은 세션에 쿼리를 날리므로 `rollback()` 생략이
+      `InvalidRequestError`로 그 이후 연결 전체를 조용히 망가뜨릴 수 있고,
+      `rag_backfill_service`의 예약 작업도 세션 하나를 여러 색인 호출에
+      걸쳐 재사용해 마찬가지로 위험하다는 것까지 확인했다.
+
+      `_safe_commit()`/`index_content()`/`forget_content()`/`forget_content_
+      bulk()`에 `is_final_session_use: bool = False` 매개변수를 추가했다 -
+      기본값(False, 세션 재사용 가능성이 있는 WS/백그라운드 호출부용)은
+      항상 `rollback()`해 세션을 다음 쿼리가 가능한 상태로 복구하는 기존
+      동작을 그대로 유지하고, 위에서 검증한 9개 REST 호출부만 명시적으로
+      `True`를 넘겨 실패해도 `rollback()`을 생략하게 했다(`study_service.
+      send_message`는 `index_content()`를 두 번 부르는데, 첫 번째 호출
+      뒤에도 같은 세션으로 두 번째 호출이 이어지므로 정말 마지막인 두
+      번째 호출에만 `True`를 줬다 - 196라운드의 `release_connection`
+      매개변수와 같은 설계 철학이다).
+
+      회귀 테스트를 두 층위로 추가했다: `tests/test_rag_service_best_
+      effort.py`에 `_safe_commit()`이 `is_final_session_use=True`일 때
+      commit 실패에도 다른 로드된 객체가 expire되지 않는지(`sqlalchemy.
+      inspect(...).expired`) 확인하는 단위 테스트, `tests/test_study.py`에
+      `send_message()`의 두 번째 `index_content()` 호출 안의 청크 생성
+      직후 나오는 `commit()`만 정확히 실패하도록 몽키패치해 전체 흐름이
+      크래시 없이 정상 응답을 돌려주는지 확인하는 엔드투엔드 테스트.
+      `git stash`로 서비스 수정만 되돌리면 두 테스트 모두 정확히 재현한
+      증상(전자는 API 자체가 없어져 `TypeError`, 후자는 `assistant_
+      message`가 expire된 채 세션이 닫혀 `DetachedInstanceError` -
+      MissingGreenlet과 같은 근본 원인이 세션 생명주기 타이밍에 따라
+      다른 SQLAlchemy 예외로 나타난 것)으로 실패하는 것까지 확인했다.
+
+      전체 637개 테스트 통과(635 → 637), `services/rag_service.py` 커버리지
+      100% 유지, `mypy app tests scripts` 클린. 클라이언트에게 보내는
+      응답/프로토콜은 전혀 안 바뀌는(내부 예외 처리 방식만 바뀌는) 순수
+      견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마
+      변경이 없어 마이그레이션도 필요 없었다.
+

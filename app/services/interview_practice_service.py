@@ -221,8 +221,12 @@ class InterviewPracticeService:
         turns = await self._turns.list_for_session(session_id)
         await self._sessions.delete(practice_session)
         await self._session.commit()
+        # is_final_session_use=True: REST 요청 한 번짜리라 이게 이 세션의 마지막
+        # DB 작업이다(RagService._safe_commit() docstring 참고).
         await self._rag.forget_content_bulk(
-            source_type="interview_practice_turn", source_ids=[turn.id for turn in turns]
+            source_type="interview_practice_turn",
+            source_ids=[turn.id for turn in turns],
+            is_final_session_use=True,
         )
 
     async def _generate_first_question(self, topic: str, grounding: str, model: str) -> str:
@@ -425,12 +429,15 @@ class InterviewPracticeService:
         await self._sessions.touch(practice_session)
         await self._session.commit()
 
-        # 이 문답도 향후 그라운딩 자료로 쓰일 수 있도록 색인해둔다.
+        # 이 문답도 향후 그라운딩 자료로 쓰일 수 있도록 색인해둔다. is_final_
+        # session_use=True: REST 요청 한 번짜리라 이게 이 세션의 마지막 DB
+        # 작업이다(RagService._safe_commit() docstring 참고).
         await self._rag.index_content(
             user_id=user_id,
             source_type="interview_practice_turn",
             source_id=current_turn.id,
             content=f"질문: {current_turn.question}\n답변: {answer}",
+            is_final_session_use=True,
         )
 
         return current_turn, next_turn

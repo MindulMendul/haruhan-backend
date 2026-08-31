@@ -140,8 +140,14 @@ class StudyService:
         messages = await self._messages.list_for_session(session_id)
         await self._sessions.delete(study_session)
         await self._session.commit()
+        # is_final_session_use=True: 이 세션은 이 DELETE 요청 안에서 여기가 마지막
+        # DB 작업이다(RagService._safe_commit() docstring 참고) - REST 요청 한
+        # 번짜리라 이 뒤로 같은 세션으로 쿼리를 더 안 하고 그대로 응답(204)이
+        # 나간다.
         await self._rag.forget_content_bulk(
-            source_type="study_message", source_ids=[message.id for message in messages]
+            source_type="study_message",
+            source_ids=[message.id for message in messages],
+            is_final_session_use=True,
         )
 
     async def send_message(
@@ -225,12 +231,23 @@ class StudyService:
             await self._session.rollback()
             raise _SESSION_NOT_FOUND from None
 
-        # 이번 대화도 향후 질문에 그라운딩 자료로 쓰일 수 있도록 색인해둔다.
+        # 이번 대화도 향후 질문에 그라운딩 자료로 쓰일 수 있도록 색인해둔다. 두 번째
+        # 호출(assistant_message)만 is_final_session_use=True다 - 첫 번째 호출
+        # 뒤에는 곧바로 두 번째 index_content() 호출이 이 세션을 또 쓰므로, 첫
+        # 번째에 True를 넘기면 그 commit()이 실패했을 때 rollback() 없이 세션이
+        # "prepared" 상태로 남아 두 번째 호출의 SAVEPOINT 진입 자체가 바로
+        # InvalidRequestError로 죽는다(RagService._safe_commit() docstring의
+        # WebSocket 재사용 사례와 같은 위험을 이 메서드 안에서 재현하는 셈).
+        # 두 번째 호출은 REST 요청의 진짜 마지막 DB 작업이라 True가 안전하다.
         await self._rag.index_content(
             user_id=user_id, source_type="study_message", source_id=user_message.id, content=content
         )
         await self._rag.index_content(
-            user_id=user_id, source_type="study_message", source_id=assistant_message.id, content=reply
+            user_id=user_id,
+            source_type="study_message",
+            source_id=assistant_message.id,
+            content=reply,
+            is_final_session_use=True,
         )
 
         return user_message, assistant_message

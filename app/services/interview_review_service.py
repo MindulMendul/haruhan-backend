@@ -91,9 +91,17 @@ class InterviewReviewService:
             await self._session.rollback()
             raise _ACCOUNT_GONE from None
 
-        # 복기 내용도 학습챗 그라운딩 자료로 쓰일 수 있도록 색인해둔다.
+        # 복기 내용도 학습챗 그라운딩 자료로 쓰일 수 있도록 색인해둔다. is_final_
+        # session_use=True: REST 요청 한 번짜리라 이게 이 세션의 마지막 DB
+        # 작업이다(RagService._safe_commit() docstring 참고) - stream_create_
+        # review()(WebSocket, 연결 하나가 여러 메시지 동안 세션을 재사용함)의
+        # 같은 호출은 이와 달리 기본값(False)을 그대로 둬야 한다.
         await self._rag.index_content(
-            user_id=user_id, source_type="interview_review", source_id=review.id, content=content
+            user_id=user_id,
+            source_type="interview_review",
+            source_id=review.id,
+            content=content,
+            is_final_session_use=True,
         )
         return review
 
@@ -293,8 +301,14 @@ class InterviewReviewService:
             raise _NOT_FOUND from None
 
         if content_changed:
+            # is_final_session_use=True: REST 요청 한 번짜리라 이게 이 세션의
+            # 마지막 DB 작업이다(RagService._safe_commit() docstring 참고).
             await self._rag.index_content(
-                user_id=user_id, source_type="interview_review", source_id=review.id, content=review.content
+                user_id=user_id,
+                source_type="interview_review",
+                source_id=review.id,
+                content=review.content,
+                is_final_session_use=True,
             )
 
         return review
@@ -305,7 +319,11 @@ class InterviewReviewService:
             raise _NOT_FOUND
         await self._reviews.delete(review)
         await self._session.commit()
-        await self._rag.forget_content(source_type="interview_review", source_id=review_id)
+        # is_final_session_use=True: REST 요청 한 번짜리라 이게 이 세션의 마지막
+        # DB 작업이다(RagService._safe_commit() docstring 참고).
+        await self._rag.forget_content(
+            source_type="interview_review", source_id=review_id, is_final_session_use=True
+        )
 
     async def _generate_feedback(self, company: str, position: str, content: str, model: str) -> str:
         prompt = _build_review_feedback_prompt(company, position, content)
