@@ -2,7 +2,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.auth import LoginRequest, SignupRequest
-from app.schemas.interview_practice import InterviewPracticeCreateRequest
+from app.schemas.chat import ChatRequest
+from app.schemas.interview_practice import InterviewPracticeAnswerRequest, InterviewPracticeCreateRequest
 from app.schemas.interview_review import InterviewReviewCreateRequest, InterviewReviewUpdateRequest
 from app.schemas.quiz import QuizCreateRequest, QuizUpdateRequest
 from app.schemas.study import StudySessionCreateRequest, StudySessionUpdateRequest
@@ -124,3 +125,63 @@ def test_invisible_only_label_field_is_rejected(model_cls, kwargs):
     거부하는지 확인한다."""
     with pytest.raises(ValidationError):
         model_cls(**kwargs)
+
+
+# 201라운드: 한글 채움 문자(HANGUL CHOSEONG/JUNGSEONG FILLER, HANGUL FILLER,
+# HALFWIDTH HANGUL FILLER)는 유니코드 Cf("서식") 카테고리가 아니라 Lo("기타 문자")
+# 카테고리라 위 zero-width space류와 달리 is_blank()의 기존 두 조건(isspace(),
+# category == "Cf") 어느 쪽에도 안 걸려서, 한글 지원 폰트에서는 완전히 빈 칸으로
+# 렌더링되는데도 `is_blank("ㅤㅤㅤ")`가 False를 반환하는(=거부되지 않는) 것을
+# 실제로 확인했다 - 특히 U+3164(HANGUL FILLER)는 한글 채팅/게임 플랫폼에서
+# "안 보이는 닉네임/메시지"를 만드는 데 실제로 흔히 쓰이는 문자라 이 앱(한국어
+# 서비스)에서 마주칠 가능성이 낮지 않다.
+@pytest.mark.parametrize("value", ["ᅟ", "ᅠ", "ㅤ", "ﾠ", "ㅤㅤㅤ", "ᅟᅠㅤﾠ"])
+def test_is_blank_treats_hangul_filler_characters_as_blank(value):
+    assert is_blank(value)
+
+
+def test_is_blank_does_not_treat_hangul_filler_mixed_with_visible_text_as_blank():
+    assert not is_blank("ㅤ안녕")
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "kwargs"),
+    [
+        (StudySessionCreateRequest, {"title": "ㅤㅤㅤ"}),
+        (StudySessionUpdateRequest, {"title": "ㅤㅤㅤ"}),
+        (QuizCreateRequest, {"title": "ㅤㅤㅤ", "source_text": "테스트 소스"}),
+        (QuizUpdateRequest, {"title": "ㅤㅤㅤ"}),
+        (InterviewPracticeCreateRequest, {"topic": "ㅤㅤㅤ"}),
+        (
+            InterviewReviewCreateRequest,
+            {
+                "company": "ㅤㅤㅤ",
+                "position": "백엔드",
+                "interview_date": "2026-01-01",
+                "content": "면접 내용",
+            },
+        ),
+    ],
+)
+def test_hangul_filler_only_label_field_is_rejected(model_cls, kwargs):
+    """공백/zero-width space만 있는 값을 거부하는 위 테스트들과 같은 필드들이,
+    한글 채움 문자로만 이루어진 값도 똑같이 거부하는지 확인한다."""
+    with pytest.raises(ValidationError):
+        model_cls(**kwargs)
+
+
+def test_hangul_filler_only_chat_prompt_is_rejected():
+    """ChatRequest.prompt도 is_blank()를 그대로 쓰므로(app/schemas/chat.py) 같은
+    수정으로 함께 고쳐지는지 확인한다 - 이 필드를 그냥 통과시키면 무의미한
+    입력으로 Ollama 호출만 낭비한다."""
+    with pytest.raises(ValidationError):
+        ChatRequest(prompt="ㅤㅤㅤ")
+
+
+def test_hangul_filler_only_interview_practice_answer_is_rejected():
+    """InterviewPracticeAnswerRequest.answer는 is_blank()를 통과하면
+    mark_answered_if_pending()의 단발성 CAS(WHERE answer IS NULL)로 그 턴을
+    영구히 소비해버려(재제출 엔드포인트 없음) 다른 필드보다 피해가 크다 -
+    한글 채움 문자로만 이루어진 답변도 거부되는지 확인한다."""
+    with pytest.raises(ValidationError):
+        InterviewPracticeAnswerRequest(answer="ㅤㅤㅤ")

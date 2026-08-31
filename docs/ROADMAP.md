@@ -7874,3 +7874,49 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (201라운드)
+
+- [x] 225. `app/schemas/validators.py`의 `is_blank()`는 공백류(`str.isspace()`)와
+      유니코드 Cf("서식") 카테고리 문자(zero-width space 등)만 "실질적으로
+      비어있음"으로 잡는데, 한글 채움 문자(`U+115F` HANGUL CHOSEONG FILLER,
+      `U+1160` HANGUL JUNGSEONG FILLER, `U+3164` HANGUL FILLER, `U+FFA0`
+      HALFWIDTH HANGUL FILLER)는 유니코드 Lo("기타 문자") 카테고리라 이
+      두 조건 어느 쪽에도 안 걸린다 - 그런데도 한글 지원 폰트에서는 전부
+      아무것도 안 보이는 빈 칸으로 렌더링되고, 특히 `U+3164`는 한글 채팅/
+      게임 플랫폼에서 "안 보이는 닉네임/메시지"를 만드는 데 실제로 흔히
+      쓰이는 문자다 - 이 앱이 한국어 서비스인 만큼 마주칠 가능성이 낮지
+      않다. `is_blank("ㅤㅤㅤ")`가 `False`(=거부 안 됨)를 반환하는 것과,
+      `StudySessionCreateRequest(title="ㅤ"*5)`처럼 실제 스키마가 이런
+      값을 그대로 통과시키는 것까지 직접 재현해 확인했다.
+
+      `is_blank()`는 `NonBlankStr`(학습챗/퀴즈/면접연습/면접복기의 제목·
+      주제·회사명·직무명 같은 라벨 필드)뿐 아니라 `content`/`prompt`/
+      `answer`/`source_text` 필드마다 손으로 쓴 `validate_*_length`
+      검증자들도 전부 그대로 호출하는 공용 함수라, 파급 범위가 넓다 -
+      라벨 필드는 목록에서 빈 줄처럼 보이는 항목을 만들고, content류
+      필드는 실질적으로 빈 입력으로 AI 호출을 낭비하게 하는데,
+      `InterviewPracticeAnswerRequest.answer`는 `mark_answered_if_
+      pending()`의 단발성 CAS(`WHERE answer IS NULL`)로 그 턴을 영구히
+      소비해버려(재제출 엔드포인트 없음) 다른 필드보다 피해가 크다.
+
+      `is_blank()`에 한글 채움 문자 4종(`_HANGUL_FILLER_CHARS`)을 세
+      번째 조건으로 추가했다 - 공용 함수 하나만 고치면 이를 쓰는 모든
+      스키마(라벨 필드 + content류 필드)에 자동으로 전파된다.
+      `tests/test_schemas_validators.py`에 기존 zero-width space 테스트와
+      같은 스타일로 새 테스트를 추가했다: `is_blank()` 직접 검증(채움
+      문자 단독/조합은 blank, 보이는 텍스트와 섞이면 non-blank), 라벨
+      필드 6개(`StudySessionCreateRequest`/`StudySessionUpdateRequest`/
+      `QuizCreateRequest`/`QuizUpdateRequest`/`InterviewPracticeCreate
+      Request`/`InterviewReviewCreateRequest`)가 채움 문자로만 이루어진
+      값을 거부하는지, `ChatRequest.prompt`/`InterviewPracticeAnswer
+      Request.answer`도 같은 공용 함수를 쓰므로 함께 고쳐졌는지. `git
+      stash`로 `validators.py` 수정만 되돌리면 새 테스트 14개 전부
+      실패하는 것까지 확인했다.
+
+      전체 661개 테스트 통과(646 → 661), `app/schemas/validators.py`
+      커버리지 100% 유지, `mypy app tests scripts` 클린. 기존에 이미
+      거부되던 값(공백/zero-width space)의 동작은 전혀 안 바뀌고 새로운
+      거부 케이스만 추가되는 순수 검증 강화라 `docs/FRONTEND_
+      INTEGRATION.md` 갱신도, DB 스키마 변경이 없어 마이그레이션도
+      필요 없었다.
+

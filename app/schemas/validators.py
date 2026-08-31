@@ -16,8 +16,23 @@ def _normalize_email(value: str) -> str:
 NormalizedEmail = Annotated[EmailStr, AfterValidator(_normalize_email)]
 
 
+# 한글 채움 문자(초성/중성 채움, 반각 포함) - 유니코드 Lo("기타 문자") 카테고리라
+# str.isspace()도 False, unicodedata.category() == "Cf"도 아니어서 아래 is_blank()의
+# 기존 두 조건 중 어느 것도 못 잡는다. 그런데도 한글 지원 폰트에서는 전부 아무것도
+# 안 보이는 빈칸으로 렌더링되고, 특히 U+3164(HANGUL FILLER)는 한글 채팅/게임
+# 플랫폼에서 "안 보이는 닉네임/메시지"를 만드는 데 실제로 흔히 쓰이는 문자다 -
+# 이 앱이 한국어 서비스인 만큼 실제로 마주칠 가능성이 낮지 않다.
+_HANGUL_FILLER_CHARS = frozenset(
+    "ᅟ"  # HANGUL CHOSEONG FILLER
+    "ᅠ"  # HANGUL JUNGSEONG FILLER
+    "ㅤ"  # HANGUL FILLER
+    "ﾠ"  # HALFWIDTH HANGUL FILLER
+)
+
+
 def is_blank(value: str) -> bool:
-    """문자열 전체가 공백이거나 유니코드 Cf("서식") 카테고리 문자뿐인지 확인한다.
+    """문자열 전체가 공백이거나 유니코드 Cf("서식") 카테고리 문자, 또는 한글 채움
+    문자뿐인지 확인한다.
 
     `str.strip()`은 `str.isspace()`가 True인 문자(공백류)만 제거하고, 폭 없는
     문자(zero-width space U+200B, ZWNJ/ZWJ, word joiner U+2060, BOM U+FEFF 등
@@ -26,8 +41,19 @@ def is_blank(value: str) -> bool:
     `not value.strip()` 검사를 통과해버린다(공백류 문자가 하나도 없어 strip이
     아무것도 제거하지 못함). 이 문자들만으로 이루어진 값도 공백류와 똑같이
     "실질적으로 비어있음"으로 취급한다.
-    """
-    return all(ch.isspace() or unicodedata.category(ch) == "Cf" for ch in value)
+
+    한글 채움 문자(_HANGUL_FILLER_CHARS)는 Cf가 아니라 Lo("기타 문자")
+    카테고리라 위 두 조건 중 어느 쪽에도 안 걸려, `is_blank("ㅤㅤㅤ")`가
+    (한글 지원 폰트에서는 완전히 빈 칸으로 보이는데도) False를 반환하던 것을
+    실제로 확인했다 - 학습챗/퀴즈/면접연습/면접복기의 제목·주제·회사명·
+    직무명 같은 라벨 필드(NonBlankStr)에 넣으면 목록에서 빈 줄처럼 보이는
+    항목을 그대로 만들 수 있고, content/prompt/answer 필드에 넣으면 사용자가
+    보기엔 빈 입력인데도 검증을 통과해 AI 호출이 낭비되거나(면접연습 답변은
+    한 번만 기록되는 CAS라 재제출 방법도 없음) 한다."""
+    return all(
+        ch.isspace() or unicodedata.category(ch) == "Cf" or ch in _HANGUL_FILLER_CHARS
+        for ch in value
+    )
 
 
 def _reject_blank(value: str) -> str:
