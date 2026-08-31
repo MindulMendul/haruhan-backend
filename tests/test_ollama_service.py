@@ -225,6 +225,68 @@ def test_chat_stream_raises_ollama_service_error_on_malformed_json_line(monkeypa
         asyncio.run(_drain())
 
 
+def test_chat_stream_raises_ollama_service_error_on_mid_stream_error_line(monkeypatch):
+    """Ollama는 이미 200 헤더를 보내고 스트리밍을 시작한 뒤 모델 실행이
+    죽으면(OOM, 컨텍스트 초과 등) HTTP 상태로는 더 이상 실패를 알릴 방법이
+    없어 message/done 없이 {"error": ...} 한 줄만 보내고 연결을 끊는다. 이
+    줄을 놓치면 지금까지 받은 부분 응답이 성공으로 착각돼 study_service/
+    interview_review_service가 그대로 커밋해버리는 버그였다 - 여기서는
+    OllamaServiceError로 묶여 그 두 호출부가 이미 갖춘 실패 처리 경로를
+    타는지 확인한다."""
+    lines = [
+        json.dumps({"message": {"content": "안"}, "done": False}),
+        json.dumps({"message": {"content": "녕"}, "done": False}),
+        json.dumps({"error": "model runner crashed: cuda out of memory"}),
+    ]
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+
+    def handler(request):
+        return httpx.Response(200, content=body)
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+
+    async def _collect():
+        chunks = []
+        async for chunk in service.chat_stream(
+            messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b"
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(_collect())
+
+
+def test_chat_stream_raises_ollama_service_error_when_connection_ends_without_done(monkeypatch):
+    """명시적 {"error": ...} 줄 없이 연결만 끊기는 경우(프록시가 스트림을
+    중간에서 자르는 등)도 done=true를 한 번도 못 봤다는 점은 위와 같다 -
+    이 경우도 partial 응답을 성공으로 착각하지 않도록 실패로 취급하는지
+    확인한다."""
+    lines = [
+        json.dumps({"message": {"content": "안"}, "done": False}),
+        json.dumps({"message": {"content": "녕"}, "done": False}),
+    ]
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+
+    def handler(request):
+        return httpx.Response(200, content=body)
+
+    _install_mock_transport(monkeypatch, handler)
+    service = OllamaService(base_url="http://fake-ollama:11434")
+
+    async def _collect():
+        chunks = []
+        async for chunk in service.chat_stream(
+            messages=[{"role": "user", "content": "안녕"}], model="qwen2.5:3b"
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    with pytest.raises(OllamaServiceError):
+        asyncio.run(_collect())
+
+
 # dict.get(key, default)는 key가 아예 없을 때만 default를 쓴다 - Ollama가(혹은
 # 앞단 프록시가) `{"response": null}`처럼 key는 있는데 값이 JSON null인 응답을
 # 주면 그대로 None이 반환되는 버그였다. 이 서비스의 반환 타입은 전부 str/list로

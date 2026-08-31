@@ -6972,3 +6972,78 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (187라운드)
+
+- [x] 211. `OllamaService.chat_stream()`이 스트리밍 도중 Ollama가 실패해도
+      예외를 던지지 않고 조용히 끝나버려서, 학습챗/면접복기 스트리밍이
+      partial(심지어 빈) AI 응답을 마치 정상 완료된 것처럼 그대로
+      DB에 커밋하고 클라이언트에 "done"으로 보내던 문제 해소 -
+      이 코드베이스가 이미 `chat()`/`generate()` 등 논스트리밍
+      메서드들에는 전부 갖추고 있는(주석에서 명시적으로 언급하는)
+      "200을 받았어도 쓸 수 있는 내용이 비어 있으면 실패로 취급"
+      원칙이 스트리밍 메서드 하나에만 빠져 있었다.
+
+      Ollama는 `stream=True`일 때 이미 HTTP 200 헤더를 보내고 스트리밍을
+      시작한 뒤에는 더 이상 HTTP 상태로 실패를 알릴 방법이 없다 -
+      모델 러너가 죽으면(OOM, 컨텍스트 초과, GPU 오류 등) `message`도
+      `done: true`도 없이 `{"error": "..."}` 한 줄만 보내고 연결을
+      끊는다. 그런데 `chat_stream()`은 매 줄에서 `message.content`와
+      `done`만 확인하고 있어서, 이 `error` 줄은 둘 중 어디에도 안
+      걸려 그냥 지나쳐지고, 곧이어 연결이 끊기면 `aiter_lines()`가
+      평범하게 반복을 끝내 이 async generator가 예외 없이 그냥
+      `return`한다 - 지금까지 받은 조각들은 이미 정상적으로 yield된
+      뒤라, 호출부(`study_service.stream_message`,
+      `interview_review_service.stream_create_review`)는 스트림이
+      실패 없이 끝났다고 믿고 그 조각들을 이어 붙여 그대로
+      `StudyMessage`/`InterviewReview`에 커밋한다.
+
+      httpx `MockTransport`로 실제 Ollama가 보내는 형태(정상 조각
+      두 개 뒤에 `message`/`done` 없이 `error` 키만 있는 줄, 연결
+      종료)를 그대로 흘려보내 `chat_stream()`을 직접 호출해
+      재현했다 - 예외 없이 `['안', '녕']` 두 조각만 받고 조용히
+      끝났다. `chat()`/`generate()` 등 다른 메서드는 전부 이미
+      `OllamaServiceError`로 실패를 알리는데, 이 코드베이스에서
+      세 번째 Ollama 호출 형태인 `chat_stream()`만 그 보호가 없었고
+      - REST 경로(퀴즈/면접연습)의 논스트리밍 실패는 커밋 전에 막혀
+      재시도가 자연스러운 반면, 이 WS 경로는 실패를 놓치는 순간
+      이미 "done"을 보낸 뒤라 재시도를 트리거할 방법 자체가 없다는
+      점에서 더 나쁘다.
+
+      두 가지를 고쳤다: (1) `chunk.get("error")`가 있으면 그
+      내용을 담아 즉시 `OllamaServiceError`를 던진다. (2) 방어적으로,
+      명시적 `error` 줄 없이 연결만 끊기는 경우(중간의 프록시가
+      스트림을 자르는 등)에도 대비해 `done: true`를 한 번도 못 보고
+      줄 반복이 끝나면 마찬가지로 `OllamaServiceError`를 던진다.
+      두 호출부 모두 이미 `except OllamaServiceError:`로 실패를
+      `{"type": "error"}` WS 프레임으로 우아하게 변환하는 경로를
+      갖추고 있어(스트리밍 메서드 자체 안의 변경만으로 끝나는), 호출부
+      코드는 전혀 바꾸지 않았다.
+
+      `tests/test_ollama_service.py`에 2개 추가했다 - 위 재현과 같은
+      방식으로 (1) 중간 `error` 줄, (2) `done` 없이 연결만 끝나는
+      경우 각각 `OllamaServiceError`가 발생하는지 확인한다. `git
+      stash`로 `ollama_service.py` 수정만 되돌리면 두 테스트 다
+      정확히 위에서 재현한 것과 똑같은 증상(`DID NOT RAISE
+      OllamaServiceError`)으로 실패하는 것까지 확인했다.
+
+      (부수적으로) 전체 회귀를 여러 번 돌리는 과정에서 186라운드가
+      추가한 두 WS 회귀 테스트(`test_stream_message_disconnect_
+      during_delta_send_...`, `test_stream_create_review_disconnect_
+      during_delta_send_...`)가 전체 스위트(600개 이상) 안에서만
+      가끔(2/5회) 타이밍 폴링 데드라인(5초)을 못 맞춰 실패하는 걸
+      발견했다 - 단일 파일로 돌리거나 인위적으로 CPU 부하를 줘도
+      재현되지 않아 정확한 원인(아마 그 시점까지 쌓인 수백 개
+      테스트의 정리되지 않은 스레드/이벤트 루프로 인한 드문 GIL
+      경합)은 특정하지 못했지만, 이 대기는 정확성을 보장하는 값이
+      아니라 순수 동기화용이라 실패 시 명확한 assert 메시지를 남기며
+      죽을 뿐 거짓 통과의 위험이 없다 - 데드라인을 5초에서 20초로
+      넉넉히 늘리는 것만으로 이후 전체 스위트를 3연속 통과시켜
+      확인했다.
+
+      전체 603개 테스트 통과(601 → 603), `services/ollama_service.py`
+      커버리지 100% 유지, `mypy app tests scripts` 클린. 클라이언트에게
+      보내는 메시지 프로토콜은 안 바뀌는(이미 있던 실패 처리 경로를
+      스트리밍 실패 케이스 하나에도 마저 연결하는) 변경이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+

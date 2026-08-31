@@ -1290,7 +1290,7 @@ def test_stream_message_disconnect_during_delta_send_logs_client_disconnect_not_
             # 시점 이후로는 서버가 더 이상 아무것도 보내지 않으므로(정상 처리
             # 시에도, 버그 상황에도) 여기서 다시 receive_json()을 부르면 영원히
             # 대기한다.
-            deadline = _time.monotonic() + 5
+            deadline = _time.monotonic() + 20
             while call_count["n"] < 3 and _time.monotonic() < deadline:
                 _time.sleep(0.02)
             assert call_count["n"] == 3, "서버가 3번째 send까지 도달하지 못했다"

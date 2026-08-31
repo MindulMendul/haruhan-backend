@@ -78,15 +78,37 @@ class OllamaService:
                 json={"model": model, "messages": messages, "stream": True},
             ) as response:
                 response.raise_for_status()
+                saw_done = False
                 async for line in response.aiter_lines():
                     if not line:
                         continue
                     chunk = json.loads(line)
+                    if chunk.get("error"):
+                        # Ollama는 이미 200 헤더를 보내고 스트리밍을 시작한 뒤
+                        # 모델 실행이 죽으면(OOM, 컨텍스트 초과 등) HTTP 상태로는
+                        # 더 이상 실패를 알릴 방법이 없어, message/done 없이
+                        # {"error": ...} 한 줄만 보내고 연결을 끊는다. 이 줄을
+                        # content/done 어느 쪽으로도 인식하지 못하고 그냥
+                        # 지나치면 스트림이 "조용히" 끝나버려서, 지금까지 모은
+                        # 부분 응답을 study_service.stream_message/interview_
+                        # review_service.stream_create_review가 정상 완료로
+                        # 착각해 그대로 커밋하고 클라이언트에 "done"으로 보낸다
+                        # - 실제 mock 전송으로 재현해 확인했다. 다른 메서드들과
+                        # 같은 OllamaServiceError로 묶어 호출부가 이미 갖춘
+                        # 실패 처리 경로(_GENERATION_FAILED)를 타게 한다.
+                        raise OllamaServiceError(f"Ollama 스트리밍 응답 오류: {chunk['error']}")
                     content = (chunk.get("message") or {}).get("content") or ""
                     if content:
                         yield content
                     if chunk.get("done"):
+                        saw_done = True
                         break
+                if not saw_done:
+                    # 명시적 {"error": ...} 줄 없이 연결만 끊기는 경우(프록시가
+                    # 스트림을 중간에서 자르는 등)도 done=true를 못 봤다는 점은
+                    # 같다 - 위와 같은 이유로 partial 응답을 성공으로 착각하지
+                    # 않도록 실패로 취급한다.
+                    raise OllamaServiceError("Ollama 스트리밍이 완료되지 않고 중간에 끊겼습니다")
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             logger.error("Ollama 스트리밍 API 호출 에러: %s", exc)
             raise OllamaServiceError("Ollama 엔진 응답 실패") from exc
