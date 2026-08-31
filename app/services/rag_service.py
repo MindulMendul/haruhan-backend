@@ -106,12 +106,23 @@ class RagService:
         """query와 의미적으로 가까운 사용자 본인의 기존 기록 상위 K개를 반환한다.
 
         검색 실패는 전부 빈 리스트로 처리한다 - RAG는 답변 품질을 보강하는 부가 기능이라
-        실패해도 채팅 자체는 평소대로 계속되어야 한다.
+        실패해도 채팅 자체는 평소대로 계속되어야 한다. index_content/forget_content(_bulk)와
+        같은 이유로, 임베딩 호출 실패(OllamaServiceError)뿐 아니라 이 메서드 자신의
+        DB 조회(list_for_user)에서 나는 예상 못한 오류(커넥션 드롭, 스테이트먼트 타임아웃
+        등)도 삼켜야 한다 - 여기서 안 잡으면 학습챗/면접연습의 모든 턴마다 도는 이
+        "부가 기능" 조회 하나가 그대로 채팅 자체를 500(REST)/비정상 종료(WS)로 만들어버려,
+        이 클래스의 다른 세 메서드가 지키는 "RAG 실패는 절대 본 기능을 막지 않는다"는
+        약속이 정작 가장 자주 불리는 이 메서드에서만 깨져 있었다.
         """
         model = self._settings.embedding_model
-        candidates = await self._chunks.list_for_user(
-            user_id, embedding_model=model, limit=self._settings.rag_max_candidate_chunks
-        )
+        try:
+            candidates = await self._chunks.list_for_user(
+                user_id, embedding_model=model, limit=self._settings.rag_max_candidate_chunks
+            )
+        except Exception:
+            logger.exception("RAG 검색 실패 (예상 못한 DB 오류): user_id=%s", user_id)
+            await self._session.rollback()
+            return []
         if not candidates:
             return []
 

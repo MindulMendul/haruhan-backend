@@ -7117,3 +7117,56 @@
       조용히 복구하는) 변경이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (189라운드)
+
+- [x] 213. `RagService.retrieve_relevant()`가 자기 자신의 DB 조회 실패조차
+      삼키지 않아, "RAG 실패는 절대 본 기능(채팅/면접연습)을 막지 않는다"는
+      이 클래스 전체의 설계 원칙이 정작 가장 자주(학습챗/면접연습의 매
+      턴마다) 불리는 이 메서드에서만 깨져 있던 문제 해소.
+
+      `RagService`의 다른 세 메서드(`index_content`/`forget_content`/
+      `forget_content_bulk`)는 전부 자기 DB 작업을 `try/except Exception:
+      logger.exception(...); await self._session.rollback()`으로 감싸서
+      "임베딩 호출 실패(OllamaServiceError)뿐 아니라 예상 못한 DB 오류까지
+      삼킨다"고 각자 docstring에 명시하고 있고, `tests/
+      test_rag_service_best_effort.py`가 그 보장을 실제로 확인하는 전용
+      테스트까지 갖추고 있었다. 그런데 `retrieve_relevant()`는 "검색 실패는
+      전부 빈 리스트로 처리한다"는 같은 취지의 docstring을 갖고 있으면서도,
+      정작 첫 줄에서 부르는 `self._chunks.list_for_user(...)` DB 조회는
+      `try` 블록 밖에 있어 임베딩 호출 실패만 잡고 그 조회 자체의 예외는
+      그대로 위로 새어나갔다. 196라운드가 이 조회의 `LIMIT`이 음수면 나는
+      특정 오류(`rag_max_candidate_chunks` 음수 값)만 설정 검증으로 막아
+      증상 하나는 없앴지만, "이 조회 자체에 예외 처리가 아예 없다"는 구조적
+      원인은 그대로 남아 있었다.
+
+      `retrieve_relevant()`는 `study_service.send_message`/
+      `stream_message`, `interview_practice_service.create_session`/
+      `submit_answer`/`complete_session` 이렇게 5곳에서 전부 보호 없이
+      직접 호출된다 - 이 앱에서 가장 자주 실행되는 경로들이다. 커넥션
+      드롭/스테이트먼트 타임아웃/풀 고갈 같은 일시적 DB 문제가 이 조회
+      한 번에서 나면, 그 순간 그라운딩 자료를 못 찾는 정도가 아니라
+      학습챗/면접연습 전체가 500(REST)이나 비정상 종료(WS)로 죽어버린다
+      - RAG를 "부가 기능"으로 설계해둔 나머지 모든 곳의 노력이 이 한
+      군데 때문에 무의미해지는 셈이다.
+
+      `list_for_user()`가 예상 못한 예외를 던지도록 만든 가짜
+      repository로 실제 `RagService.retrieve_relevant()`를 그대로 호출해
+      재현했다 - 예외가 잡히지 않고 그대로 테스트 밖으로 새어나갔다.
+      `list_for_user(...)` 호출을 다른 세 메서드와 같은 패턴(`try/except
+      Exception: logger.exception(...); await self._session.rollback();
+      return []`)으로 감쌌다.
+
+      `tests/test_rag_service_best_effort.py`의 기존 `_BrokenChunkRepository`에
+      `list_for_user`도 추가하고, 다른 세 메서드의 "DB 오류를 흉내내도
+      예외가 새어나가지 않고 세션이 rollback되어 계속 쓸 수 있는지" 테스트와
+      같은 패턴으로 1개 추가했다. `git stash`로 `rag_service.py` 수정만
+      되돌리면 정확히 위에서 재현한 것과 똑같은 증상(`RuntimeError`가
+      그대로 새어나감)으로 실패하는 것까지 확인했다.
+
+      전체 613개 테스트 통과(612 → 613), `services/rag_service.py`
+      커버리지 100% 유지, `mypy app tests scripts` 클린. 클라이언트에게
+      보내는 응답은 전혀 안 바뀌는(RAG 그라운딩이 조용히 빠지는 것만
+      제외하면 채팅/면접연습이 평소대로 계속되는) 순수 견고성 개선이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+
