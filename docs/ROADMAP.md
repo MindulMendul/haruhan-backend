@@ -6843,3 +6843,58 @@
       방식만 바뀜) 변경이라 `docs/FRONTEND_INTEGRATION.md` 갱신도
       필요 없었다.
 
+## 백로그 (185라운드)
+
+- [x] 209. 재배포(서버 프로세스 종료)로 끊긴 WebSocket 연결이 173라운드가
+      만든 접근 로그에 사용자가 스스로 끊은 것과 똑같이
+      `reason=client_disconnect`로 남던 문제 해소 - 173라운드는
+      학습챗/면접복기 스트리밍의 connect/disconnect를 `haruhan.access`
+      로거에 남기면서 종료 사유를 `idle_timeout`/`client_disconnect`/
+      `error` 세 가지로 구분했는데, `except WebSocketDisconnect:`가
+      예외 자체(그리고 그 예외가 들고 있는 종료 코드)를 그냥 버리고
+      `disconnect_reason`을 항상 기본값(`client_disconnect`)으로 남겨서,
+      실제로는 서버가 먼저 끊은 경우까지 전부 "클라이언트가 끊음"으로
+      잘못 분류됐다.
+
+      uvicorn의 WebSocket 프로토콜 구현 세 가지(websockets/wsproto 계열)
+      전부 프로세스가 SIGTERM을 받으면(이 프로젝트의 `docker-compose.yml`
+      이 워커 1개로 uvicorn을 그대로 돌리므로, `docker compose up -d
+      --build`로 재배포할 때마다 매번 일어나는 일) 살아있는 WebSocket
+      연결에 `code=1012`("Service Restart")로 직접 종료를 건다는 것을
+      uvicorn 소스(`websockets_sansio_impl.py`/`wsproto_impl.py`/
+      `websockets_impl.py` 셋 다)에서 확인했다. Starlette의
+      `WebSocketDisconnect` 예외는 이 코드를 `.code` 속성에 그대로
+      담아서 던지는데, 라우트는 그 값을 전혀 안 보고 있었다. 실제
+      uvicorn 프로세스를 띄우고 실제 WebSocket 클라이언트로 연결한
+      뒤 프로세스에 `SIGTERM`을 보내 직접 재현했다 - 클라이언트는
+      close code 1012를 받았는데, 서버 로그는 (고치기 전엔)
+      `reason=client_disconnect`로 남았다. 173라운드가 이 로그를 만든
+      목적 자체가 "왜 끊겼는지 grep으로 바로 알아내기"인데, 정작 가장
+      대량으로(재배포 한 번에 그 순간 열려 있던 모든 연결이 동시에)
+      발생하는 원인 하나를 못 구분하고 있었던 셈이다 - 이 코드 경로는
+      Starlette의 in-process `TestClient`가 만드는 연결에서는 구조적으로
+      절대 발생하지 않아(진짜 uvicorn 프로세스 종료가 필요) 173라운드의
+      테스트로도, 그 뒤 어느 라운드로도 드러난 적이 없었다.
+
+      두 라우트(`routes/study.py`의 `stream_message`, `routes/
+      interview_review.py`의 `stream_create_review`)의
+      `except WebSocketDisconnect:`를 `except WebSocketDisconnect as
+      exc:`로 바꾸고, `exc.code == 1012`면 `disconnect_reason =
+      "server_shutdown"`으로 남기도록 고쳤다.
+
+      `tests/test_study.py`/`tests/test_interview_review.py`에 각각
+      1개씩 추가했다 - Starlette `TestClient`의 WebSocket 세션이
+      `close(code=1012)`로 보내는 값이 서버가 받는 실제
+      `WebSocketDisconnect.code`로 그대로 전달된다는 것을 확인한 뒤,
+      진짜 uvicorn 프로세스 없이도 이 서버측 코드 경로 자체를
+      결정적으로 확인하도록 만들었다. `git stash`로 두 라우트 파일
+      수정만 되돌리면 두 테스트 다 정확히(`reason=client_disconnect`로
+      남아서) 실패하는 것까지 확인했다.
+
+      전체 599개 테스트 통과, `routes/study.py`/`routes/interview_
+      review.py` 둘 다 커버리지 100%, `mypy app tests scripts` 클린.
+      클라이언트에게 보내는 메시지 프로토콜은 전혀 안 바뀌는(서버
+      내부 로그의 `reason=` 값 하나가 새로 생겼을 뿐인) 순수 로깅
+      정확도 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
+      스키마 변경이 없어 마이그레이션도 필요 없었다.
+

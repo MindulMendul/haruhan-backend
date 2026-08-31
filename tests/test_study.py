@@ -976,6 +976,35 @@ def test_stream_message_idle_timeout_logs_disconnect_reason(client, monkeypatch,
     assert "reason=idle_timeout" in disconnect_records[0]
 
 
+def test_stream_message_service_shutdown_disconnect_logs_distinct_reason(client, caplog):
+    """uvicorn의 세 WebSocket 프로토콜 구현(websockets/wsproto 계열) 전부
+    프로세스 종료(SIGTERM, 재배포 때마다 매번 일어남 - docker-compose.yml이
+    워커 1개로 uvicorn을 그대로 돌림) 시 살아있는 연결에 code=1012("Service
+    Restart")로 직접 종료를 건다 - 클라이언트가 스스로 끊은 게 아닌데도
+    고치기 전엔 항상 "client_disconnect"로 남아, 재배포로 끊긴 연결과
+    사용자가 실제로 끊은 연결을 로그만 보고 구분할 수 없었다(실제 uvicorn
+    프로세스에 SIGTERM을 보내 직접 재현해 확인함). Starlette TestClient의
+    WebSocket 세션이 `close(code=...)`로 보내는 값이 서버가 받는
+    `WebSocketDisconnect.code`로 그대로 전달되므로, 실제 프로세스 없이도
+    이 서버측 코드 경로 자체를 결정적으로 확인할 수 있다."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="haruhan.access")
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "서버 종료 로그 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(f"/api/v1/study/sessions/{session_id}/stream?token={token}") as ws:
+        ws.close(code=1012)
+
+    records = [r.getMessage() for r in caplog.records if r.name == "haruhan.access"]
+    disconnect_records = [m for m in records if m.startswith("ws_event=disconnect")]
+    assert len(disconnect_records) == 1
+    assert "reason=server_shutdown" in disconnect_records[0]
+
+
 def test_stream_message_rejects_when_at_max_concurrent_connections(client, monkeypatch):
     """WebSocket 연결 하나는 accept부터 종료까지 DB 커넥션 풀의 커넥션 하나를
     계속 점유한다(get_db가 연결 전체 수명 동안 열려 있는 FastAPI yield 의존성

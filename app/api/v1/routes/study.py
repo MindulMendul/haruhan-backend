@@ -267,8 +267,22 @@ async def stream_message(
                 await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                 disconnect_reason = "error"
                 return
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        # uvicorn의 세 WebSocket 프로토콜 구현(websockets/wsproto 계열) 전부
+        # 프로세스 종료(SIGTERM, 즉 이 앱을 재배포할 때마다 매번 일어나는 일 -
+        # docker-compose.yml이 워커 1개로 uvicorn을 그대로 돌림) 시 살아있는
+        # WebSocket 연결에 code=1012("Service Restart")로 직접 종료를 건다 -
+        # 클라이언트가 스스로 끊은 게 아니라 서버가 끊은 것이다. 이 예외 자체가
+        # 그 코드를 들고 있는데도 기존 코드는 그냥 버리고 항상
+        # "client_disconnect"로 남겨서, 재배포로 끊긴 연결과 사용자가 실제로
+        # 끊은 연결을 로그만 보고 구분할 수 없었다(173라운드가 이 로그를 만든
+        # 목적 자체가 "왜 끊겼는지 grep으로 알아내기"인데 정작 가장 흔하게
+        # 대량으로 끊기는 원인 하나를 못 구분함). 실제 uvicorn 프로세스를
+        # 띄우고 실제 WebSocket 클라이언트로 연결한 뒤 SIGTERM을 보내
+        # 직접 재현해 확인했다 - 클라이언트는 close code 1012를 받고, 서버
+        # 로그는 (고치기 전엔) "client_disconnect"로 남았다.
+        if exc.code == 1012:
+            disconnect_reason = "server_shutdown"
     finally:
         duration_ms = (time.monotonic() - connect_time) * 1000
         access_logger.info(

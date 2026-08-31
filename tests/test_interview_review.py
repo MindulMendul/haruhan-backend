@@ -696,6 +696,26 @@ def test_stream_create_review_idle_timeout_logs_disconnect_reason(client, monkey
     assert "reason=idle_timeout" in disconnect_records[0]
 
 
+def test_stream_create_review_service_shutdown_disconnect_logs_distinct_reason(client, caplog):
+    """uvicorn의 세 WebSocket 프로토콜 구현 전부 프로세스 종료(SIGTERM, 재배포
+    때마다 매번 일어남) 시 살아있는 연결에 code=1012("Service Restart")로
+    직접 종료를 건다 - study.py의 stream_message와 같은 이유(그쪽 테스트
+    docstring 참고, 실제 uvicorn 프로세스로 직접 재현해 확인함)로 이 경우도
+    "client_disconnect"가 아니라 구분되는 reason으로 남아야 한다."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="haruhan.access")
+    token = _signup_and_get_token(client, email="stream-review-shutdown-log@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.close(code=1012)
+
+    records = [r.getMessage() for r in caplog.records if r.name == "haruhan.access"]
+    disconnect_records = [m for m in records if m.startswith("ws_event=disconnect")]
+    assert len(disconnect_records) == 1
+    assert "reason=server_shutdown" in disconnect_records[0]
+
+
 def test_stream_create_review_rejects_when_at_max_concurrent_connections(client, monkeypatch):
     """학습챗 스트리밍과 마찬가지로 이 WebSocket 연결도 accept부터 종료까지
     DB 커넥션 풀의 커넥션 하나를 계속 점유한다 - 풀 크기보다 많은 동시 연결이

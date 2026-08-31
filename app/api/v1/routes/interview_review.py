@@ -246,8 +246,16 @@ async def stream_create_review(
                 await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                 disconnect_reason = "error"
                 return
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        # uvicorn의 세 WebSocket 프로토콜 구현(websockets/wsproto 계열) 전부
+        # 프로세스 종료(SIGTERM, 즉 이 앱을 재배포할 때마다 매번 일어나는 일 -
+        # docker-compose.yml이 워커 1개로 uvicorn을 그대로 돌림) 시 살아있는
+        # WebSocket 연결에 code=1012("Service Restart")로 직접 종료를 건다 -
+        # 클라이언트가 스스로 끊은 게 아니라 서버가 끊은 것이다. study.py의
+        # stream_message와 같은 이유(그쪽 주석 참고, 실제 uvicorn 프로세스로
+        # 직접 재현해 확인함)로 이 코드를 구분해서 남긴다.
+        if exc.code == 1012:
+            disconnect_reason = "server_shutdown"
     finally:
         duration_ms = (time.monotonic() - connect_time) * 1000
         access_logger.info(
