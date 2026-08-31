@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 
@@ -6,9 +7,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
 from app.db.base import Base
+from app.repositories.study_message_repository import StudyMessageRepository
 from app.repositories.study_session_repository import StudySessionRepository
 from app.repositories.user_repository import UserRepository
 from app.services.interview_practice_service import InterviewPracticeService
+from app.services.quiz_service import QuizService
 from app.services.rag_service import RagService
 from app.services.study_service import StudyService
 
@@ -43,6 +46,21 @@ class _CheckingOllamaService:
     async def generate(self, prompt, model):
         self.checked_out_during_call = self.engine.pool.checkedout()
         return "첫 질문"
+
+    async def generate_json(self, prompt, model, schema):
+        self.checked_out_during_call = self.engine.pool.checkedout()
+        return json.dumps(
+            {
+                "questions": [
+                    {
+                        "question": "질문",
+                        "choices": ["가", "나"],
+                        "correct_answer": "가",
+                        "explanation": "설명",
+                    }
+                ]
+            }
+        )
 
 
 def _make_engine():
@@ -131,6 +149,60 @@ def test_stream_message_releases_db_connection_before_ai_call():
                     session_id=study_session.id, user_id=user.id, content="안녕"
                 ):
                     pass
+
+            return fake.checked_out_during_call
+        finally:
+            await engine.dispose()
+            if os.path.exists(path):
+                os.unlink(path)
+
+    checked_out_during_call = asyncio.run(_run())
+    assert checked_out_during_call == 0
+
+
+def test_create_quiz_from_study_session_releases_db_connection_before_ai_call():
+    """quiz_service.create_quiz()가 study_session_id로 퀴즈를 만들 때도 같은
+    이유로(위 테스트들 docstring 참고) 학습 세션 조회(get_for_user/list_
+    for_session)로 source_text를 조립한 뒤, 몇 초~몇십 초(재시도 포함 최대
+    2분) 걸릴 수 있는 AI 호출(generate_json()) 전에 DB 커넥션을 커넥션
+    풀에 돌려주는지 확인한다. source_text를 직접 붙여넣는 경로는 애초에
+    이 분기의 DB 조회 자체가 없어 이 문제가 없다(재현 과정에서 함께
+    확인함) - study_session_id 경로만 대상이다."""
+    settings = get_settings()
+    engine, path = _make_engine()
+
+    async def _run():
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+            async with session_factory() as session:
+                user = await UserRepository(session).create_guest()
+                await session.commit()
+                study_session = await StudySessionRepository(session).create(
+                    user_id=user.id, title="풀 테스트", model="qwen2.5:3b"
+                )
+                await session.commit()
+                await StudyMessageRepository(session).create(
+                    session_id=study_session.id, role="user", content="안녕"
+                )
+                await session.commit()
+
+                fake = _CheckingOllamaService(engine)
+                rag = RagService(session=session, ollama_service=fake, settings=settings)
+                service = QuizService(
+                    session=session, ollama_service=fake, rag_service=rag, settings=settings
+                )
+
+                await service.create_quiz(
+                    user_id=user.id,
+                    title="퀴즈",
+                    study_session_id=study_session.id,
+                    source_text=None,
+                    question_count=1,
+                    model="qwen2.5:3b",
+                )
 
             return fake.checked_out_during_call
         finally:

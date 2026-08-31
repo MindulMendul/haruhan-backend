@@ -7538,3 +7538,53 @@
       INTEGRATION.md` 갱신도, DB 스키마 변경이 없어 마이그레이션도
       필요 없었다.
 
+## 백로그 (195라운드)
+
+- [x] 219. `QuizService.create_quiz()`가 학습 세션에서 퀴즈를 만들 때
+      (`study_session_id`로 생성하는 경로)도 193/194라운드가 이미 고친
+      것과 같은 종류의 DB 커넥션 풀 고갈 위험을 그대로 안고 있던 문제
+      해소 - 193라운드 자체가 남긴 기록에서 `create_quiz`를 "AI 호출
+      전에 DB를 안 건드리는 안전한 패턴을 따르는 곳"으로 (부분적으로
+      틀리게) 인용했는데, 그 판단은 `source_text`를 직접 붙여넣는
+      경로에만 맞고 `study_session_id`로 만드는 경로는 확인된 적이
+      없던 사각지대였다.
+
+      `create_quiz()`의 `study_session_id` 분기는 `get_for_user()`/
+      `list_for_session()`으로 학습 세션과 그 메시지들을 조회해
+      `source_text`를 조립한 뒤, 그 사이 커밋/롤백을 한 번도 안 하고
+      곧바로 `_generate_quiz()`(재시도 포함 최대 `_MAX_QUIZ_GENERATION_
+      ATTEMPTS`×60초=최대 2분 걸릴 수 있는 Ollama 호출)로 넘어간다 -
+      193/194라운드가 고친 것들과 정확히 같은 모양의 문제다. 반면
+      `source_text`를 직접 붙여넣는 경로는 이 분기 자체를 안 타서 애초에
+      DB 조회가 없다 - 193라운드의 "create_quiz는 이미 안전한 패턴을
+      따른다"는 인용이 이 두 경로를 구분하지 않고 뭉뚱그린 것이었다.
+
+      193/194라운드와 같은 방식(`tests/test_ai_call_releases_db_
+      connection.py`의 재현 기법 - 파일 기반 SQLite + `pool_size=1`
+      엔진에서 AI 호출 시점의 `engine.pool.checkedout()`을 직접 확인)으로
+      실제 재현했다 - `study_session_id`로 생성하면 `checked_out_
+      during_call == 1`(AI 호출 도중에도 커넥션이 안 풀림), `source_text`
+      직접 붙여넣기로 생성하면 `== 0`(이미 안전함)으로, 코드베이스 자신의
+      기존 가정이 절반만 맞았다는 것까지 함께 확인했다.
+
+      `study_session_id` 분기 끝(`source_text` 조립/길이 제한 적용이
+      다 끝난 뒤, `_generate_quiz()` 호출 전)에 `await self._session.
+      commit()`을 추가했다 - 이 시점 이후로 `study_session`/`messages`
+      ORM 객체는 다시 참조되지 않고(`study_session_id`는 이미 함수
+      인자로 따로 갖고 있어 이후 그 UUID만 씀) `source_text`도 이미
+      순수 문자열로 뽑아둔 뒤라, 193라운드가 확인한 것과 같은 이유로
+      (이 세션 팩토리는 `expire_on_commit=False`) commit()이 안전하다.
+
+      `tests/test_ai_call_releases_db_connection.py`에 4번째 테스트로
+      추가했다(같은 파일의 기존 세 테스트와 같은 패턴) - `study_session_
+      id`로 퀴즈를 생성할 때 AI 호출(`generate_json`) 시점에 커넥션이
+      이미 반납돼 있는지 확인한다. `git stash`로 `quiz_service.py`
+      수정만 되돌리면 정확히 위에서 재현한 것과 똑같은 증상
+      (`checked_out_during_call == 1`)으로 실패하는 것까지 확인했다.
+
+      전체 625개 테스트 통과(624 → 625), `services/quiz_service.py`
+      커버리지 100% 유지, `mypy app tests scripts` 클린. 클라이언트에게
+      보내는 응답/프로토콜은 전혀 안 바뀌는(내부 트랜잭션 경계만
+      조정하는) 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

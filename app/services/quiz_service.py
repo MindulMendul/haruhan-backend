@@ -130,6 +130,19 @@ class QuizService:
                 if newline_index != -1:
                     source_text = source_text[newline_index + 1 :]
 
+            # study_service.send_message 등과 같은 이유(193라운드 참고)로,
+            # 이 분기의 DB 조회(get_for_user/list_for_session) 뒤 커밋/롤백을
+            # 안 하면 SQLAlchemy가 트랜잭션이 끝날 때까지 DB 커넥션을 계속
+            # 붙들고 있어서, 바로 아래 몇 초~몇십 초 걸릴 수 있는 AI 호출
+            # (_generate_quiz, 재시도 포함 최대 2분) 내내 커넥션 하나가
+            # 묶인다 - 실제로 파일 기반 SQLite 풀로 재현해 확인했다. study_
+            # session/messages는 여기까지의 source_text 조립에만 쓰이고
+            # 이 시점 이후로는(study_session_id는 이미 함수 인자로 따로
+            # 갖고 있음) 다시 참조되지 않으므로, 커밋해도(이 세션 팩토리는
+            # expire_on_commit=False라 커넥션만 반납되고 이미 로드한
+            # 객체는 만료되지 않음) 안전하다.
+            await self._session.commit()
+
         # 둘 중 하나는 반드시 있어야 한다는 건 요청 스키마(QuizCreateRequest)가 이미
         # 검증했다 - study_session_id 분기에서 못 채웠다면 source_text가 채워져 있어야 함.
         assert source_text is not None
