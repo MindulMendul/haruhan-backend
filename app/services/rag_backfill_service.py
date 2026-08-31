@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -145,6 +146,53 @@ async def backfill_unindexed_content(
     return message_count, review_count, quiz_count, turn_count
 
 
+_SOURCE_MODELS: dict[str, Any] = {
+    "study_message": StudyMessage,
+    "interview_review": InterviewReview,
+    "quiz_source": Quiz,
+    "interview_practice_turn": InterviewPracticeTurn,
+}
+
+
+async def sweep_orphaned_chunks(
+    session: AsyncSession, rag_service: RagService, settings: Settings
+) -> int:
+    """`index_content()`의 원본 커밋 → 임베딩 호출(느린 네트워크 I/O) → 색인 커밋
+    사이에, 다른 요청이 그 원본을 지워버리면(퀴즈/학습 세션/면접복기/면접연습
+    전부 잠금 없는 조회 뒤 delete) 삭제 쪽의 forget_content()는 그 시점엔 아직
+    존재하지도 않는 색인을 찾다가 조용히 아무 일도 안 하고 끝나고, 뒤늦게 끝난
+    index_content()가 이미 지워진 원본을 가리키는 색인을 새로 만들어버린다 -
+    KnowledgeChunk.source_id는 FK가 아니라(폴리모픽 참조라 걸 수 없음) DB
+    제약으로도 못 막는다. 131라운드가 이 경쟁을 발견했지만 "학습챗 경로에
+    잠금 규율을 새로 들여오는 건 위험하다"며 보류했다 - 그 판단을 그대로
+    따르되, 요청 경로에 아무것도 손대지 않고 이미 있는 이 일일 backfill job에
+    "원본이 없어진 색인을 찾아 지우는" 정반대 방향의 조회를 추가하는 것으로
+    사후에 청소한다(멱등적이라 다음날 다시 돌아도 안전, 매 요청 경로 성능에는
+    전혀 영향 없음).
+
+    원본이 사라진 뒤에도 남은 이 색인은 단순히 방치되는 게 아니라
+    retrieve_relevant()를 통해 계속 미래의 AI 그라운딩에 실제로 쓰인다 -
+    사용자가 지웠다고 믿는 내용이 나중에 다른 질문의 답변에 근거 자료로
+    다시 등장할 수 있다는 뜻이라, 98라운드가 "삭제 시 forget_content 호출
+    자체가 없던" 문제를 고친 것과 같은 성격의 프라이버시 문제를 다른 경로로
+    재현한다.
+    """
+    total = 0
+    for source_type, model in _SOURCE_MODELS.items():
+        rows = await session.execute(
+            select(KnowledgeChunk.source_id)
+            .outerjoin(model, model.id == KnowledgeChunk.source_id)
+            .where(KnowledgeChunk.source_type == source_type, model.id.is_(None))
+            .limit(settings.rag_backfill_batch_size)
+        )
+        orphan_ids = [row[0] for row in rows.all()]
+        if orphan_ids:
+            await rag_service.forget_content_bulk(source_type=source_type, source_ids=orphan_ids)
+        total += len(orphan_ids)
+        _log_if_batch_capped(f"{source_type} (고아 색인 정리)", len(orphan_ids), settings.rag_backfill_batch_size)
+    return total
+
+
 def _log_if_batch_capped(source_type: str, processed_count: int, batch_size: int) -> None:
     """처리 건수가 상한에 딱 맞으면(=더 남아있을 가능성) 운영자가 눈치챌 수 있도록
     남긴다 - 며칠 연속 이 로그가 찍히면 백로그가 쌓이고 있다는 신호다. 못 처리한
@@ -158,7 +206,8 @@ def _log_if_batch_capped(source_type: str, processed_count: int, batch_size: int
 
 
 async def run_scheduled_rag_backfill() -> None:
-    """스케줄러 job 엔트리포인트: 아직 색인 안 된 항목만 재시도한다."""
+    """스케줄러 job 엔트리포인트: 아직 색인 안 된 항목을 재시도하고, 원본이
+    이미 지워진 고아 색인을 정리한다(179라운드)."""
     settings = get_settings()
     ollama_service = OllamaService(base_url=settings.ollama_base_url)
     try:
@@ -168,13 +217,15 @@ async def run_scheduled_rag_backfill() -> None:
                 message_count, review_count, quiz_count, turn_count = await backfill_unindexed_content(
                     session, rag_service, settings
                 )
+                orphan_count = await sweep_orphaned_chunks(session, rag_service, settings)
             logger.info(
                 "[RAG 백필] 새로 색인: study_message %d건, interview_review %d건, "
-                "quiz_source %d건, interview_practice_turn %d건",
+                "quiz_source %d건, interview_practice_turn %d건 / 원본이 없어져 정리한 고아 색인 %d건",
                 message_count,
                 review_count,
                 quiz_count,
                 turn_count,
+                orphan_count,
             )
         except RuntimeError:
             logger.warning("[RAG 백필] DB 엔진이 초기화되지 않아 건너뜁니다.")

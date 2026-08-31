@@ -21,7 +21,11 @@ from app.repositories.study_message_repository import StudyMessageRepository
 from app.repositories.study_session_repository import StudySessionRepository
 from app.repositories.user_repository import UserRepository
 from app.services.ollama_service import OllamaService, OllamaServiceError
-from app.services.rag_backfill_service import backfill_unindexed_content, run_scheduled_rag_backfill
+from app.services.rag_backfill_service import (
+    backfill_unindexed_content,
+    run_scheduled_rag_backfill,
+    sweep_orphaned_chunks,
+)
 from app.services.rag_service import RagService
 
 
@@ -314,6 +318,174 @@ def test_backfill_unindexed_content_recovers_interview_practice_turn_after_faile
             indexed_turns = await chunks.get_indexed_source_ids("interview_practice_turn")
             assert indexed_turns == {answered_turn.id}
             assert unanswered_turn.id not in indexed_turns
+
+    asyncio.run(_run())
+
+
+def test_sweep_orphaned_chunks_removes_chunks_whose_source_no_longer_exists(db_session_factory):
+    """`RagService.index_content()`는 원본을 이미 커밋한 "뒤"(느린 임베딩 호출을
+    거쳐) 색인을 만든다 - 그 사이 다른 요청이 원본을 지우면(퀴즈/학습 세션/
+    면접복기/면접연습 전부 잠금 없는 조회 뒤 delete), 삭제 쪽의 forget_content()
+    는 그 시점엔 아직 없는 색인을 찾다가 조용히 아무 일도 안 하고, 뒤늦게 끝난
+    index_content()가 이미 지워진 원본을 가리키는 색인을 새로 만들어버린다 -
+    KnowledgeChunk.source_id는 폴리모픽 참조라 FK로도 못 막는다(131라운드가
+    발견했지만 "채팅 경로에 잠금을 새로 들이는 건 위험하다"며 보류한 경쟁).
+    네 가지 source_type 전부에서, 원본이 없는 채로 남은 색인을 이 함수가
+    찾아 지우는지 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            chunks = KnowledgeChunkRepository(session)
+            orphan_ids = {}
+            for source_type in (
+                "study_message",
+                "interview_review",
+                "quiz_source",
+                "interview_practice_turn",
+            ):
+                # 원본이 이미 지워진 뒤 뒤늦게 색인이 만들어진 상황을 그대로
+                # 재현한다 - 존재하지 않는 source_id를 가리키는 색인만 직접 만든다.
+                orphan = await chunks.create(
+                    user_id=user.id,
+                    source_type=source_type,
+                    source_id=uuid.uuid4(),
+                    content="원본이 사라진 내용",
+                    embedding=[1.0, 0.0, 0.0],
+                    embedding_model=settings.embedding_model,
+                )
+                orphan_ids[source_type] = orphan.id
+            await session.commit()
+
+            rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
+            removed = await sweep_orphaned_chunks(session, rag, settings)
+            await session.commit()
+
+            assert removed == 4
+            remaining = await chunks.list_for_user(
+                user.id, embedding_model=settings.embedding_model, limit=100
+            )
+            assert remaining == []
+
+    asyncio.run(_run())
+
+
+def test_sweep_orphaned_chunks_keeps_chunks_whose_source_still_exists(db_session_factory):
+    """원본이 아직 살아있는 정상 색인까지 지워버리면 RAG 검색 자체가 무력화된다 -
+    거짓 양성이 없는지 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen"
+            )
+            message = await StudyMessageRepository(session).create(
+                session_id=study_session.id, role="user", content="아직 살아있는 메시지"
+            )
+            await session.commit()
+
+            rag = RagService(session=session, ollama_service=FakeEmbeddingOllamaService(), settings=settings)
+            await rag.index_content(
+                user_id=user.id, source_type="study_message", source_id=message.id, content=message.content
+            )
+
+            removed = await sweep_orphaned_chunks(session, rag, settings)
+            await session.commit()
+
+            assert removed == 0
+            chunks = KnowledgeChunkRepository(session)
+            indexed = await chunks.get_indexed_source_ids("study_message")
+            assert indexed == {message.id}
+
+    asyncio.run(_run())
+
+
+def test_sweep_orphaned_chunks_cleans_up_after_index_content_races_with_delete(db_session_factory):
+    """위 두 테스트가 sweep_orphaned_chunks 자체를 직접 검증한다면, 이 테스트는
+    그 함수가 지우는 고아 색인이 실제로 이 경쟁(원본 커밋 → 느린 임베딩 호출
+    도중 다른 요청이 원본을 지움 → 뒤늦게 색인 생성)에서 나온다는 것 자체를
+    end-to-end로 재현한다 - 가짜 Ollama의 embed()가 반환하기 "직전"에 별도
+    세션에서 방금 만든 퀴즈를 완전히 지우도록 만들어 이 타이밍을 결정적으로
+    재현한다(143라운드 계열이 확립한 기법과 동일)."""
+    from app.services.quiz_service import QuizService
+
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+            user_id = user.id
+            quiz_holder: dict[str, uuid.UUID] = {}
+
+            class RacingOllamaService:
+                async def generate_json(self, prompt, model, schema):
+                    import json as _json
+
+                    return _json.dumps(
+                        {
+                            "questions": [
+                                {
+                                    "question": "질문?",
+                                    "choices": ["A", "B"],
+                                    "correct_answer": "A",
+                                    "explanation": "설명",
+                                }
+                            ]
+                        }
+                    )
+
+                async def embed(self, text, model):
+                    async with db_session_factory() as session_b:
+                        rag_b = RagService(session=session_b, ollama_service=None, settings=settings)
+                        service_b = QuizService(
+                            session=session_b, ollama_service=None, rag_service=rag_b, settings=settings
+                        )
+                        await service_b.delete_quiz(quiz_holder["id"], user_id)
+                    return [1.0, 0.0, 0.0]
+
+            ollama = RacingOllamaService()
+            rag = RagService(session=session_a, ollama_service=ollama, settings=settings)
+            service = QuizService(session=session_a, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            original_create = type(service._quizzes).create
+
+            async def _capturing_create(self, *args, **kwargs):
+                quiz = await original_create(self, *args, **kwargs)
+                quiz_holder["id"] = quiz.id
+                return quiz
+
+            type(service._quizzes).create = _capturing_create
+            try:
+                quiz = await service.create_quiz(
+                    user_id=user_id,
+                    title="퀴즈",
+                    study_session_id=None,
+                    source_text="직접 붙여넣은 소스",
+                    question_count=1,
+                    model="qwen2.5:3b",
+                )
+            finally:
+                type(service._quizzes).create = original_create
+
+            still_exists = await QuizRepository(session_a).get_for_user(quiz.id, user_id)
+            assert still_exists is None  # 경쟁하는 동안 실제로 지워졌다
+
+            chunks = KnowledgeChunkRepository(session_a)
+            before = await chunks.list_for_user(user_id, embedding_model=settings.embedding_model, limit=100)
+            assert [c.source_id for c in before] == [quiz.id]  # 지워진 퀴즈를 가리키는 고아 색인
+
+            removed = await sweep_orphaned_chunks(session_a, rag, settings)
+            await session_a.commit()
+            assert removed == 1
+
+            after = await chunks.list_for_user(user_id, embedding_model=settings.embedding_model, limit=100)
+            assert after == []
 
     asyncio.run(_run())
 

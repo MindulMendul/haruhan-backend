@@ -6514,3 +6514,75 @@
       실리기만 하는 순수 추가라 DB 스키마 변경이 없어 마이그레이션도
       필요 없었다.
 
+## 백로그 (179라운드)
+
+- [x] 203. `RagService.index_content()`가 원본 삭제와 경쟁하면 이미 지워진
+      리소스를 가리키는 "고아" RAG 색인을 영구히 남기던 문제 해소 -
+      131라운드가 이 경쟁(`send_message`/`stream_message` 같은 채팅
+      경로에서 발견)을 찾았지만 "학습챗 경로에 아직 없는 잠금 규율을
+      새로 들여오는 건 더 크고 위험한 변경"이라며 그 라운드 범위에서는
+      명시적으로 보류했었다 - 이번 라운드에서 그 판단은 그대로 존중하되
+      (요청 경로는 전혀 안 건드림), 실제로 발생한 고아 색인을 사후에
+      청소하는 별도 방법으로 마무리했다.
+
+      `index_content()`는 (1) 기존 색인 삭제 (2) 느린 임베딩 API 호출
+      (3) 새 색인 커밋 순서로 동작하는데, 모든 호출부(퀴즈/학습챗/면접복기/
+      면접연습)가 원본을 이미 커밋한 "뒤"에 이 메서드를 부른다. (2)번
+      단계가 진행되는 동안 다른 요청이 그 원본을 지우면 - 퀴즈/학습
+      세션/면접복기/면접연습 삭제 경로 전부 잠금 없는 조회 뒤 delete라
+      - 삭제 쪽의 `forget_content()`는 그 시점엔 아직 없는 색인을 찾다가
+      조용히 아무 일도 안 하고 끝나고, 뒤늦게 끝난 `index_content()`가
+      이미 지워진 원본을 가리키는 색인을 새로 만들어버린다.
+      `KnowledgeChunk.source_id`는 여러 테이블을 가리키는 폴리모픽
+      참조라 FK 제약을 걸 수 없어(모델 자신의 주석에 명시) DB 레벨에서도
+      못 막는다.
+
+      실제로 재현했다 - 가짜 Ollama의 `embed()`가 반환하기 "직전"에
+      별도 세션에서 방금 커밋된 퀴즈를 `QuizService.delete_quiz()`로
+      완전히 지우도록 만들어(143라운드 계열 기법) `create_quiz()`를
+      실행하면, 퀴즈는 실제로 지워졌는데(`get_for_user` 결과 `None`)
+      `knowledge_chunks`에는 그 퀴즈 id를 가리키는 행이 1개 남는 것을
+      확인했다. 이 고아 색인은 방치되는 게 아니라 `retrieve_relevant()`를
+      통해 계속 미래의 AI 답변 그라운딩에 실제로 쓰인다 - 사용자가
+      지웠다고 믿는 내용이 나중에 다른 질문의 답변 근거로 다시 등장할
+      수 있다는 뜻이라, 98라운드가 "삭제 시 `forget_content` 호출 자체가
+      없던" 문제를 고친 것과 같은 성격의 프라이버시 문제를 다른 경로로
+      재현한다.
+
+      요청 경로에는 아무것도 안 건드리고, 이미 있는 일일 RAG 백필
+      cron(`rag_backfill_service.py`)에 정반대 방향의 조회를 추가했다 -
+      기존 `backfill_unindexed_content`가 "원본은 있는데 색인이 없는"
+      행을 `LEFT JOIN ... WHERE 색인.id IS NULL`로 찾는다면, 새
+      `sweep_orphaned_chunks`는 "색인은 있는데 원본이 없는" 행을
+      `knowledge_chunks LEFT JOIN 원본테이블 ... WHERE 원본.id IS NULL`
+      로 찾아 `forget_content_bulk`로 지운다. 네 source_type
+      (`study_message`/`interview_review`/`quiz_source`/
+      `interview_practice_turn`) 전부를 같은 모양의 루프로 처리하고,
+      기존과 같은 `rag_backfill_batch_size` 상한/배치-상한-경고 로그를
+      그대로 재사용했다. `run_scheduled_rag_backfill()`이 기존
+      백필 다음에 이 스윕도 호출하고, 로그에 정리된 건수를 덧붙였다.
+
+      `tests/test_rag_backfill_service.py`에 3개를 추가했다 -
+      `sweep_orphaned_chunks`가 (1) 원본 없는 색인 4종 전부를 지우는지,
+      (2) 원본이 살아있는 정상 색인은 안 건드리는지(오탐 없음), (3) 위
+      실제 경쟁(가짜 Ollama가 `embed()` 도중 별도 세션으로 퀴즈를
+      지움)에서 나온 고아 색인을 end-to-end로 정리하는지. `git stash`로
+      `rag_backfill_service.py` 수정만 되돌리면 (새 함수가 아예 없어)
+      정확히 실패하는 것까지 확인했다.
+
+      전체 588개 테스트 통과, `app/services/rag_backfill_service.py`
+      커버리지 100%, `mypy app tests scripts` 클린. 색인/검색 응답
+      스키마는 전혀 바뀌지 않는 순수 백그라운드 정리 작업 추가라 `docs/
+      FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어(기존
+      `source_type`/`source_id` 인덱스를 그대로 씀) 마이그레이션도
+      필요 없었다.
+
+      (이번 라운드는 처음에 "AI가 생성하는 텍스트에 길이 상한이 없다"는
+      조사 결과로 시작했으나, 사실관계는 맞았지만(실제로 `num_predict`가
+      어디에도 없음) `quiz_question.py`의 `correct_answer` 컬럼을 이미
+      과거 라운드가 의도적으로 무제한 `Text`로 넓혀 "AI 출력은 길이
+      제한이 없다"는 걸 이미 받아들인 트레이드오프였고, 실제로 재현되는
+      크래시나 자원 고갈이 없어(기존 재시도+502 패턴이 이미 깨진 JSON을
+      우아하게 처리함) 사변적인 하드닝일 뿐 진짜 결함이 아니라고 판단해
+      기각하고 다시 조사했다.)
+
