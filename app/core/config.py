@@ -241,6 +241,31 @@ class Settings(BaseSettings):
         등)처럼 "무엇을 의도했는지 알 수 없는" 경우가 아니다."""
         return value.rstrip("/")
 
+    @field_validator("cors_origins")
+    @classmethod
+    def _strip_trailing_slash_from_cors_origins(cls, value: str) -> str:
+        """Starlette의 `CORSMiddleware.is_allowed_origin()`은 브라우저가 보낸
+        `Origin` 헤더를 `origin in self.allow_origins`로 정확히 문자열
+        일치시킬 뿐 정규화하지 않는다 - 그런데 브라우저는 `Origin` 헤더에
+        경로를 절대 안 붙인다(`scheme://host[:port]`뿐, 트레일링 슬래시
+        없음). 운영자가 브라우저 주소창이나 Vercel의 "Domains" 목록에서
+        그대로 복사하면(이 프로젝트의 실제 프론트 도메인이 바로 그런
+        Vercel 배포다) 트레일링 슬래시가 붙은 `CORS_ORIGINS=https://
+        example.com/`이 되기 쉬운데, 이러면 실제 브라우저가 보내는
+        `Origin: https://example.com`과 정확히 일치하지 않아 그 origin의
+        모든 cross-origin 요청이 조용히 막힌다 - 실제 앱으로 직접
+        재현했다: 트레일링 슬래시가 있으면 단순 요청엔 `Access-Control-
+        Allow-Origin` 헤더 자체가 안 붙고, preflight는 `400 Disallowed
+        CORS origin`으로 거부된다(슬래시 없이 같은 origin으로 요청하면
+        정상적으로 허용됨). `Settings()` 생성과 앱 부팅 자체는 멀쩡히
+        성공하고 로그인/DB 등 나머지 기능도 전혀 문제 없어 보이는데,
+        그 프론트 도메인에서 오는 모든 API 호출만 조용히 깨지는(브라우저
+        콘솔엔 그냥 알 수 없는 네트워크 오류로 보임) 시작 시점에는 전혀
+        티가 안 나는 문제다 - `ollama_base_url`과 같은 이유로, 거부하는
+        대신 콤마로 나눈 각 origin의 트레일링 슬래시만 조용히 제거한다."""
+        origins = [origin.strip().rstrip("/") for origin in value.split(",") if origin.strip()]
+        return ",".join(origins)
+
     @field_validator("chat_rate_limit", "auth_rate_limit", "export_rate_limit", "models_rate_limit")
     @classmethod
     def _validate_rate_limit_string(cls, value: str) -> str:

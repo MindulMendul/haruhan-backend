@@ -51,3 +51,30 @@ def test_unlisted_origin_is_not_allowed(monkeypatch):
         response = client.get("/health", headers={"Origin": "https://evil.example"})
 
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_configured_origin_with_trailing_slash_is_still_allowed(monkeypatch):
+    """Starlette의 CORSMiddleware는 Origin 헤더를 정확한 문자열로만 비교한다 -
+    브라우저는 Origin 헤더에 경로를 절대 안 붙이므로, CORS_ORIGINS를 브라우저
+    주소창/Vercel 도메인 목록에서 그대로 복사해 트레일링 슬래시가 붙으면
+    (예: "https://example.com/") 실제 브라우저가 보내는 "https://example.com"
+    과 문자열이 정확히 안 맞아 그 origin의 모든 cross-origin 요청이 조용히
+    막힌다. 단순 요청과 preflight 둘 다 트레일링 슬래시가 있어도 정상적으로
+    허용되는지 확인한다."""
+    monkeypatch.setenv("CORS_ORIGINS", "https://example.com/")
+    get_settings.cache_clear()
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/health", headers={"Origin": "https://example.com"})
+        assert response.headers.get("access-control-allow-origin") == "https://example.com"
+
+        preflight = client.options(
+            "/health",
+            headers={
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers.get("access-control-allow-origin") == "https://example.com"

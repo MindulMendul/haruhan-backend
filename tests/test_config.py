@@ -309,3 +309,18 @@ def test_settings_strips_trailing_slash_from_ollama_base_url():
 def test_settings_leaves_ollama_base_url_without_trailing_slash_unchanged():
     settings = Settings(jwt_secret_key="a" * 32, ollama_base_url="http://localhost:11434")
     assert settings.ollama_base_url == "http://localhost:11434"
+
+
+def test_settings_strips_trailing_slash_from_cors_origins():
+    """Starlette의 CORSMiddleware.is_allowed_origin()은 Origin 헤더를 정확한
+    문자열로만 비교한다 - 브라우저는 Origin 헤더에 경로를 절대 안 붙이므로,
+    CORS_ORIGINS에 트레일링 슬래시가 붙으면(브라우저 주소창/Vercel 도메인
+    목록에서 그대로 복사하는 등 흔한 실수) 그 origin의 모든 cross-origin
+    요청이 조용히 막힌다(직접 재현해 확인함). 거부 대신 조용히 정규화한다."""
+    settings = Settings(jwt_secret_key="a" * 32, cors_origins="https://a.com/,https://b.com")
+    assert settings.cors_origin_list == ["https://a.com", "https://b.com"]
+
+
+def test_settings_leaves_cors_origins_without_trailing_slash_unchanged():
+    settings = Settings(jwt_secret_key="a" * 32, cors_origins="https://a.com,https://b.com")
+    assert settings.cors_origin_list == ["https://a.com", "https://b.com"]

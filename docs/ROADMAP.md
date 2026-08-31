@@ -6734,3 +6734,53 @@
       스키마/API 응답에 영향이 없어 `docs/FRONTEND_INTEGRATION.md`
       갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (183라운드)
+
+- [x] 207. `CORS_ORIGINS`에 트레일링 슬래시가 붙으면 그 origin의 모든
+      cross-origin 요청이 조용히 막히던 문제 해소 - Starlette의
+      `CORSMiddleware.is_allowed_origin()`은 브라우저가 보낸 `Origin`
+      헤더를 `origin in self.allow_origins`로 정확한 문자열 일치만
+      본다(정규화 없음). 그런데 브라우저는 `Origin` 헤더에 절대 경로를
+      안 붙인다(`scheme://host[:port]`뿐) - 운영자가 브라우저 주소창이나
+      Vercel의 "Domains" 목록(`docs/FRONTEND_INTEGRATION.md`가 명시하는
+      이 프로젝트의 실제 프론트 배포 형태)에서 그대로 복사하면
+      `CORS_ORIGINS=https://example.com/`처럼 트레일링 슬래시가 붙기
+      쉬운데, 이러면 실제 브라우저가 보내는 `Origin: https://
+      example.com`과 문자열이 정확히 안 맞는다. 182라운드가
+      `OLLAMA_BASE_URL`에서 고친 것과 같은 부류(트레일링 슬래시로
+      인한 정확 일치 실패)지만 완전히 다른 필드/라이브러리/실패
+      양상이라 별개로 조사·수정했다.
+
+      실제 앱으로 직접 재현했다 - 트레일링 슬래시가 붙은
+      `CORS_ORIGINS`로 띄운 서버에 슬래시 없는 실제 origin으로 단순
+      요청을 보내면 `Access-Control-Allow-Origin` 헤더 자체가 안
+      붙고, preflight(`OPTIONS`)는 `400 Disallowed CORS origin`으로
+      거부되는 것을 확인했다 - 트레일링 슬래시 없이 같은 origin으로
+      보내면 둘 다 정상적으로 허용됨과 대조. `Settings()` 생성과 앱
+      부팅 자체는 멀쩡히 성공하고 로그인/DB/Ollama 등 나머지 기능도
+      전혀 문제 없어 보이는데, 그 프론트 도메인에서 오는 모든 API
+      호출만 조용히 막히는(브라우저 콘솔엔 그냥 알 수 없는 네트워크
+      오류로만 보임) 시작 시점에는 전혀 티가 안 나는 문제다.
+      `docs/ROADMAP.md`에서 `CORS_ORIGINS`를 다룬 유일한 기존 항목
+      (37라운드/#61)은 `expose_headers` 누락 문제였을 뿐 origin 문자열
+      자체의 정규화는 다룬 적이 없었고, 174라운드(X-Forwarded-For,
+      기각됨)/179라운드(CORS 메서드/헤더/자격증명 설정 재검토, 이상
+      없음 확인)도 이 각도는 건드리지 않았다.
+
+      `app/core/config.py`에 `_strip_trailing_slash_from_cors_origins`
+      field_validator를 추가했다 - `ollama_base_url`과 같은 이유로
+      거부 대신, 콤마로 나눈 각 origin의 트레일링 슬래시만 조용히
+      제거한다(`cors_origin_list` 프로퍼티는 이미 정규화된 문자열을
+      그대로 다시 나누므로 손댈 필요 없음). `tests/test_config.py`에
+      트레일링 슬래시가 제거되는지/이미 없으면 그대로인지 확인하는
+      단위 테스트 2개를, `tests/test_cors.py`에 트레일링 슬래시가
+      붙은 `CORS_ORIGINS`로도 단순 요청과 preflight 둘 다 실제로
+      허용되는지 확인하는 end-to-end 테스트 1개를 추가했다. `git
+      stash`로 `config.py`만 되돌리면 새 테스트 2개(단위 테스트 1개 +
+      end-to-end 테스트 1개)가 정확히 실패하는 것까지 확인했다.
+
+      전체 597개 테스트 통과, `app/core/config.py` 커버리지 100%,
+      `mypy app tests scripts` 클린. 설정값 정규화만 하는 변경이라
+      스키마/API 응답에 영향이 없어 `docs/FRONTEND_INTEGRATION.md`
+      갱신도, DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+
