@@ -6586,3 +6586,51 @@
       우아하게 처리함) 사변적인 하드닝일 뿐 진짜 결함이 아니라고 판단해
       기각하고 다시 조사했다.)
 
+## 백로그 (180라운드)
+
+- [x] 204. `CREATE INDEX CONCURRENTLY`를 쓰는 두 마이그레이션
+      (`f8c776ddf837`의 `knowledge_chunks` 복합 인덱스, `8a9d7f4d33d6`의
+      `quizzes.source_study_session_id`)이 빌드 도중 끊기면 그 뒤로
+      영원히 재배포가 막히던 문제 해소 - 104/139/195라운드가 왜
+      `CONCURRENTLY`가 필요한지(비-concurrent `CREATE INDEX`는 빌드가
+      끝날 때까지 테이블 쓰기를 막는 락을 쥔다)는 자세히 남겼지만, 그
+      빌드 자체가 배포 타임아웃/컨테이너 강제 종료/DB 커넥션 유실로
+      중간에 끊기면 어떻게 되는지는 어느 라운드도 다루지 않았다 - 지금까지
+      고친 StaleDataError류 UPDATE 경쟁이나 ORDER BY 동률과는 완전히
+      다른 성격의(마이그레이션 자체의 재실행 가능성) 문제라 겹치지 않는다.
+
+      로컬 Postgres 16으로 실제 중단 상황을 재현했다 - 다른 트랜잭션이
+      테이블에 락을 쥐고 있어 `CREATE INDEX CONCURRENTLY`가 대기하는
+      동안 그 백엔드를 `pg_terminate_backend`로 강제 종료하면, Postgres는
+      그 인덱스를 지우지 않고 `indisvalid=false`인 채로 남긴다. 이 상태로
+      `alembic upgrade head`를 다시 돌리면(중단된 배포 뒤 재배포가 정확히
+      하는 일) `DuplicateTableError: relation "..." already exists`로
+      실패하고, 그 뒤로는 알렘빅이 이 리비전에 영영 멈춘 채 재배포할
+      때마다 계속 같은 에러를 낸다 - DBA가 수동으로 접속해 `DROP INDEX
+      CONCURRENTLY`를 실행해야만 풀린다. "그냥 `IF NOT EXISTS`를 붙이면
+      되지 않을까"도 직접 확인해봤는데, 그러면 조용히 스킵되고 종료
+      코드는 0이지만 인덱스는 여전히 `indisvalid=false`인 채로(=검색에
+      전혀 안 쓰임) 영원히 남아 아무 에러 신호도 없이 더 나쁜 상태가
+      된다는 것까지 확인했다.
+
+      두 마이그레이션의 `upgrade()`에서 `create_index` 직전에
+      `op.execute("DROP INDEX CONCURRENTLY IF EXISTS <인덱스명>")`을
+      같은 `autocommit_block()` 안에 추가했다 - 인덱스가 없으면(정상
+      배포) 아무 일도 안 하고, 이전 시도가 남긴 무효한 인덱스가 있으면
+      지우고 다시 빌드해 재배포만으로 스스로 복구된다. 실제로 재현한
+      중단 상태에 이 수정을 적용해 `alembic upgrade head`가 다시
+      성공하고(`indisvalid=true`로 복구), `alembic check`가 드리프트
+      없음을 확인하고, `downgrade` → `upgrade` 왕복까지 전부 직접
+      검증했다. `downgrade()`(그냥 `DROP INDEX CONCURRENTLY`)는 같은
+      방식으로 중단시켜봐도 재실행이 실패하지 않는다는 것도 확인해
+      (DROP은 관계 이름이 이미 있어도 실패하지 않고 그냥 마저 지움)
+      그쪽은 손대지 않았다.
+
+      순수 마이그레이션 파일 수정이라 SQLite 기반 pytest 스위트에는
+      변화가 없다(104/139/171/195라운드와 같은 "인덱스 전용 변경은
+      실제 Postgres로만 검증, 테스트 개수 변화 없음" 관례를 그대로
+      따름) - 전체 588개 테스트 통과, 전체 커버리지 99%, `mypy app
+      tests scripts` 클린(마이그레이션 디렉터리는 CI의 mypy 대상에도
+      원래 없음). 스키마/API 응답은 전혀 안 바뀌는 배포 견고성 수정이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+
