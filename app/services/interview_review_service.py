@@ -127,10 +127,29 @@ class InterviewReviewService:
                 raise _GENERATION_FAILED from exc
             if "".join(feedback_parts).strip():
                 break
-            # chat_stream()은 content가 있는 조각만 yield하므로(ollama_service.py
-            # 참고), 여기까지 온 채로 feedback_parts가 공백뿐이라는 건 클라이언트에
-            # "delta" 이벤트를 하나도 못 보냈다는 뜻이다 - 아직 아무것도 보여준
-            # 게 없으니 안전하게 통째로 다시 생성한다.
+            if feedback_parts:
+                # chat_stream()은 content가 "있는" 조각만 yield하지만, 그
+                # content가 공백뿐인 문자열(예: " ")이어도 파이썬에서는
+                # truthy라 그대로 yield된다 - 즉 feedback_parts가 비어있지
+                # 않은 채로 여기까지 왔다면 이미 그 공백 조각이 "delta"
+                # 이벤트로 클라이언트에 전송된 뒤다. 이 상태에서 조용히
+                # 다시 생성하면 이번 시도의(이미 보낸) delta 뒤에 다음
+                # 시도의 delta가 이어져, 클라이언트가 delta를 이어붙인
+                # 결과가 최종 done.data.ai_feedback과 달라진다 -
+                # FRONTEND_INTEGRATION.md가 명시하는 "delta를 이어붙이면
+                # done.data.ai_feedback과 같아짐" 계약을 깨는 것을 실제로
+                # 재현해 확인했다(학습챗의 같은 픽스와 동일). 재시도 대신
+                # 바로 실패 처리한다.
+                logger.warning(
+                    "면접 복기 스트리밍 피드백 생성 실패 (시도 %d/%d): 이미 전송된 delta가 "
+                    "공백뿐이라 재시도 대신 즉시 실패 처리",
+                    attempt,
+                    _MAX_GENERATION_ATTEMPTS,
+                )
+                raise _GENERATION_FAILED
+            # feedback_parts가 완전히 비어 있다는 건 클라이언트에 delta
+            # 이벤트를 하나도 못 보냈다는 뜻이다 - 아직 아무것도 보여준 게
+            # 없으니 안전하게 통째로 다시 생성한다.
             logger.warning(
                 "면접 복기 스트리밍 피드백 생성 검증 실패 (시도 %d/%d): 공백뿐임",
                 attempt,

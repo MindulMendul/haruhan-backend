@@ -92,6 +92,26 @@ class RecoversOnRetryOllamaService:
             yield chunk
 
 
+class WhitespaceDeltaLeakOllamaService:
+    """chat_stream()이 공백뿐인 조각(" ")을 하나 yield하고 끝난다 -
+    test_study.py의 같은 클래스와 같은 이유(그쪽 docstring 참고)로, 이
+    조각은 이미 stream_create_review()가 "delta" 이벤트로 클라이언트에
+    전송한 뒤라 조용히 재시도하면 안 된다."""
+
+    def __init__(self):
+        self.chat_stream_call_count = 0
+
+    async def chat(self, messages, model):
+        return "unused"
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        self.chat_stream_call_count += 1
+        yield " "
+
+
 def _signup_and_get_token(client, email="review@example.com"):
     response = client.post(
         "/api/v1/auth/signup", json={"email": email, "password": "supersecret"}
@@ -1012,6 +1032,33 @@ def test_stream_create_review_recovers_when_first_feedback_is_blank(client):
 
     assert deltas == ["잘한", "점입니다"]
     assert fake.chat_stream_call_count == 2
+
+
+def test_stream_create_review_fails_instead_of_retrying_when_leaked_whitespace_delta_already_sent(
+    client,
+):
+    """study.py의 같은 픽스와 같은 이유(그쪽 테스트 docstring 참고)로,
+    공백뿐인 조각이라도 이미 "delta" 이벤트로 클라이언트에 전송된 뒤라면
+    조용히 재시도해선 안 된다 - 재시도 대신 곧바로 error 이벤트로 실패
+    처리되고, chat_stream이 딱 한 번만 호출되는지(=재시도가 실제로 일어나지
+    않는지) 확인한다."""
+    fake = WhitespaceDeltaLeakOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-review-whitespace-leak@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_json(_create_payload())
+
+        events = []
+        while True:
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] in ("done", "error"):
+                break
+
+    assert events[-1]["type"] == "error"
+    assert not any(e["type"] == "done" for e in events)
+    assert fake.chat_stream_call_count == 1
 
 
 def test_stream_create_review_ai_failure_sends_error_event(client):

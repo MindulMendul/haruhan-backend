@@ -86,6 +86,29 @@ class RecoversOnRetryOllamaService:
             yield chunk
 
 
+class WhitespaceDeltaLeakOllamaService:
+    """chat_stream()이 공백뿐인 조각(" ")을 하나 yield하고 끝난다 -
+    OllamaService.chat_stream()은 content가 "있는" 조각만 yield하지만, 그
+    content가 공백뿐이어도 파이썬에서는 truthy라 그대로 yield된다. 이 조각은
+    이미 study_service.stream_message()가 "delta" 이벤트로 클라이언트에
+    전송한 뒤라, 전체 응답이 결국 공백뿐이라고 판단해 조용히 재시도하면
+    이미 보낸 그 delta가 재시도로 만든 새 델타들과 뒤섞여 클라이언트가
+    관찰하는 delta 연결 결과가 최종 done.data.content와 달라진다."""
+
+    def __init__(self):
+        self.chat_stream_call_count = 0
+
+    async def chat(self, messages, model):
+        return "unused"
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        self.chat_stream_call_count += 1
+        yield " "
+
+
 def _signup_and_get_token(client, email="study@example.com"):
     response = client.post(
         "/api/v1/auth/signup", json={"email": email, "password": "supersecret"}
@@ -1386,6 +1409,43 @@ def test_stream_message_recovers_when_first_ai_reply_is_blank(client):
 
     assert deltas == ["안녕", "하세요"]
     assert fake.chat_stream_call_count == 2
+
+
+def test_stream_message_fails_instead_of_retrying_when_leaked_whitespace_delta_already_sent(
+    client,
+):
+    """공백뿐인 조각(" ")이라도 이미 "delta" 이벤트로 클라이언트에 전송된
+    뒤라면, 전체 응답이 결국 공백뿐이어도 조용히 재시도해선 안 된다 -
+    재시도하면 이미 보낸 그 delta가 새 시도의 delta들과 뒤섞여 클라이언트가
+    관찰하는 delta 연결 결과가 최종 done.data.content와 달라져(FRONTEND_
+    INTEGRATION.md가 명시하는 계약 위반) 실제로 재현해 확인했다. 이 경우엔
+    재시도 대신 곧바로 error 이벤트로 실패 처리되고, chat_stream이 딱 한
+    번만 호출되는지(=재시도가 실제로 일어나지 않는지) 확인한다."""
+    fake = WhitespaceDeltaLeakOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="whitespace-delta-leak@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "공백 델타 누출"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+
+        events = []
+        while True:
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] in ("done", "error"):
+                break
+
+    assert events[-1]["type"] == "error"
+    assert not any(e["type"] == "done" for e in events)
+    assert fake.chat_stream_call_count == 1
 
 
 def test_stream_message_ai_failure_sends_error_event(client):

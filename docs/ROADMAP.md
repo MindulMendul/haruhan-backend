@@ -7250,3 +7250,64 @@
       새 토큰을 받아 재연결하라는 안내를 추가했다. DB 스키마 변경은
       없어 마이그레이션은 필요 없었다.
 
+## 백로그 (191라운드)
+
+- [x] 215. 학습챗/면접복기 WebSocket 스트리밍의 "빈 응답이면 재시도"
+      로직(188라운드)이, 이미 클라이언트에 "delta"로 전송된 공백뿐인
+      조각을 조용히 버리고 재시도해 `docs/FRONTEND_INTEGRATION.md`가
+      명시하는 "delta를 이어붙이면 done.data.content(ai_feedback)와
+      같아짐"이라는 프로토콜 계약을 깨던 문제 해소.
+
+      `OllamaService.chat_stream()`(`app/services/ollama_service.py`)은
+      `if content: yield content`로 "content가 있는" 조각만 yield하는데,
+      공백뿐인 문자열(`" "`)도 파이썬에서는 truthy라 그대로 yield된다.
+      `study_service.stream_message()`/`interview_review_service.
+      stream_create_review()`의 188라운드 재시도 로직은 매 조각을 받는
+      즉시 `yield "delta", delta`로 클라이언트에 먼저 전송한 뒤, 스트림이
+      끝나야 `"".join(reply_parts).strip()`으로 전체가 공백뿐인지
+      판단해서 재시도 여부를 정했다 - 그 판단 옆의 주석은 "chat_stream이
+      content 있는 조각만 주므로 여기 온 채로 공백뿐이면 delta를 하나도
+      못 보낸 것"이라고 가정했는데, 그 가정 자체가 위 이유로 거짓이었다.
+      공백 조각 하나만 오고 스트림이 끝나면: 그 조각은 이미 "delta"로
+      전송된 뒤, 전체는 공백이라고 판단해 조용히 두 번째 생성을 시작해
+      새 delta들을 이어보내는데, 클라이언트 입장에서는 (버려진 첫 시도의
+      공백 delta) + (두 번째 시도의 진짜 delta들)을 받고, 서버가 실제로
+      저장/반환하는 `done.data.content`(혹은 `ai_feedback`)는 두 번째
+      시도만으로 만들어져 - 둘이 서로 달라진다.
+
+      실제 앱 코드를 그대로 호출하는 재현(첫 호출은 공백 하나만 yield하고
+      끝나는 가짜 Ollama 서비스, 두 번째 호출은 정상 응답)으로 확인했다 -
+      클라이언트가 받은 delta를 이어붙인 값은 `' 안녕하세요'`인데
+      `done.data.content`는 `'안녕하세요'`로, 앞의 공백 하나가 어긋났다.
+      기존 테스트(`AlwaysBlankChatOllamaService`)는 "아예 delta가
+      0개"인 경우만 다뤄서(`chat_stream`이 `return`으로 바로 끝남), 이
+      "공백 delta가 1개 이상 나갔지만 전체는 여전히 공백"인 더 좁은
+      경로는 188라운드의 테스트로도 드러나지 않았다.
+
+      재시도 조건을 실제 가정에 맞게 고쳤다: `reply_parts`(스트리밍
+      델타를 누적한 리스트)가 완전히 비어 있으면(=delta를 하나도 못
+      보냄) 지금처럼 안전하게 재시도하고, `reply_parts`가 비어있지
+      않은데 전체가 공백이면(=이미 공백 delta를 보낸 뒤) 재시도하지
+      않고 곧바로 `_GENERATION_FAILED`로 실패 처리한다(error 이벤트는
+      done과 달리 delta 연결 결과와 일치해야 할 필요가 없다). 두
+      스트리밍 메서드(`study_service.stream_message`,
+      `interview_review_service.stream_create_review`) 모두 같은
+      패턴으로 고쳤다.
+
+      `tests/test_study.py`/`tests/test_interview_review.py`에 각각
+      1개씩 추가했다 - `chat_stream`이 공백 조각(`" "`) 하나만 yield하고
+      끝나는 가짜 서비스로, 재시도(=`chat_stream`이 2번 호출됨) 없이
+      곧바로 error 이벤트로 끝나는지, `done` 이벤트는 전혀 오지 않는지
+      확인한다. `git stash`로 두 서비스 파일 수정만 되돌리면 두 테스트
+      다 정확히 위에서 재현한 것과 똑같은 증상(`chat_stream_call_count
+      == 2`, 즉 이미 보낸 공백 delta를 버리고 조용히 재시도함)으로
+      실패하는 것까지 확인했다.
+
+      전체 617개 테스트 통과(615 → 617), `services/study_service.py`/
+      `services/interview_review_service.py` 둘 다 커버리지 100% 유지,
+      `mypy app tests scripts` 클린. 정상 케이스(빈 delta 0개 재시도,
+      완전한 정상 응답)의 클라이언트 프로토콜은 전혀 안 바뀌고, 지금까지
+      한 번도 지켜지지 않던 문서화된 계약을 실제로 지키게 만드는 변경이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신은 필요 없었다. DB 스키마
+      변경도 없어 마이그레이션도 필요 없었다.
+
