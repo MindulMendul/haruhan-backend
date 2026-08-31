@@ -7829,3 +7829,48 @@
       견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마
       변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (200라운드)
+
+- [x] 224. `Settings.jwt_algorithm`(기본값 `"HS256"`)에는 검증이 하나도 없었다 -
+      바로 위 `jwt_secret_key`가 최소 길이를 꼼꼼히 검증하는 것과 대조적으로,
+      이 필드는 `core/tokens.py`의 `create_access_token()`/`get_current_user`가
+      그대로 `jwt.encode(algorithm=...)`/`jwt.decode(algorithms=[...])`에
+      넘기는데, PyJWT가 모르는 값(오타, 대소문자 실수, 앞뒤 공백, `RS256`처럼
+      이 앱에 아예 배선 안 된 비대칭키 알고리즘 등)이 들어와도 `Settings()`
+      생성과 앱 기동 자체는 멀쩡히 성공한다 - `log_level`/`environment` 등
+      이 파일의 다른 검증들이 막아온 것과 정확히 같은 모양의 "기동 시점엔
+      전혀 티 안 나는" 장애 클래스인데, 이 필드만 그 스윕에서 빠져 있었다.
+      배포 직후엔 멀쩡해 보이다가 첫 로그인/회원가입/게스트 세션 생성/토큰
+      갱신 요청에서야 `NotImplementedError: Algorithm not supported`로
+      500이 터지는, 인증 기능 전체가 조용히 마비되는 장애로 이어진다 -
+      다른 필드별 장애(하나의 기능만 막힘)보다 영향 범위가 넓다.
+
+      `JWT_ALGORITHM="HS256 "`(끝에 공백 하나)만으로 `Settings()`는 그대로
+      통과하고 `create_access_token()`이 곧바로 `NotImplementedError`를
+      내는 것까지 실제로 재현해 확인했다. 이 저장소가 고정한 PyJWT
+      2.13.0의 기본 지원 알고리즘 목록(`jwt.algorithms.
+      get_default_algorithms()`)도 직접 확인해 `{HS256, HS384, HS512,
+      none}`뿐임을 확인했다 - `RS256` 등 비대칭키 계열은 추가 의존성
+      없이는 아예 지원되지 않아 애초에 시도할 이유가 없고, `none`은 PyJWT가
+      실제로 지원하는 값이지만 서명 검증 자체를 생략해버리는(토큰을 아무나
+      위조 가능) 값이라 허용 목록에서 제외해야 한다.
+
+      `log_level`/`environment`가 이미 쓰는 패턴(`@field_validator` +
+      허용 집합 검증 + 대소문자/공백 정규화)을 그대로 따라
+      `_validate_jwt_algorithm`을 추가했다 - `{HS256, HS384, HS512}`만
+      허용하고, `none`을 포함해 그 밖의 모든 값은 시작 시점에 명확한 한국어
+      메시지로 거부한다. 대소문자/앞뒤 공백은 `log_level`과 같은 이유로
+      정규화해서 받아준다(`"hs384"` -> `"HS384"`, `"HS256 "` -> `"HS256"`).
+
+      `tests/test_config.py`에 기존 `jwt_secret_key`/`log_level` 테스트와
+      같은 스타일로 새 테스트 3개를 추가했다: 기본값 확인, 정규화(대소문자/
+      공백 3가지 케이스), 거부(`RS256`/`HMAC-SHA256`/`none`/빈 문자열/
+      `hs256x` 5가지 케이스). `git stash`로 `config.py` 수정만 되돌리면
+      8개 파라미터화 케이스 전부 실패하는 것까지 확인했다.
+
+      전체 646개 테스트 통과(637 → 646), `app/core/config.py` 커버리지
+      100% 유지, `mypy app tests scripts` 클린. 유효한 값(`HS256` 등)의
+      런타임 동작은 전혀 안 바뀌는 순수 시작 시점 검증 추가라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+

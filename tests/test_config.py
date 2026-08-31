@@ -20,6 +20,32 @@ def test_settings_rejects_empty_jwt_secret_key():
         Settings(jwt_secret_key="")
 
 
+def test_settings_defaults_to_hs256_jwt_algorithm():
+    settings = Settings(jwt_secret_key="a" * 32)
+    assert settings.jwt_algorithm == "HS256"
+
+
+@pytest.mark.parametrize("value", ["hs384", " HS512 ", "hs256"])
+def test_settings_normalizes_jwt_algorithm_case_and_whitespace(value):
+    """200라운드: core/tokens.py의 create_access_token()이 이 값을 그대로
+    jwt.encode(algorithm=...)에 넘기는데, 대소문자/앞뒤 공백이 조금만 달라도
+    PyJWT가 NotImplementedError로 실패한다 - log_level과 같은 이유로 정규화해서
+    받아준다."""
+    settings = Settings(jwt_secret_key="a" * 32, jwt_algorithm=value)
+    assert settings.jwt_algorithm == value.strip().upper()
+
+
+@pytest.mark.parametrize("bad_value", ["RS256", "HMAC-SHA256", "none", "", "hs256x"])
+def test_settings_rejects_unsupported_jwt_algorithm(bad_value):
+    """200라운드: jwt_secret_key 바로 옆 필드인데도 검증이 없어서, PyJWT가 모르는
+    값이 Settings() 생성/앱 기동은 통과하고 첫 로그인/회원가입 요청에서야
+    NotImplementedError로 인증 기능 전체를 마비시켰다 - "none"은 PyJWT가 실제로
+    지원하지만 서명 검증을 생략해버리는(토큰 위조 가능) 값이라 명시적으로 막는다."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(jwt_secret_key="a" * 32, jwt_algorithm=bad_value)
+    assert "JWT_ALGORITHM은" in str(exc_info.value)
+
+
 def test_settings_normalizes_lowercase_log_level():
     """logging.basicConfig(level=...)는 소문자("info")를 받아들이지 않고
     create_app()이 호출될 때마다 ValueError로 앱을 죽인다 - 설정 로딩

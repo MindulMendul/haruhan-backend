@@ -5,6 +5,14 @@ from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MIN_JWT_SECRET_KEY_LENGTH = 32
+# core/tokens.py는 jwt_secret_key를 대칭키(HMAC) 문자열로 그대로 쓴다 - RS/ES/PS
+# 계열(비대칭키)은 이 앱에 아예 배선돼 있지 않으므로(공개/개인키 쌍이 아니라 이
+# 하나의 문자열만 다룸) 지원 대상에서 제외한다. "none"은 PyJWT가 기본으로 지원하는
+# 진짜 알고리즘이지만 서명 검증 자체를 생략하는(누구나 위조 가능) 값이라 명시적으로
+# 뺀다 - 셋 다 PyJWT(2.13.0, requirements.txt에 고정)가 추가 의존성 없이 기본
+# 지원하는 알고리즘 목록(jwt.algorithms.get_default_algorithms())에서 "none"만 뺀
+# 나머지다.
+_VALID_JWT_ALGORITHMS = {"HS256", "HS384", "HS512"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _VALID_ENVIRONMENTS = {"development", "production"}
 
@@ -184,6 +192,31 @@ class Settings(BaseSettings):
                 f"(예: `openssl rand -hex 32`로 생성). 현재 {len(value)}자."
             )
         return value
+
+    @field_validator("jwt_algorithm")
+    @classmethod
+    def _validate_jwt_algorithm(cls, value: str) -> str:
+        """200라운드: 이 필드는 바로 위 jwt_secret_key와 나란히 있으면서도 정작
+        검증이 하나도 없었다 - core/tokens.py의 create_access_token()이 이 값을
+        그대로 jwt.encode(algorithm=...)에 넘기는데, PyJWT가 모르는 값(오타,
+        대소문자 실수, 앞뒤 공백 등)이면 `NotImplementedError: Algorithm not
+        supported`를 던진다. Settings() 생성 자체와 앱 기동은 멀쩡히 성공하므로
+        (log_level/environment 등 이 파일의 다른 검증들과 같은 이유), 배포
+        직후에는 전혀 티가 안 나다가 첫 로그인/회원가입/게스트 세션 생성/토큰
+        갱신 요청에서야 처음으로 500이 터지는, 인증 기능 전체가 조용히 마비되는
+        장애로 이어진다 - 실제로 `JWT_ALGORITHM="HS256 "`(끝에 공백 하나)만으로
+        `Settings()`는 통과하고 `create_access_token()`이 그대로
+        `NotImplementedError`를 내는 것까지 재현해 확인했다. "none"은 PyJWT가
+        기본 지원하는 진짜 알고리즘이지만 서명 검증 자체를 생략해버리는(토큰을
+        아무나 위조 가능) 값이라 허용 목록에서 명시적으로 제외한다. log_level과
+        같은 이유로 앞뒤 공백/대소문자는 정규화해서 받아준다."""
+        normalized = value.strip().upper()
+        if normalized not in _VALID_JWT_ALGORITHMS:
+            raise ValueError(
+                f"JWT_ALGORITHM은 {sorted(_VALID_JWT_ALGORITHMS)} 중 하나여야 합니다. "
+                f'현재 "{value}".'
+            )
+        return normalized
 
     @field_validator("log_level")
     @classmethod
