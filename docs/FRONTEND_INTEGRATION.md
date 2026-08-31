@@ -170,7 +170,7 @@ DELETE /api/v1/auth/sessions           → 204 (모든 기기에서 로그아웃
 
 `error.code`는 프론트가 문자열 매칭 없이 에러 종류를 분기할 때 씁니다. 로그인 실패(`invalid_credentials`), 만료/위조된 access token(`invalid_token`), 재사용된 refresh token(`invalid_refresh_token`)처럼 자주 분기해야 하는 케이스부터 구체적인 code를 붙여뒀고, 아직 안 붙은 나머지는 상태코드 기반 기본값(`not_found`, `conflict`, `bad_request`, `internal_error` 등)이 들어갑니다 - 점진적으로 늘려나가는 중이라 오늘 `not_found`였던 에러가 나중에 더 구체적인 code로 바뀔 수 있습니다. 코드로 분기하되, `message`는 사용자에게 보여줄 최종 문구로 쓰지 말고 참고용으로만 쓰세요 (한글/영어가 섞여 있고 국제화 대상이 아닙니다).
 
-레이트리밋이 걸린 엔드포인트(로그인/회원가입/토큰 refresh·로그아웃/프로필수정/학습챗·퀴즈·면접 생성/데이터 export 등)는 **성공 응답에도** `X-RateLimit-Limit`/`X-RateLimit-Remaining`/`X-RateLimit-Reset` 헤더가 실립니다. 429 응답에는 추가로 `Retry-After`(재시도까지 남은 초)가 실리니, 카운트다운 UI를 만들 때 응답 바디를 파싱할 필요 없이 이 헤더만 읽으면 됩니다.
+레이트리밋이 걸린 엔드포인트(로그인/회원가입/토큰 refresh·로그아웃/프로필수정/학습챗·퀴즈·면접 생성/데이터 export 등)는 **성공 응답은 물론, 그 한도를 소모한 실패 응답(로그인 실패 401, 중복 가입 409 등)에도** `X-RateLimit-Limit`/`X-RateLimit-Remaining`/`X-RateLimit-Reset` 헤더가 실립니다. 429 응답에는 추가로 `Retry-After`(재시도까지 남은 초)가 실리니, "로그인 실패 시 몇 번 더 시도할 수 있는지" 같은 카운트다운 UI를 만들 때 응답 바디를 파싱할 필요 없이 이 헤더만 읽으면 됩니다. 요청 자체가 검증(422)에 걸려 거부된 경우는 한도를 아예 소모하지 않으므로 이 헤더들이 없습니다.
 
 다른 사용자 소유의 리소스에 접근하면 (예: 남의 quiz_id로 조회) `403`이 아니라 **`404`**로 응답합니다 (리소스 존재 여부 자체를 숨김).
 

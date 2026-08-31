@@ -6461,3 +6461,56 @@
       정렬 안정성 수정이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
       스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (178라운드)
+
+- [x] 202. 레이트리밋이 걸린 엔드포인트가 한도를 소모한 실패 응답(401/404/
+      409 등)에는 `X-RateLimit-*`/`Retry-After` 헤더를 전혀 안 붙이던
+      문제 해소 - slowapi의 `@limiter.limit(...)` 데코레이터는 엔드포인트
+      함수를 부르기 "전에" 이미 이번 요청을 카운트에 반영하고
+      (`request.state.view_rate_limit`에 어느 한도가 적용됐는지 기록해둠)
+      그 함수가 정상적으로 값을 "반환"한 경우에만 자기 코드에서 헤더를
+      응답에 붙인다 - 엔드포인트가 `HTTPException`을 던지면(로그인 실패
+      401, 중복 가입 409, 리소스 없음 404 등) 그 예외가 데코레이터를 그냥
+      통과해버려 헤더를 붙이는 코드 자체가 실행되지 않는다.
+      `app/core/errors.py`의 `rate_limit_exceeded_handler`(429 전용)만
+      `request.state.view_rate_limit`을 보고 직접 헤더를 붙였을 뿐, 같은
+      라우트의 다른 모든 상태 코드를 처리하는 `http_exception_handler`는
+      이걸 전혀 안 봤다.
+
+      직접 재현했다 - `AUTH_RATE_LIMIT=2/minute`로 로그인을 세 번 틀리게
+      시도하면: 1번째/2번째(401)는 `X-RateLimit-*` 헤더가 전혀 없고,
+      3번째(429)만 헤더가 붙는다. 그런데 앞의 두 401도 실제로 한도를
+      소모했다(3번째가 정확히 그 한도 초과로 429가 되는 것 자체가 증거).
+      `docs/FRONTEND_INTEGRATION.md`가 이 헤더들을 "카운트다운 UI를 만들
+      때 응답 바디를 파싱할 필요 없이 읽으라"고 파는 바로 그 용도(로그인
+      실패를 반복하다 잠기기 전 몇 번 남았는지 보여주기)가, 정작 그 값이
+      가장 필요한 실패 응답에서는 동작하지 않았다. 반대로 422(요청 검증
+      실패)는 slowapi의 확인 자체가 FastAPI의 바디 검증 "다음"에야 실행돼
+      한도를 아예 소모하지 않으므로, 헤더가 없는 게 맞는 동작임도 직접
+      확인했다.
+
+      `app/core/errors.py`에 `attach_rate_limit_headers(request, response)`
+      헬퍼를 추가했다 - `request.state.view_rate_limit`이 있으면(레이트리밋이
+      걸린 라우트) `request.app.state.limiter._inject_headers`로 그대로
+      붙이고, 없으면(레이트리밋이 아예 없는 라우트) 조용히 그대로 반환한다
+      (slowapi의 `_inject_headers` 자체가 `None`이면 아무 일도 안 하므로
+      항상 안전하게 호출할 수 있다). `http_exception_handler`가 이 헬퍼를
+      쓰도록 바꾸고, 기존 `rate_limit_exceeded_handler`의 인라인 호출도
+      같은 헬퍼로 통일했다. `app/main.py`의 전역 처리되지 않은 예외
+      핸들러(500)에도 같은 헬퍼를 적용해 일관성을 맞췄다.
+
+      `tests/test_auth.py`의 기존 `test_login_is_rate_limited`에 401
+      응답 두 개(`first`/`second`)에도 `X-RateLimit-Limit`/
+      `X-RateLimit-Remaining`(각각 1, 0)이 정확히 실리는지 확인하는
+      단언을 추가했다. `git stash`로 `errors.py`/`main.py` 수정만
+      되돌리면 정확히 실패하는 것까지 확인했다. `docs/
+      FRONTEND_INTEGRATION.md`의 레이트리밋 헤더 설명을 "성공 응답에도"
+      에서 "성공 응답은 물론 한도를 소모한 실패 응답에도"로 고치고,
+      422는 한도를 소모하지 않아 헤더가 없다는 설명을 덧붙였다.
+
+      전체 585개 테스트 통과, `app/core/errors.py`/`app/main.py` 둘 다
+      커버리지 100%, `mypy app tests scripts` 클린. 기존에 헤더가 실리던
+      응답(성공/429)의 동작은 전혀 안 바뀌고 실리지 않던 응답에 추가로
+      실리기만 하는 순수 추가라 DB 스키마 변경이 없어 마이그레이션도
+      필요 없었다.
+

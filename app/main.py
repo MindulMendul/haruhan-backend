@@ -11,6 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import (
+    attach_rate_limit_headers,
     http_exception_handler,
     rate_limit_exceeded_handler,
     validation_exception_handler,
@@ -119,10 +120,11 @@ def create_app() -> FastAPI:
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("처리되지 않은 예외 발생: %s %s", request.method, request.url.path)
-        return JSONResponse(
+        response = JSONResponse(
             status_code=500,
             content={"error": {"code": "internal_error", "message": "Internal server error"}},
         )
+        return attach_rate_limit_headers(request, response)
 
     return app
 

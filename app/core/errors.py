@@ -39,27 +39,47 @@ def build_error_body(status_code: int, detail: object) -> dict:
     return {"error": {"code": code, "message": str(detail)}}
 
 
+def attach_rate_limit_headers(request: Request, response: JSONResponse) -> JSONResponse:
+    """레이트리밋이 걸린 라우트에서 slowapi는 엔드포인트 함수를 부르기 "전에"
+    이미 이번 요청을 카운트에 반영하고(request.state.view_rate_limit에 어느
+    한도가 적용됐는지 기록) 그 함수가 정상적으로 값을 반환한 경우에만 자기
+    데코레이터가 X-RateLimit-*/Retry-After 헤더를 응답에 붙인다 - 엔드포인트가
+    HTTPException을 던지면(로그인 실패 401, 중복 가입 409, 리소스 없음 404 등)
+    slowapi의 데코레이터는 그 예외를 그대로 흘려보내고 헤더를 붙이는 코드는
+    실행되지 않는다. 그 결과 같은 한도를 두 번 소모한 요청인데도(직접 재현:
+    AUTH_RATE_LIMIT=2/minute일 때 로그인 실패 두 번은 헤더 없이 401, 세 번째만
+    헤더가 붙은 429) 429 응답에만 헤더가 실리고, 그 직전까지의 실패 응답들에는
+    전혀 안 실려서 "몇 번 더 시도할 수 있는지" 카운트다운 UI(FRONTEND_
+    INTEGRATION.md가 파는 바로 그 용도)를 실패 응답에서는 만들 수 없었다.
+    slowapi의 Limiter._inject_headers는 view_rate_limit이 None이면(레이트리밋이
+    아예 안 걸린 라우트) 조용히 아무 것도 안 하므로, 모든 HTTPException/처리되지
+    않은 예외 핸들러에서 안전하게 항상 호출할 수 있다."""
+    view_rate_limit = getattr(request.state, "view_rate_limit", None)
+    if view_rate_limit is None:
+        return response
+    return request.app.state.limiter._inject_headers(response, view_rate_limit)
+
+
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    return JSONResponse(
+    response = JSONResponse(
         status_code=exc.status_code,
         content=build_error_body(exc.status_code, exc.detail),
         headers=exc.headers,
     )
+    return attach_rate_limit_headers(request, response)
 
 
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
     """slowapi 기본 핸들러(`{"error": "Rate limit exceeded: ..."}`, 문자열)를
     나머지 에러 응답과 같은 `{"error": {"code", "message"}}` 형태로 통일한다.
 
-    Retry-After/X-RateLimit-* 헤더는 slowapi의 Limiter._inject_headers가
-    request.state.view_rate_limit(라우트를 처리하며 slowapi가 채워둔 것)을 보고
-    붙여준다 - 기본 핸들러와 동일하게 그대로 재사용한다.
+    Retry-After/X-RateLimit-* 헤더는 attach_rate_limit_headers가 그대로 붙여준다.
     """
     response = JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content={"error": {"code": "rate_limited", "message": f"Rate limit exceeded: {exc.detail}"}},
     )
-    return request.app.state.limiter._inject_headers(response, request.state.view_rate_limit)
+    return attach_rate_limit_headers(request, response)
 
 
 def sanitize_pydantic_errors(errors: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

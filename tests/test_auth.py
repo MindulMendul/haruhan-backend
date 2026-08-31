@@ -725,6 +725,16 @@ def test_login_is_rate_limited(client, monkeypatch):
     body = third.json()
     assert body["error"]["code"] == "rate_limited"
 
+    # slowapi는 429가 아닌 응답(로그인 실패 401 등)에는 자기 데코레이터가 직접
+    # 헤더를 못 붙인다(엔드포인트가 HTTPException을 던지면 그 코드 경로를 그냥
+    # 건너뜀) - 429 전까지의 실패 응답에서도 몇 번 더 시도할 수 있는지 보여주는
+    # 카운트다운 UI를 만들 수 있어야 하므로, 이 한도를 실제로 소모한 401
+    # 응답에도 헤더가 실려야 한다.
+    assert "X-RateLimit-Limit" in first.headers
+    assert first.headers["X-RateLimit-Remaining"] == "1"
+    assert "X-RateLimit-Limit" in second.headers
+    assert second.headers["X-RateLimit-Remaining"] == "0"
+
 
 def test_refresh_is_rate_limited(client, monkeypatch):
     monkeypatch.setenv("AUTH_RATE_LIMIT", "2/minute")
