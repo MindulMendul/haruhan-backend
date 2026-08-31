@@ -6,6 +6,7 @@ from datetime import date
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.db.models.interview_review import InterviewReview
 from app.repositories.interview_review_repository import InterviewReviewRepository
@@ -273,7 +274,23 @@ class InterviewReviewService:
         # 수정에서 delete_for_source가 그 중복까지 전부 지우고 다시 만들어 자연히
         # 복구되므로, 매 수정마다(동시성과 무관하게) 사용자의 실제 수정 내용을 통째로
         # 잃어버릴 수 있는 지금 버그보다 훨씬 가벼운 대가라고 판단했다.
-        await self._session.commit()
+        #
+        # 197라운드: content가 None이면(메타데이터만 바꾸는 흔한 PATCH) 위에서
+        # 잠금 없는 get_for_user()로 조회했으므로, 이 조회와 여기 commit() 사이에
+        # 다른 요청이 DELETE /interview/reviews/{id}로 같은 복기를 지워버리면
+        # UPDATE가 0행에 매치돼 StaleDataError가 난다 - study_service.rename_
+        # session() 등이 이미 고친 것과 정확히 같은 모양의 경쟁인데, 이 메서드만
+        # 그동안 놓쳐 있었다(잡지 않으면 500으로 새 나간다). content가 실제로
+        # 바뀌어 위에서 get_for_user_locked()를 탄 경우는 Postgres에서는 그
+        # FOR UPDATE 잠금이 동시 DELETE를 이 커밋까지 블록해 이 경쟁이 이론상
+        # 안 나야 하지만, SQLite(테스트/로컬)는 FOR UPDATE를 지원하지 않아 그
+        # 잠금이 없는 일반 SELECT로 컴파일되므로(get_for_user_locked() docstring
+        # 참고) 두 분기 모두 똑같이 방어해둔다.
+        try:
+            await self._session.commit()
+        except StaleDataError:
+            await self._session.rollback()
+            raise _NOT_FOUND from None
 
         if content_changed:
             await self._rag.index_content(

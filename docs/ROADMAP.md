@@ -7652,3 +7652,49 @@
       개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이
       없어 마이그레이션도 필요 없었다.
 
+## 백로그 (197라운드)
+
+- [x] 221. `InterviewReviewService.update_review()`가 `content`를 안 보내는
+      (company/position/interview_date만 바꾸는 흔한 PATCH) 요청이면, 194
+      라운드가 이미 정리한 설계대로 잠금 없는 `get_for_user()`로 복기를
+      조회한다(`content_changed`가 항상 False라 잠글 이유가 없음). 그런데
+      이 조회와 마지막 `commit()` 사이에 다른 요청이 `DELETE /interview/
+      reviews/{id}`로 같은 복기를 지워버리면 UPDATE가 0행에 매치돼
+      `StaleDataError`가 나는데, 이 메서드는 그걸 어디서도 잡지 않고
+      있었다. `study_service.rename_session()`/`quiz_service.rename_
+      quiz()`/`interview_practice_service.rename_session()`/`auth_
+      service`의 로그아웃·세션 폐기 등, 이 저장소의 잠금 없는 UPDATE
+      경로는 184~186라운드에서 전부 같은 이유로 이미 고쳐졌는데, 이
+      메서드의 메타데이터만-수정 분기만 그 스윕에서 빠진 채 197라운드
+      까지 남아 있었다(잡지 않으면 그대로 500으로 새 나간다).
+
+      `InterviewReviewRepository.get_for_user()`를 몽키패치해 그 안에서
+      별도 세션으로 실제 삭제를 수행하는, `test_rename_session_returns_
+      404_when_session_deleted_during_request`와 같은 기법으로 실제
+      재현해 `StaleDataError`가 그대로 새 나가는 것까지 확인했다.
+
+      `update_review()`의 마지막 `commit()`을 `try/except StaleDataError`
+      로 감싸 롤백 후 404로 변환했다 - 이미 없는 복기에 대한 요청과 같은
+      코드다. `content`가 실제로 바뀌어 `get_for_user_locked()`(FOR
+      UPDATE)를 탄 분기는 Postgres에서는 그 잠금이 동시 DELETE를 이
+      커밋까지 블록해 이 경쟁이 이론상 안 나야 하지만, SQLite(테스트/
+      로컬)는 FOR UPDATE를 지원하지 않아 잠금 없는 일반 SELECT로
+      컴파일되므로(`get_for_user_locked()` docstring 참고) 두 분기 모두
+      같은 `try/except`로 방어했다.
+
+      `tests/test_interview_review.py`에 새 테스트를 추가했다(`test_
+      rename_session_returns_404_when_session_deleted_during_request`와
+      같은 몽키패치 기법) - `get_for_user()`가 아직 있는 복기를 반환한
+      직후, 별도 세션이 그 복기를 실제로 지워버리게 만들어 메타데이터만
+      바꾸는 `update_review()` 호출이 404를 내는지 확인한다. `git stash`
+      로 `interview_review_service.py` 수정만 되돌리면 정확히 위에서
+      재현한 것과 똑같은 증상(`StaleDataError`가 안 잡히고 그대로 전파)
+      으로 실패하는 것까지 확인했다.
+
+      전체 628개 테스트 통과(627 → 628), `services/interview_review_
+      service.py` 커버리지 100% 유지, `mypy app tests scripts` 클린.
+      실패 시 응답 코드가 500에서 404로 바뀌는 것 말고는 클라이언트
+      프로토콜이 안 바뀌고(다른 리소스의 같은 경쟁도 이미 404로 처리돼
+      `docs/FRONTEND_INTEGRATION.md`가 이미 문서화한 패턴과 일치) DB
+      스키마 변경도 없어 마이그레이션도 필요 없었다.
+

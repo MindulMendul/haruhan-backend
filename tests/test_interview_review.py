@@ -1398,6 +1398,81 @@ def test_update_review_persists_content_edit_even_if_rag_reindex_fails(db_sessio
     assert persisted_content == "수정된 내용"
 
 
+def test_update_review_returns_404_when_review_deleted_during_metadata_only_request(db_session_factory, monkeypatch):
+    """197라운드: update_review()는 content를 안 보내는(company/position/interview_date만
+    바꾸는 흔한 PATCH) 요청이면 잠금 없는 get_for_user()로 복기를 조회한다(그쪽 주석
+    참고 - content_changed가 항상 False라 잠글 이유가 없다는 설계). 그런데 이 조회와
+    커밋 사이에 다른 요청이 DELETE /interview/reviews/{id}로 같은 복기를 지워버리면
+    UPDATE가 0행에 매치돼 StaleDataError가 나는데, 이 메서드는 그동안 그걸 잡지 않고
+    있었다 - study_service.rename_session() 등 이 저장소의 다른 잠금 없는 수정
+    경로는 전부 184/185라운드에서 이미 고쳐졌지만, 이 메서드의 메타데이터만-수정 분기는
+    그 스윕에서 빠져 있었다(잡지 않으면 500으로 새 나간다). get_for_user()를 몽키패치해
+    그 안에서 별도 세션으로 실제 삭제를 수행해 이 좁은 타이밍을 결정적으로 재현한다."""
+    import asyncio
+    import uuid
+    from datetime import date
+
+    from fastapi import HTTPException
+
+    from app.repositories.interview_review_repository import InterviewReviewRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.interview_review_service import InterviewReviewService
+    from app.services.rag_service import RagService
+
+    async def _run():
+        async with db_session_factory() as session:
+            users = UserRepository(session)
+            user = await users.create_guest()
+            await session.commit()
+
+            reviews = InterviewReviewRepository(session)
+            review = await reviews.create(
+                user_id=user.id,
+                company="하루한",
+                position="백엔드 개발자",
+                interview_date=date(2024, 1, 1),
+                content="원래 내용",
+                model="qwen2.5:3b",
+            )
+            await session.commit()
+            review_id = review.id
+            user_id = user.id
+
+            rag = RagService(session=session, ollama_service=FakeOllamaService(), settings=get_settings())
+            service = InterviewReviewService(session=session, ollama_service=FakeOllamaService(), rag_service=rag)
+
+            original_get_for_user = InterviewReviewRepository.get_for_user
+
+            async def _deleting_get_for_user(self, target_review_id, target_user_id):
+                result = await original_get_for_user(self, target_review_id, target_user_id)
+                async with db_session_factory() as session_b:
+                    reviews_b = InterviewReviewRepository(session_b)
+                    target = await original_get_for_user(reviews_b, review_id, user_id)
+                    await reviews_b.delete(target)
+                    await session_b.commit()
+                return result
+
+            monkeypatch.setattr(InterviewReviewRepository, "get_for_user", _deleting_get_for_user)
+
+            try:
+                await service.update_review(
+                    review_id=review_id,
+                    user_id=user_id,
+                    company="새 회사",
+                    position=None,
+                    interview_date=None,
+                    content=None,
+                )
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
 def test_create_review_returns_401_when_account_deleted_during_generation(db_session_factory):
     """create_review()는 AI 피드백 생성을 위한 Ollama 호출을 거쳐서야
     InterviewReview를 만든다(user_id는 nullable=False FK) - 그 사이 다른 요청이
