@@ -678,6 +678,68 @@ def test_update_review_404_for_nonexistent_review(client):
     assert response.status_code == 404
 
 
+def test_update_review_skips_row_lock_when_content_is_not_being_changed(client, monkeypatch):
+    """update_review()의 FOR UPDATE 잠금(get_for_user_locked)은 "content가
+    실제로 바뀌었는지" 판단(get_for_user_locked() docstring 참고)을 보호하기
+    위한 것뿐이다 - content를 아예 안 보내는 요청(company/position/
+    interview_date만 바꾸는 흔한 PATCH)은 그 판단 자체가 항상 False로 고정돼
+    있어 잠글 이유가 없다. 그런데도 무조건 잠그면, 이 흔한 "메타데이터만
+    수정" 요청이 같은 복기에 대한 다른 요청의 AI 재생성 호출(최대 몇 분
+    걸릴 수 있음, update_review()의 content_changed 분기 주석 참고) 뒤에서
+    그 호출이 끝날 때까지 아무 이유 없이 대기하게 된다. content가 요청에
+    없으면 잠금 없는 get_for_user()를, 있으면 잠금 있는 get_for_user_
+    locked()를 쓰는지 - 실제 Postgres 잠금 없이도 - 저장소 메서드 호출
+    자체로 직접 확인한다."""
+    from app.repositories.interview_review_repository import InterviewReviewRepository
+
+    locked_calls: list[int] = []
+    unlocked_calls: list[int] = []
+    original_locked = InterviewReviewRepository.get_for_user_locked
+    original_unlocked = InterviewReviewRepository.get_for_user
+
+    async def _tracking_locked(self, *args, **kwargs):
+        locked_calls.append(1)
+        return await original_locked(self, *args, **kwargs)
+
+    async def _tracking_unlocked(self, *args, **kwargs):
+        unlocked_calls.append(1)
+        return await original_unlocked(self, *args, **kwargs)
+
+    monkeypatch.setattr(InterviewReviewRepository, "get_for_user_locked", _tracking_locked)
+    monkeypatch.setattr(InterviewReviewRepository, "get_for_user", _tracking_unlocked)
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="update-lock-skip@example.com")
+    create = client.post(
+        "/api/v1/interview/reviews", json=_create_payload(), headers=_auth_headers(token)
+    )
+    review_id = create.json()["id"]
+
+    locked_calls.clear()
+    unlocked_calls.clear()
+
+    metadata_only = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"company": "새 회사"},
+        headers=_auth_headers(token),
+    )
+    assert metadata_only.status_code == 200
+    assert unlocked_calls == [1]
+    assert locked_calls == []
+
+    locked_calls.clear()
+    unlocked_calls.clear()
+
+    content_change = client.patch(
+        f"/api/v1/interview/reviews/{review_id}",
+        json={"content": "완전히 다른 내용으로 바꿉니다"},
+        headers=_auth_headers(token),
+    )
+    assert content_change.status_code == 200
+    assert locked_calls == [1]
+    assert unlocked_calls == []
+
+
 def test_delete_review_404_for_nonexistent_review(client):
     token = _signup_and_get_token(client)
     response = client.delete(
@@ -1148,20 +1210,24 @@ def test_stream_create_review_disconnect_during_delta_send_logs_client_disconnec
 
     # caplog.records를 폴링하는 대신 access_logger.info() 자체를 감싸 disconnect
     # 로그가 실제로 기록되는 순간 threading.Event를 직접 세운다 - 폴링 주기
-    # 슬랙이나 caplog 내부 타이밍에 기대지 않는, 경합 없는 신호다.
+    # 슬랙이나 caplog 내부 타이밍에 기대지 않는, 경합 없는 신호다. 처음엔
+    # 실제 로거 호출이 끝난 뒤 Event를 세우고 그 뒤 caplog.records에서
+    # 다시 찾는 방식이었는데, 그렇게 해도 전체 스위트 안에서 아주 드물게
+    # (Event는 세워졌는데 caplog.records엔 아직 없는 상태로) 실패하는 걸
+    # 다시 관찰했다(study.py의 같은 테스트에서 먼저 발견) - pytest의
+    # LogCaptureHandler 자체가 스레드 간에 정확히 언제 가시성이 보장되는지
+    # 까지는 신뢰하지 않기로 하고, 이 콜백 안에서 메시지를 직접 캡처해
+    # (caplog와는 별개의, 이 테스트만의 로컬 리스트) 그 값 자체로 확인한다
+    # - caplog의 내부 타이밍에 아예 의존하지 않는다.
     access_logger = logging.getLogger("haruhan.access")
     disconnect_logged = threading.Event()
+    disconnect_messages: list[str] = []
     original_access_info = access_logger.info
 
     def _tracking_info(msg, *args, **kwargs):
-        # 먼저 실제 로거 호출을 완전히 끝내 caplog의 핸들러 체인에 레코드가
-        # 실제로 들어간 뒤에 Event를 세운다 - 순서를 뒤집으면(Event를 먼저
-        # 세우면) 메인 스레드가 wait()에서 깨어나 caplog.records를 확인하는
-        # 시점과 이 스레드가 실제로 handler.emit()까지 끝내는 시점 사이에
-        # 아주 좁은 경합 구간이 생겨, 드물게(전체 스위트에서 관찰됨) Event는
-        # 세워졌는데 레코드는 아직 안 보이는 상태로 읽어버릴 수 있다.
         result = original_access_info(msg, *args, **kwargs)
         if isinstance(msg, str) and msg.startswith("ws_event=disconnect"):
+            disconnect_messages.append(msg % args if args else msg)
             disconnect_logged.set()
         return result
 
@@ -1191,13 +1257,8 @@ def test_stream_create_review_disconnect_during_delta_send_logs_client_disconnec
         access_logger.info = original_access_info
 
     assert "처리되지 않은 예외" not in caplog.text
-    disconnect_records = [
-        r.getMessage()
-        for r in caplog.records
-        if r.name == "haruhan.access" and r.getMessage().startswith("ws_event=disconnect")
-    ]
-    assert len(disconnect_records) == 1
-    assert "reason=client_disconnect" in disconnect_records[0]
+    assert len(disconnect_messages) == 1
+    assert "reason=client_disconnect" in disconnect_messages[0]
 
 
 def test_stream_create_review_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):

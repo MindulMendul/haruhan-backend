@@ -1557,20 +1557,24 @@ def test_stream_message_disconnect_during_delta_send_logs_client_disconnect_not_
 
     # caplog.records를 폴링하는 대신 access_logger.info() 자체를 감싸 disconnect
     # 로그가 실제로 기록되는 순간 threading.Event를 직접 세운다 - 폴링 주기
-    # 슬랙이나 caplog 내부 타이밍에 기대지 않는, 경합 없는 신호다.
+    # 슬랙이나 caplog 내부 타이밍에 기대지 않는, 경합 없는 신호다. 처음엔
+    # 실제 로거 호출이 끝난 뒤 Event를 세우고 그 뒤 caplog.records에서
+    # 다시 찾는 방식이었는데, 그렇게 해도 전체 스위트 안에서 아주 드물게
+    # (Event는 세워졌는데 caplog.records엔 아직 없는 상태로) 실패하는 걸
+    # 다시 관찰했다 - pytest의 LogCaptureHandler 자체가 스레드 간에
+    # 정확히 언제 가시성이 보장되는지까지는 신뢰하지 않기로 하고, 이
+    # 콜백 안에서 메시지를 직접 캡처해(caplog와는 별개의, 이 테스트만의
+    # 로컬 리스트) 그 값 자체로 확인한다 - caplog의 내부 타이밍에 아예
+    # 의존하지 않는다.
     access_logger = logging.getLogger("haruhan.access")
     disconnect_logged = threading.Event()
+    disconnect_messages: list[str] = []
     original_access_info = access_logger.info
 
     def _tracking_info(msg, *args, **kwargs):
-        # 먼저 실제 로거 호출을 완전히 끝내 caplog의 핸들러 체인에 레코드가
-        # 실제로 들어간 뒤에 Event를 세운다 - 순서를 뒤집으면(Event를 먼저
-        # 세우면) 메인 스레드가 wait()에서 깨어나 caplog.records를 확인하는
-        # 시점과 이 스레드가 실제로 handler.emit()까지 끝내는 시점 사이에
-        # 아주 좁은 경합 구간이 생겨, 드물게(전체 스위트에서 관찰됨) Event는
-        # 세워졌는데 레코드는 아직 안 보이는 상태로 읽어버릴 수 있다.
         result = original_access_info(msg, *args, **kwargs)
         if isinstance(msg, str) and msg.startswith("ws_event=disconnect"):
+            disconnect_messages.append(msg % args if args else msg)
             disconnect_logged.set()
         return result
 
@@ -1604,13 +1608,8 @@ def test_stream_message_disconnect_during_delta_send_logs_client_disconnect_not_
         access_logger.info = original_access_info
 
     assert "처리되지 않은 예외" not in caplog.text
-    disconnect_records = [
-        r.getMessage()
-        for r in caplog.records
-        if r.name == "haruhan.access" and r.getMessage().startswith("ws_event=disconnect")
-    ]
-    assert len(disconnect_records) == 1
-    assert "reason=client_disconnect" in disconnect_records[0]
+    assert len(disconnect_messages) == 1
+    assert "reason=client_disconnect" in disconnect_messages[0]
 
 
 def test_stream_message_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):

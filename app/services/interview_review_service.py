@@ -209,8 +209,22 @@ class InterviewReviewService:
         content: str | None,
     ) -> InterviewReview:
         # get_for_user_locked()로 같은 복기에 대한 거의 동시 수정을 직렬화한다 -
-        # 자세한 이유는 그 메서드의 docstring 참고.
-        review = await self._reviews.get_for_user_locked(review_id, user_id)
+        # 자세한 이유는 그 메서드의 docstring 참고. 다만 이 잠금이 지키는 건
+        # 오직 "content가 실제로 바뀌었는지" 판단(아래 content_changed)뿐이라,
+        # 이 요청이 애초에 content를 안 보냈으면(예: company만 바꾸는 PATCH)
+        # content_changed는 content가 무엇이든 항상 False로 결정돼 있어 잠글
+        # 이유가 없다 - 그런데도 무조건 잠그면, 이 흔한 "메타데이터만 수정"
+        # 요청이 같은 복기에 대한 다른 요청의 AI 재생성 호출(최대 몇 분,
+        # 아래 content_changed 분기의 주석 참고) 뒤에서 그 호출이 끝날 때까지
+        # 아무 이유 없이 그냥 대기하게 된다. content를 실제로 보낸 요청에서만
+        # 잠그고, 그 외에는 잠금 없는 조회로 충분하다 - company/position/
+        # interview_date만 바뀌는 경쟁은 이 저장소의 다른 잠금 없는 수정
+        # (study_service.rename_session 등)과 같은 정도의(마지막에 커밋한
+        # 쪽이 이기는) 통상적인 동시 수정 결과라 별도 보호가 필요 없다.
+        if content is not None:
+            review = await self._reviews.get_for_user_locked(review_id, user_id)
+        else:
+            review = await self._reviews.get_for_user(review_id, user_id)
         if review is None:
             raise _NOT_FOUND
 
@@ -225,6 +239,20 @@ class InterviewReviewService:
         content_changed = content is not None and content != review.content
         if content_changed:
             assert content is not None  # content_changed가 True면 content는 항상 not None
+            # interview_practice_service.submit_answer()/complete_session()과 같은
+            # 종류의 트레이드오프다(193라운드가 그 두 메서드에 남긴 주석 참고) -
+            # 여기서도 _generate_feedback()의 Ollama 호출(최대 _MAX_GENERATION_
+            # ATTEMPTS번 재시도, 매번 최대 60초) 내내 위 get_for_user_locked()가
+            # 잡은 FOR UPDATE 잠금과 그 트랜잭션의 DB 커넥션을 계속 붙들고 있다.
+            # 하지만 여기서 커밋해 잠금을 미리 풀면, 그 잠금의 원래 목적(같은
+            # 복기에 대한 거의 동시 수정을 직렬화해, 둘 다 "바뀌기 전" content로
+            # content_changed를 잘못 판단하는 걸 막음 - get_for_user_locked()
+            # docstring/143라운드 참고) 자체가 깨진다. 즉 이 경로는 193라운드가
+            # 고친 다른 AI 호출부들과 달리 커넥션 풀 고갈 위험을 그대로 안고
+            # 있지만(동시에 같은 복기를 여러 번 수정하는 흔치 않은 경우), 잠금을
+            # DB 트랜잭션이 아닌 애플리케이션 레벨 낙관적 재확인으로 바꾸는 더 큰
+            # 리팩터링 없이는 두 문제를 동시에 해결할 수 없어 193라운드와 같은
+            # 이유로 이번에도 손대지 않는다.
             feedback = await self._generate_feedback(review.company, review.position, content, review.model)
             review.content = content
             review.ai_feedback = feedback

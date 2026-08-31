@@ -7454,3 +7454,87 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (194라운드)
+
+- [x] 218. `InterviewReviewService.update_review()`가 `content`를 아예 안
+      보내는(회사명/직무/면접일만 바꾸는 흔한 PATCH) 요청까지 항상 `FOR
+      UPDATE` 행 잠금을 잡아, 같은 복기에 대한 다른 요청이 AI 피드백을
+      재생성하는 동안(최대 몇 분 걸릴 수 있음) 아무 이유 없이 그 뒤에서
+      대기하게 되던 문제 해소 - 193라운드가 `interview_practice_service.
+      submit_answer`/`complete_session`에서 이미 다루고 "의도적으로 손대지
+      않기"로 결정한 것과 같은 종류의 패턴이 이 파일에도 있었는데, 그
+      감사에서는 이름이 붙여지지 않은 사각지대였다.
+
+      `get_for_user_locked()`(`interview_review_repository.py`)의
+      `FOR UPDATE` 잠금은 오직 "content가 실제로 바뀌었는지"(`content_
+      changed`) 판단이 같은 복기에 대한 거의 동시 수정 사이에서 stale한
+      값을 보고 잘못 내려지는 걸 막기 위한 것이다(그 메서드 docstring,
+      143라운드 참고) - `update_review()`는 그런데도 `content`가 요청에
+      아예 없어서(`content is None`) `content_changed`가 무조건 `False`로
+      고정된 경우까지 예외 없이 항상 이 잠금 있는 조회를 썼다. 트레이싱
+      해보면: `get_for_user_locked()` 획득 → (content_changed면)
+      `_generate_feedback()`의 Ollama 호출(최대 `_MAX_GENERATION_
+      ATTEMPTS`번 재시도, 매번 최대 60초) → 그제서야 commit()으로 잠금
+      해제. 즉 회사명만 고치는 것 같은 요청이, 같은 복기의 content를
+      바꾸는 다른 요청 뒤에서 그 AI 호출이 끝날 때까지 - 자기가 필요로
+      하지도 않는 보호 때문에 - 그대로 블록됐다. 193라운드가 이미 확인한
+      것과 같은 커넥션 풀 고갈 위험(동시에 같은 복기를 여러 번 수정하는
+      경우)까지 그대로 안고 있었다.
+
+      `content_changed`를 지키는 게 목적인 잠금을, `content_changed`가
+      될 수조차 없는 요청에도 무조건 거는 게 핵심 낭비라는 걸 확인한 뒤,
+      `content is not None`일 때만(=이 요청이 content 변경 가능성을
+      들고 온 경우에만) `get_for_user_locked()`를, 그 외에는(메타데이터만
+      바뀌는 경우) 잠금 없는 `get_for_user()`를 쓰도록 고쳤다. company/
+      position/interview_date만 바뀌는 경쟁은 이 저장소의 다른 잠금
+      없는 수정(`study_service.rename_session` 등)과 같은 정도의(마지막
+      커밋이 이기는) 통상적인 동시 수정 결과라 별도 보호가 필요 없다고
+      판단했다.
+
+      `content`가 실제로 바뀌는 경우(`get_for_user_locked()`가 여전히
+      막고 있는, 진짜 필요한 케이스)는 193라운드의 `submit_answer`/
+      `complete_session`과 정확히 같은 이유로 이번에도 손대지 않았다 -
+      잠금을 AI 호출 전에 풀면 그 잠금의 존재 이유 자체(stale한 content
+      로 content_changed를 잘못 판단하는 걸 막음)가 깨진다. `_generate_
+      feedback()` 호출부에 193라운드 주석과 같은 형식으로 이 트레이드
+      오프를 명시적으로 남겨, 다음 감사에서 또 다시 "이름 안 붙은 사각
+      지대"로 지나치지 않게 했다.
+
+      `tests/test_interview_review.py`에 1개 추가했다 - `InterviewReview
+      Repository.get_for_user_locked()`/`get_for_user()` 호출을 각각
+      추적해, content 없는 PATCH는 잠금 없는 조회만, content 있는 PATCH는
+      잠금 있는 조회만 타는지 실제 Postgres 잠금 없이도 저장소 메서드
+      호출 자체로 직접 확인한다(92라운드가 이미 확인했듯 SQLite는 FOR
+      UPDATE를 지원하지 않아 이 저장소 계층의 호출 분기 확인이 이 코드
+      베이스에서 쓸 수 있는 가장 결정적인 검증 방법이다). `git stash`로
+      `interview_review_service.py` 수정만 되돌리면 정확히 위에서
+      재현한 것과 똑같은 증상(메타데이터만 바꾸는 요청도 잠금 있는
+      조회를 탐)으로 실패하는 것까지 확인했다.
+
+      (부수적으로) 이번 라운드의 전체 회귀를 여러 번 돌리는 과정에서,
+      190라운드가 고쳤던 WS 회귀 테스트 2개(`test_stream_message_
+      disconnect_during_delta_send_...`, `test_stream_create_review_
+      disconnect_during_delta_send_...`)가 전체 스위트 안에서 다시
+      한 번(이번 라운드에서 딱 1회) 실패하는 걸 관찰했다 - 이번 증상은
+      190라운드가 고친 것과 또 달랐다: `disconnect_logged.wait()`는
+      정상적으로 풀리는데(Event는 세워짐, 즉 로거 호출 자체는 실제로
+      일어남) 그 직후 `caplog.records`에서 그 레코드를 다시 찾으면
+      없었다. 190라운드는 "로거 호출이 끝난 뒤에 Event를 세운다"로
+      고쳤는데, 그것만으로는 부족했던 셈이다 - pytest의
+      `LogCaptureHandler`가 스레드 간에 정확히 언제 가시성을 보장하는지
+      까지는 신뢰할 수 없다고 보고, `caplog.records`에 다시 의존하는
+      대신 그 로거 훅 안에서 메시지 자체를 이 테스트만의 로컬 리스트에
+      직접 캡처해(threading.Event를 세우는 바로 그 지점에서) 그 값으로
+      확인하도록 바꿨다 - caplog의 스레드 간 가시성 타이밍에 아예
+      의존하지 않는 방식이다. 이 변경 이후 전체 스위트를 연달아 2번
+      통과시켜 확인했다 - 이번 라운드의 본 항목(218번)과는 별개의
+      테스트 인프라 결함이지만, 같은 라운드에서 발견하고 고쳐 함께
+      기록해둔다.
+
+      전체 624개 테스트 통과(623 → 624), `services/interview_review_
+      service.py` 커버리지 100% 유지, `mypy app tests scripts` 클린.
+      클라이언트에게 보내는 응답/프로토콜은 전혀 안 바뀌는(내부 잠금
+      전략만 조정하는) 순수 견고성/지연시간 개선이라 `docs/FRONTEND_
+      INTEGRATION.md` 갱신도, DB 스키마 변경이 없어 마이그레이션도
+      필요 없었다.
+
