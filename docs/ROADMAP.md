@@ -7375,3 +7375,82 @@
       정확도/견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
       스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (193라운드)
+
+- [x] 217. RAG 그라운딩을 쓰는 요청(학습챗 메시지, 면접연습 세션 생성)이
+      `RagService.retrieve_relevant()`의 DB 조회 뒤 커밋/롤백을 한 번도 안
+      해서, 그 뒤에 이어지는(몇 초~몇십 초 걸릴 수 있는) AI 호출 내내 DB
+      커넥션 풀의 커넥션 하나를 계속 붙들고 있던 문제 해소 - 동시에 몇 명만
+      채팅/면접연습을 진행해도 커넥션 풀(기본 pool_size=5+max_overflow=5=10)
+      이 고갈돼, 로그인/퀴즈 목록 조회처럼 이 요청과 전혀 무관한 다른 모든
+      요청까지 `sqlalchemy.exc.TimeoutError`로 실패할 수 있었다.
+
+      SQLAlchemy는 커밋이나 롤백을 해야만 세션이 물고 있는 트랜잭션이
+      끝나고, 그때 비로소 그 트랜잭션이 체크아웃해둔 DB 커넥션을 풀에
+      돌려준다 - `await` 중이라고 자동으로 반납되지 않는다. `retrieve_
+      relevant()`는 `list_for_user()`로 DB를 조회한 뒤 임베딩 호출
+      (`OllamaService.embed()`, HTTP)로 넘어가는데, 그 사이 커밋/롤백이
+      전혀 없어 그 HTTP 호출이 끝날 때까지도 커넥션이 계속 체크아웃된
+      채로 남는다. 게다가 이 메서드를 부르는 쪽(`study_service.
+      send_message`/`stream_message`, `interview_practice_service.
+      create_session`)도 `retrieve_relevant()`가 돌아온 뒤부터 그보다 훨씬
+      오래 걸리는 실제 생성 호출(`chat()`/`chat_stream()`/`generate()`)로
+      바로 넘어가면서 그 사이에도 커밋/롤백을 안 해, 커넥션이 묶이는
+      구간이 이 AI 호출 전체로 그대로 늘어난다. `max_concurrent_ws_
+      connections`가 WebSocket 연결 하나가 수명 내내 커넥션을 붙든다는
+      전제로 이미 동시 연결 수를 제한하고 있지만, 이건 REST 경로(학습챗
+      REST 전송, 면접연습 세션 생성)까지는 전혀 다루지 않는다 - 이 두
+      경로는 애초에 "AI 호출 전에 DB를 안 건드린다"는 이 코드베이스의
+      다른 AI 호출부(`create_review`/`create_quiz` 등)와 같은 안전한
+      패턴을 따를 것으로 가정됐는데, `retrieve_relevant()`가 그 가정을
+      조용히 깨고 있었다.
+
+      실제 로컬 Postgres로 재현했다: `pool_size=2, max_overflow=0,
+      pool_timeout=1`로 만든 엔진에서, "SELECT 하나 하고 5초 대기"(AI
+      호출을 흉내냄)하는 태스크 2개로 풀을 완전히 채운 뒤 세 번째로 평범한
+      `SELECT`를 시도하면 `sqlalchemy.exc.TimeoutError: QueuePool limit of
+      size 2 overflow 0 reached, connection timed out`가 그대로 났다 - 이
+      요청은 RAG/AI 호출과 아무 관계도 없는 무관한 요청을 흉내낸 것이다.
+
+      세 호출부 중 잠금 없이 호출하는 두 곳(`study_service.send_message`
+      /`stream_message`, `interview_practice_service.create_session`)은
+      `retrieve_relevant()` 직후에 `await self._session.commit()`을
+      추가했다 - 커밋할 변경이 없어(RAG 조회는 읽기 전용, 그 앞의 쓰기는
+      이미 커밋됨) 결과상 no-op이지만 트랜잭션을 끝내 커넥션을 즉시
+      반납한다. 처음엔 `rollback()`을 썼다가 `MissingGreenlet` 예외로
+      여러 테스트가 깨지는 걸 보고 원인을 다시 파봤다 - `rollback()`은
+      `expire_on_commit` 설정과 무관하게 항상 세션에 로드된 객체를 전부
+      expire시키는데, 이 앱의 세션 팩토리는 `expire_on_commit=False`로
+      만들어져 있어(`db/session.py`) `commit()`은 커넥션만 반납하고 이미
+      로드한 객체(`study_session` 등)의 속성값은 만료시키지 않는다는 걸
+      실제 SQLAlchemy 동작으로 확인한 뒤 `commit()`으로 바꿨다.
+
+      `interview_practice_service.submit_answer`/`complete_session`은
+      의도적으로 이 픽스에서 제외했다 - 이 두 메서드는 `get_for_user_
+      locked()`로 잡은 `FOR UPDATE` 잠금을 답변이 실제로 커밋될 때까지
+      (AI 호출 전체를 포함해) 붙들고 있어야 동시 제출을 직렬화한다는 게
+      핵심 설계다(377번째 줄 근처 기존 주석 참고) - `retrieve_relevant()`
+      직후에 커밋/롤백을 넣으면 그 잠금을 조기에 풀어버려 이 직렬화
+      보장이 깨진다. 이 두 경로는 여전히 같은 커넥션 풀 고갈 위험을
+      안고 있지만, DB 트랜잭션 기반 잠금을 애플리케이션 레벨 잠금으로
+      바꾸는 더 큰 리팩터링 없이는 두 문제를 동시에 해결할 수 없어
+      더 어려운 후속 과제로 명시적으로 남겨뒀다(코드에도 그 이유를
+      주석으로 남김).
+
+      `tests/test_ai_call_releases_db_connection.py`를 새로 만들어 3개
+      추가했다 - `test_auth.py`의 동시성 테스트와 같은 이유로 `:memory:+
+      StaticPool` 기본 픽스처 대신 파일 기반 SQLite + `pool_size=1`로
+      실제 커넥션 풀을 만들고, AI 호출(`chat`/`chat_stream`/`generate`)이
+      실행되는 바로 그 시점에 `engine.pool.checkedout()`이 0인지(=이미
+      반납됐는지) 직접 확인한다. `git stash`로 두 서비스 파일 수정만
+      되돌리면 세 테스트 다 정확히 위에서 재현한 것과 똑같은 증상
+      (`checkedout() == 1`, 즉 AI 호출 도중에도 커넥션이 안 풀림)으로
+      실패하는 것까지 확인했다.
+
+      전체 623개 테스트 통과(620 → 623), `services/study_service.py`/
+      `services/interview_practice_service.py` 둘 다 커버리지 100% 유지,
+      `mypy app tests scripts` 클린. 클라이언트에게 보내는 응답/프로토콜은
+      전혀 안 바뀌는(내부 트랜잭션 경계만 조정하는) 순수 견고성 개선이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+

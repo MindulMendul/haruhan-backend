@@ -169,6 +169,26 @@ class StudyService:
         chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
 
         relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=content)
+        # retrieve_relevant()가 방금 한 조회(list_for_user) 말고는 여기까지
+        # 커밋 안 된 변경이 없다(user_message는 이미 위에서 커밋됨) - 그런데
+        # SQLAlchemy는 커밋/롤백을 해야만 트랜잭션이 물고 있는 DB 커넥션을
+        # 풀에 돌려준다. 바로 아래 AI 호출(chat())이 몇 초~몇십 초 걸릴 수
+        # 있는데, 여기서 정리하지 않으면 그동안 이 커넥션이 통째로 묶여있어
+        # 동시에 여러 명이 채팅 중이면 커넥션 풀(기본 pool_size=5+
+        # max_overflow=5=10)이 순식간에 고갈되고, 로그인/퀴즈 목록 조회 같은
+        # 이 요청과 전혀 무관한 다른 모든 요청까지 커넥션을 못 얻어 타임아웃
+        # 으로 실패한다 - 실제 Postgres로 풀을 고갈시켜 무관한 요청이
+        # `sqlalchemy.exc.TimeoutError`로 실패하는 것까지 재현해 확인했다.
+        # commit()으로 정리한다(커밋할 변경이 없어 결과상 rollback과
+        # 동일하지만, rollback()은 expire_on_commit 설정과 무관하게 항상
+        # 세션에 로드된 객체 - study_session/user_message - 를 전부 expire
+        # 시켜버려서, 그 뒤 study_session.model 같은 속성에 다시 접근하면
+        # SQLAlchemy가 동기 컨텍스트에서 몰래 재조회를 시도하다
+        # MissingGreenlet으로 죽는다 - 실제로 그렇게 깨지는 것까지 확인한
+        # 뒤 commit()으로 바꿨다. 이 세션 팩토리는 expire_on_commit=False로
+        # 만들어져 있어(db/session.py) commit()은 커넥션은 그대로 풀에
+        # 돌려주면서도 이미 로드한 객체들의 속성값은 만료시키지 않는다.
+        await self._session.commit()
         if relevant_chunks:
             chat_messages.insert(0, _build_grounding_message(relevant_chunks))
 
@@ -245,6 +265,10 @@ class StudyService:
         chat_messages = [{"role": m.role, "content": m.content} for m in recent_history]
 
         relevant_chunks = await self._rag.retrieve_relevant(user_id=user_id, query=content)
+        # send_message()와 같은 이유(그 메서드의 docstring 참고)로, 바로
+        # 아래 스트리밍 AI 호출이 몇 초~몇십 초 걸리는 동안 이 DB 커넥션을
+        # 계속 붙들고 있지 않도록 commit()으로 정리한다.
+        await self._session.commit()
         if relevant_chunks:
             chat_messages.insert(0, _build_grounding_message(relevant_chunks))
 
