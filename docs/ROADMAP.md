@@ -7047,3 +7047,73 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (188라운드)
+
+- [x] 212. `study_service`/`interview_review_service`가 Ollama의 빈 응답을
+      검증 없이 그대로 커밋하던 문제 해소 - `OllamaService.chat()`/
+      `chat_stream()`은 187라운드에서 이미 다뤘듯 200을 응답해도 본문에
+      `message.content`가 없거나 명시적 null이면 예외 없이 빈 문자열을(스트리밍
+      버전은 아무 delta도) 그대로 돌려주는데, `interview_practice_service.py`
+      (`_generate_first_question`/`_generate_feedback_text`)와
+      `quiz_service._generate_quiz`는 이미 재시도(2회) + 공백 검증으로 이
+      실패 모드를 막고 있었던 반면, Ollama를 직접 호출하는 나머지 두
+      호출부(학습챗, 면접 복기)는 그 보호가 전혀 없이 빈 응답을 그대로
+      저장하고 있었다.
+
+      `chat()`/`chat_stream()`을 직접 쓰는 곳은 이 코드베이스에 정확히
+      네 군데다: `study_service.send_message`/`stream_message`,
+      `interview_review_service._generate_feedback`(REST `create_review`/
+      `update_review`가 공유)/`stream_create_review`. 실제 앱 코드를 그대로
+      호출하는 REST 재현(빈 문자열을 돌려주는 가짜 Ollama 서비스로 학습챗에
+      메시지를 보냄)으로 직접 확인했다 - `POST .../messages`가 200을
+      반환하고, 대화 기록에 `content=""`인 assistant 메시지가 영구히
+      남았다. 학습챗은 계속 채팅을 걸어 대화를 이어가는 것 외에는 이걸
+      되돌릴 방법이 없고, 면접 복기는 `ai_feedback`이 기능의 핵심인데
+      `update_review`가 `content`가 실제로 바뀔 때만 피드백을 재생성하므로
+      (content_changed 참고) 사용자가 이걸 직접 재생성할 방법 자체가 없다는
+      점에서 더 나쁘다.
+
+      `interview_practice_service.py`가 이미 쓰고 있는 것과 같은 패턴
+      (`_MAX_GENERATION_ATTEMPTS = 2`, `attempt` 루프 + `.strip()` 공백
+      검증, 실패 시 502)을 나머지 네 곳에도 그대로 적용했다. 스트리밍
+      두 곳(`stream_message`/`stream_create_review`)은 `chat_stream()`이
+      content 있는 조각만 yield하므로(ollama_service.py 참고), 재시도가
+      필요한 상황(빈 응답)이면 그 시도에서는 애초에 클라이언트에 delta를
+      하나도 못 보낸 상태다 - 아직 아무것도 보여준 게 없으니 안전하게
+      통째로 다시 생성할 수 있다.
+
+      `tests/test_study.py`/`tests/test_interview_review.py`에 REST/WS
+      각각 "항상 공백"(502로 실패 처리 + 정확히 2번 시도했는지)과 "첫 시도만
+      공백, 두 번째는 정상"(실제로 복구되는지) 조합으로 4개씩, 총 9개(REST
+      쪽 `interview_review`는 `update_review` 경로도 별도로 추가) 추가했다.
+      `git stash`로 두 서비스 파일 수정만 되돌리면 9개 전부 정확히 위에서
+      재현한 것과 똑같은 증상(빈 응답이 그대로 200/201로 커밋됨, 혹은
+      재시도 횟수가 1에 그침)으로 실패하는 것까지 확인했다.
+
+      (부수적으로) 새 테스트를 검증하려고 전체 회귀를 여러 번 돌리는
+      과정에서, 187라운드가 "타임아웃을 20초로 늘려서 3연속 통과 확인"으로
+      마무리했던 186라운드의 두 WS 회귀 테스트가 전체 스위트 안에서 여전히
+      드물게 실패하는 걸 다시 발견했다(이번엔 다른 증상 - 20초를 다 기다려도
+      disconnect 로그 자체가 안 남음). 근본 원인을 다시 파봤다: 두 테스트
+      모두 `WebSocket.send`를 **클래스 레벨**로 바꿔치기해 "3번째 send 호출 =
+      이 테스트의 목표 delta"라고 가정하는 전역 카운터를 쓰고 있었는데,
+      전체 스위트에서는 다른 테스트가 남긴(아직 완전히 정리되지 않은)
+      WebSocket 인스턴스가 같은 카운터를 함께 증가시켜 그 가정이 깨질 수
+      있다 - 그러면 실제 목표 delta가 아닌 엉뚱한 호출에서 OSError가
+      주입되거나, 혹은 아예 주입되지 않을 수 있다. `WeakKeyDictionary`로
+      호출 횟수를 WebSocket 인스턴스별로 따로 세어 다른 연결의 트래픽과
+      섞이지 않게 고쳤고, "타이밍 폴링"도 `access_logger.info()`를 감싸
+      disconnect 로그가 실제로 기록되는 순간 `threading.Event`를 세우는
+      방식으로 바꿔 폴링 주기 슬랙 없이 결정적으로 기다리게 했다. 이 두
+      변경 이후 전체 스위트를 연달아 2번 통과시켜 확인했다 - 이 자체가
+      212번 항목의 핵심 변경은 아니지만, 같은 라운드에서 발견하고 고친
+      테스트 인프라 결함이라 함께 기록해둔다.
+
+      전체 612개 테스트 통과(603 → 612, 새 테스트 9개), `services/
+      study_service.py`/`services/interview_review_service.py` 둘 다
+      커버리지 100% 유지, `mypy app tests scripts` 클린. 클라이언트에게
+      보내는 메시지 프로토콜은 안 바뀌는(이미 있던 502 실패 처리 경로를
+      "빈 응답"이라는 새 실패 케이스에도 연결하고, 웬만하면 재시도로
+      조용히 복구하는) 변경이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

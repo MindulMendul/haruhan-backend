@@ -35,6 +35,57 @@ class CrashingOllamaService:
         yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
 
 
+class AlwaysBlankChatOllamaService:
+    """chat()/chat_stream()이 매번 공백만 뱉는다 - OllamaService.chat()/
+    chat_stream()은 Ollama가 200을 응답해도 본문에 message.content가 없거나
+    명시적 null이면 OllamaServiceError를 던지지 않고 그냥 빈 문자열을(스트리밍
+    버전은 아무 delta도) 돌려주는데, 재시도 없이 그대로 저장되면 학습챗 대화
+    기록에 빈 assistant 말풍선이 영구히 남는다
+    (interview_practice_service.py의 AlwaysBlankChatOllamaService와 같은 패턴)."""
+
+    def __init__(self):
+        self.chat_call_count = 0
+        self.chat_stream_call_count = 0
+
+    async def chat(self, messages, model):
+        self.chat_call_count += 1
+        return "   "
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        self.chat_stream_call_count += 1
+        return
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
+
+
+class RecoversOnRetryOllamaService:
+    """chat()/chat_stream() 첫 호출은 공백만 뱉고, 두 번째 호출부터는 정상
+    응답을 준다(interview_practice_service.py의 RecoversOnRetryOllamaService와
+    같은 패턴)."""
+
+    def __init__(self):
+        self.chat_call_count = 0
+        self.chat_stream_call_count = 0
+
+    async def chat(self, messages, model):
+        self.chat_call_count += 1
+        if self.chat_call_count == 1:
+            return "   "
+        return f"assistant reply to: {messages[-1]['content']}"
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        self.chat_stream_call_count += 1
+        if self.chat_stream_call_count == 1:
+            return
+        for chunk in ["안녕", "하세요"]:
+            yield chunk
+
+
 def _signup_and_get_token(client, email="study@example.com"):
     response = client.post(
         "/api/v1/auth/signup", json={"email": email, "password": "supersecret"}
@@ -266,6 +317,55 @@ def test_send_message_persists_history_and_calls_ai(client):
     assert len(messages) == 2
     assert messages[0]["role"] == "user"
     assert messages[1]["role"] == "assistant"
+
+
+def test_send_message_returns_502_when_ai_reply_is_blank(client):
+    """공백뿐인 AI 응답이 그대로 assistant 메시지로 저장되지 않고, 재시도(2회)까지
+    소진한 뒤 502로 실패 처리되는지 확인한다 - 재시도가 없으면 학습챗 대화
+    기록에 빈 assistant 말풍선이 영구히 남는다."""
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="blank-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "OS"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    send = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "안녕"},
+        headers=_auth_headers(token),
+    )
+    assert send.status_code == 502
+    assert fake.chat_call_count == 2
+
+    # 사용자 메시지는 AI 호출 전에 이미 커밋됐으니 보존되고, 빈 assistant
+    # 메시지는 커밋되지 않아야 한다.
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+
+
+def test_send_message_recovers_when_first_ai_reply_is_blank(client):
+    """AI 응답 재시도가 실제로 성공을 복구하는지(무조건 실패 처리하는 게
+    아니라) 확인한다 - 첫 시도는 공백, 두 번째 시도는 정상 응답."""
+    fake = RecoversOnRetryOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="recovers-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "OS"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    send = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "안녕"},
+        headers=_auth_headers(token),
+    )
+    assert send.status_code == 200
+    assert fake.chat_call_count == 2
+    assert "assistant reply to" in send.json()["assistant_message"]["content"]
 
 
 def test_send_message_rejects_content_over_max_length(client, monkeypatch):
@@ -1171,6 +1271,72 @@ def test_stream_message_other_users_session_returns_error_event(client):
         assert error_event["type"] == "error"
 
 
+def test_stream_message_sends_error_event_when_ai_reply_is_blank(client):
+    """REST 버전(test_send_message_returns_502_when_ai_reply_is_blank)과 같은
+    확인을 스트리밍(WebSocket) 경로에도 반복한다 - chat_stream()은 content가
+    있는 조각만 yield하므로, 재시도 없이 그대로 끝나면 아무 delta도 못 보낸
+    채 빈 assistant 메시지가 커밋된다."""
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-blank-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "빈 스트리밍"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+    assert fake.chat_stream_call_count == 2
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+
+
+def test_stream_message_recovers_when_first_ai_reply_is_blank(client):
+    """스트리밍 경로에서도 재시도가 실제로 성공을 복구하는지 확인한다 - 첫
+    시도는 delta를 하나도 못 보내고 끝나고, 두 번째 시도부터 정상적으로
+    delta가 오는지."""
+    fake = RecoversOnRetryOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-recovers-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "복구 스트리밍"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+
+        # done을 만날 때까지 읽는다(delta 개수를 미리 고정하지 않는다) - 만약
+        # 재시도가 없다면(회귀) 실패한 첫 시도가 delta 없이 곧장 done으로
+        # 끝나버리는데, 그 경우에도 여기서 자연스럽게 멈춘다. delta 슬롯
+        # 수를 미리 고정해 두면 그 회귀 상황에서 다음 receive_json()이 영원히
+        # 오지 않을 메시지를 기다리며 테스트가 멈춰버린다.
+        deltas = []
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+            assert event["type"] == "delta"
+            deltas.append(event["content"])
+
+    assert deltas == ["안녕", "하세요"]
+    assert fake.chat_stream_call_count == 2
+
+
 def test_stream_message_ai_failure_sends_error_event(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
     token = _signup_and_get_token(client)
@@ -1238,21 +1404,31 @@ def test_stream_message_disconnect_during_delta_send_logs_client_disconnect_not_
     타도록 ASGI 전송 콜백(self._send)만 특정 시점에 OSError를 던지게 바꿔치기해
     재현한다 - send_json 자체를 가로채면 application_state가 실제로
     DISCONNECTED로 바뀌지 않아 버그가 재현되지 않는다."""
-    import time as _time
+    import logging
+    import threading
+    import weakref
 
     from starlette.websockets import WebSocket
 
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
 
-    call_count = {"n": 0}
+    # 전체 스위트에서 이 테스트가 드물게(간헐적으로) 실패하는 걸 발견했다 -
+    # WebSocket.send를 클래스 레벨로 바꿔치기하기 때문에, 다른 테스트가 남긴
+    # 아직 완전히 정리되지 않은 WebSocket 인스턴스(다른 백그라운드 anyio
+    # 포털 스레드에서 실행 중)가 있으면 그쪽의 send 호출까지 전역
+    # call_count를 함께 증가시켜, "3번째 호출 = 이 테스트의 첫 delta"라는
+    # 전제가 깨질 수 있다. WeakKeyDictionary로 인스턴스(self)별로 호출
+    # 횟수를 따로 세어, 다른 연결의 트래픽과 절대 섞이지 않게 한다.
+    per_instance_counts: "weakref.WeakKeyDictionary[WebSocket, int]" = weakref.WeakKeyDictionary()
     original_send = WebSocket.send
 
     async def _flaky_send(self, message):
-        call_count["n"] += 1
+        n = per_instance_counts.get(self, 0) + 1
+        per_instance_counts[self] = n
         # 1번째 send=accept, 2번째=user_message, 3번째=첫 delta("안녕") -
         # 스트리밍이 이미 시작된 뒤(user_message는 정상 도착) 그 다음 전송에서
         # 클라이언트가 사라지는 상황을 재현한다.
-        if call_count["n"] == 3:
+        if n == 3:
             original_transport_send = self._send
 
             async def _raise_oserror(msg):
@@ -1266,9 +1442,21 @@ def test_stream_message_disconnect_during_delta_send_logs_client_disconnect_not_
         else:
             await original_send(self, message)
 
-    import logging
-
     caplog.set_level(logging.INFO)
+
+    # caplog.records를 폴링하는 대신 access_logger.info() 자체를 감싸 disconnect
+    # 로그가 실제로 기록되는 순간 threading.Event를 직접 세운다 - 폴링 주기
+    # 슬랙이나 caplog 내부 타이밍에 기대지 않는, 경합 없는 신호다.
+    access_logger = logging.getLogger("haruhan.access")
+    disconnect_logged = threading.Event()
+    original_access_info = access_logger.info
+
+    def _tracking_info(msg, *args, **kwargs):
+        if isinstance(msg, str) and msg.startswith("ws_event=disconnect"):
+            disconnect_logged.set()
+        return original_access_info(msg, *args, **kwargs)
+
+    access_logger.info = _tracking_info
 
     monkeypatch_target = WebSocket.send
     WebSocket.send = _flaky_send
@@ -1286,22 +1474,23 @@ def test_stream_message_disconnect_during_delta_send_logs_client_disconnect_not_
             user_event = ws.receive_json()
             assert user_event["type"] == "user_message"
 
-            # 서버가 실제로 3번째 send(첫 delta)까지 진행할 시간을 준다 - 이
-            # 시점 이후로는 서버가 더 이상 아무것도 보내지 않으므로(정상 처리
-            # 시에도, 버그 상황에도) 여기서 다시 receive_json()을 부르면 영원히
-            # 대기한다.
-            deadline = _time.monotonic() + 20
-            while call_count["n"] < 3 and _time.monotonic() < deadline:
-                _time.sleep(0.02)
-            assert call_count["n"] == 3, "서버가 3번째 send까지 도달하지 못했다"
+            # 서버가 실제로 3번째 send(첫 delta)에서 OSError를 만나 disconnect
+            # 처리(finally 블록의 접근 로그 기록까지)를 완전히 마칠 때까지
+            # 기다린다 - 이후로는 서버가 더 이상 아무것도 보내지 않으므로
+            # (정상 처리 시에도, 버그 상황에도) 여기서 receive_json()을 부르면
+            # 영원히 대기한다.
+            fired = disconnect_logged.wait(timeout=20)
+            assert fired, "disconnect 접근 로그가 제시간에 기록되지 않았다"
     finally:
         WebSocket.send = monkeypatch_target
+        access_logger.info = original_access_info
 
     assert "처리되지 않은 예외" not in caplog.text
     disconnect_records = [
-        r.getMessage() for r in caplog.records if r.name == "haruhan.access"
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "haruhan.access" and r.getMessage().startswith("ws_event=disconnect")
     ]
-    disconnect_records = [m for m in disconnect_records if m.startswith("ws_event=disconnect")]
     assert len(disconnect_records) == 1
     assert "reason=client_disconnect" in disconnect_records[0]
 

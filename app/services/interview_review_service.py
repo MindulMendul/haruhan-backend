@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date
@@ -10,6 +11,17 @@ from app.db.models.interview_review import InterviewReview
 from app.repositories.interview_review_repository import InterviewReviewRepository
 from app.services.ollama_service import OllamaService, OllamaServiceError
 from app.services.rag_service import RagService
+
+logger = logging.getLogger(__name__)
+
+# interview_practice_service._generate_feedback_text와 같은 이유(그 메서드의
+# docstring 참고) - chat()/chat_stream()은 Ollama가 200을 응답해도 본문에
+# message.content가 없거나 명시적 null이면 예외 없이 빈 문자열을 그대로
+# 돌려준다(ollama_service.py 참고). 재시도 없이 그대로 저장하면 ai_feedback이
+# 빈 문자열인 채로 커밋되는데, update_review는 content가 실제로 바뀔 때만
+# 다시 생성하므로(아래 update_review의 content_changed 참고) 사용자가 이걸
+# 직접 재생성할 방법이 없다.
+_MAX_GENERATION_ATTEMPTS = 2
 
 _NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview review not found")
 _GENERATION_FAILED = HTTPException(
@@ -103,14 +115,30 @@ class InterviewReviewService:
         """
         prompt = _build_review_feedback_prompt(company, position, content)
         feedback_parts: list[str] = []
-        try:
-            async for delta in self._ollama.chat_stream(
-                messages=[{"role": "user", "content": prompt}], model=model
-            ):
-                feedback_parts.append(delta)
-                yield "delta", delta
-        except OllamaServiceError as exc:
-            raise _GENERATION_FAILED from exc
+        for attempt in range(1, _MAX_GENERATION_ATTEMPTS + 1):
+            feedback_parts = []
+            try:
+                async for delta in self._ollama.chat_stream(
+                    messages=[{"role": "user", "content": prompt}], model=model
+                ):
+                    feedback_parts.append(delta)
+                    yield "delta", delta
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+            if "".join(feedback_parts).strip():
+                break
+            # chat_stream()은 content가 있는 조각만 yield하므로(ollama_service.py
+            # 참고), 여기까지 온 채로 feedback_parts가 공백뿐이라는 건 클라이언트에
+            # "delta" 이벤트를 하나도 못 보냈다는 뜻이다 - 아직 아무것도 보여준
+            # 게 없으니 안전하게 통째로 다시 생성한다.
+            logger.warning(
+                "면접 복기 스트리밍 피드백 생성 검증 실패 (시도 %d/%d): 공백뿐임",
+                attempt,
+                _MAX_GENERATION_ATTEMPTS,
+            )
+
+        if not "".join(feedback_parts).strip():
+            raise _GENERATION_FAILED
 
         # create_review()와 같은 이유(그 메서드의 docstring 참고)로, 스트리밍 도중
         # 계정이 삭제되면 이 INSERT가 IntegrityError로 실패할 수 있다 - 401로
@@ -217,7 +245,17 @@ class InterviewReviewService:
 
     async def _generate_feedback(self, company: str, position: str, content: str, model: str) -> str:
         prompt = _build_review_feedback_prompt(company, position, content)
-        try:
-            return await self._ollama.chat(messages=[{"role": "user", "content": prompt}], model=model)
-        except OllamaServiceError as exc:
-            raise _GENERATION_FAILED from exc
+        feedback = ""
+        for attempt in range(1, _MAX_GENERATION_ATTEMPTS + 1):
+            try:
+                feedback = await self._ollama.chat(messages=[{"role": "user", "content": prompt}], model=model)
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+            if feedback.strip():
+                return feedback
+            logger.warning(
+                "면접 복기 피드백 생성 검증 실패 (시도 %d/%d): 공백뿐임",
+                attempt,
+                _MAX_GENERATION_ATTEMPTS,
+            )
+        raise _GENERATION_FAILED

@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import AsyncIterator
 
@@ -13,6 +14,17 @@ from app.repositories.study_message_repository import StudyMessageRepository
 from app.repositories.study_session_repository import StudySessionRepository
 from app.services.ollama_service import OllamaService, OllamaServiceError
 from app.services.rag_service import RagService
+
+logger = logging.getLogger(__name__)
+
+# interview_practice_service._generate_feedback_text와 같은 이유(그 메서드의
+# docstring 참고) - chat()/chat_stream()은 Ollama가 200을 응답해도 본문에
+# message.content가 없거나 명시적 null이면 예외 없이 빈 문자열을 그대로
+# 돌려준다(ollama_service.py 참고). 재시도 없이 그대로 저장하면 학습챗 대화
+# 기록에 빈 assistant 말풍선이 영구히 남는데, 이 대화에는 그걸 되돌릴 재생성
+# 엔드포인트가 없어 사용자가 다시 채팅을 걸어야만(대화가 하나 더 늘어난 채로)
+# 지나칠 수 있다.
+_MAX_GENERATION_ATTEMPTS = 2
 
 _SESSION_NOT_FOUND = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND, detail="Study session not found"
@@ -162,10 +174,19 @@ class StudyService:
 
         chat_messages.append({"role": "user", "content": content})
 
-        try:
-            reply = await self._ollama.chat(messages=chat_messages, model=study_session.model)
-        except OllamaServiceError as exc:
-            raise _GENERATION_FAILED from exc
+        reply = ""
+        for attempt in range(1, _MAX_GENERATION_ATTEMPTS + 1):
+            try:
+                reply = await self._ollama.chat(messages=chat_messages, model=study_session.model)
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+            if reply.strip():
+                break
+            logger.warning(
+                "학습챗 응답 생성 검증 실패 (시도 %d/%d): 공백뿐임", attempt, _MAX_GENERATION_ATTEMPTS
+            )
+        if not reply.strip():
+            raise _GENERATION_FAILED
 
         # get_for_user() 확인과 여기 사이에 느린 Ollama 호출이 끼어 있어, 그 사이
         # 세션이 삭제되면(다른 탭/요청의 DELETE, CASCADE로 방금 만든 user_message도
@@ -230,14 +251,31 @@ class StudyService:
         chat_messages.append({"role": "user", "content": content})
 
         reply_parts: list[str] = []
-        try:
-            async for delta in self._ollama.chat_stream(messages=chat_messages, model=study_session.model):
-                reply_parts.append(delta)
-                yield "delta", delta
-        except OllamaServiceError as exc:
-            raise _GENERATION_FAILED from exc
+        for attempt in range(1, _MAX_GENERATION_ATTEMPTS + 1):
+            reply_parts = []
+            try:
+                async for delta in self._ollama.chat_stream(
+                    messages=chat_messages, model=study_session.model
+                ):
+                    reply_parts.append(delta)
+                    yield "delta", delta
+            except OllamaServiceError as exc:
+                raise _GENERATION_FAILED from exc
+            if "".join(reply_parts).strip():
+                break
+            # chat_stream()은 content가 있는 조각만 yield하므로(ollama_service.py
+            # 참고), 여기까지 온 채로 reply_parts가 공백뿐이라는 건 클라이언트에
+            # "delta" 이벤트를 하나도 못 보냈다는 뜻이다 - 아직 아무것도 보여준
+            # 게 없으니 안전하게 통째로 다시 생성한다.
+            logger.warning(
+                "학습챗 스트리밍 응답 생성 검증 실패 (시도 %d/%d): 공백뿐임",
+                attempt,
+                _MAX_GENERATION_ATTEMPTS,
+            )
 
         reply = "".join(reply_parts)
+        if not reply.strip():
+            raise _GENERATION_FAILED
         # send_message()와 같은 이유(위 docstring 참고)로, 스트리밍 도중 세션이
         # 삭제되면 이 INSERT가 IntegrityError로 실패할 수 있다 - 404로 변환해
         # 라우트가 {"type": "error"} 프레임으로 우아하게 처리하게 한다.
