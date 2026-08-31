@@ -752,6 +752,50 @@ def test_stream_create_review_closes_connection_after_idle_timeout(client, monke
             ws.receive_json()
 
 
+def test_stream_create_review_rejects_further_messages_after_token_expires_mid_connection(client):
+    """study.py의 stream_message와 같은 이유(그쪽 테스트 docstring 참고)로,
+    get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 - 그
+    뒤로는 REST와 달리 connect 시점엔 유효했던 토큰이 그 사이 만료돼도
+    계속 인증된 것처럼 메시지를 처리했다. 1초 뒤 만료되는 토큰으로 연결한
+    뒤 만료를 기다리고, 그 다음 메시지를 보내면 정상 처리되지 않고 연결이
+    거부되는지 확인한다."""
+    import time as _time
+
+    import jwt as pyjwt
+    import pytest
+    from starlette.testclient import WebSocketDisconnect
+
+    from app.core.tokens import ACCESS_TOKEN_TYPE, decode_access_token
+
+    token = _signup_and_get_token(client, email="stream-review-expiring-token@example.com")
+
+    settings = get_settings()
+    user_id = decode_access_token(token, settings)["sub"]
+    now_ts = int(_time.time())
+    # WS 핸드셰이크(get_current_user_ws의 토큰 검증)가 끝나기 전에 만료되면
+    # 연결 자체가 거부돼(이 테스트가 확인하려는 "연결 도중 만료"와는 다른
+    # 상황) __enter__에서 바로 실패해버린다 - 전체 스위트처럼 스레드가 많을
+    # 때는 핸드셰이크 자체가 지연될 수 있어 넉넉한 여유를 둔다.
+    short_lived_token = pyjwt.encode(
+        {"sub": user_id, "type": ACCESS_TOKEN_TYPE, "iat": now_ts, "exp": now_ts + 5},
+        settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/interview/reviews/stream?token={short_lived_token}"
+    ) as ws:
+        _time.sleep(5.5)
+
+        # 통제 확인: 같은(이제 만료된) 토큰으로 REST 호출은 이미 401을 낸다.
+        me = client.get("/api/v1/users/me", headers=_auth_headers(short_lived_token))
+        assert me.status_code == 401
+
+        ws.send_json(_create_payload())
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+
 def test_stream_create_review_logs_connect_and_disconnect_to_access_log(client, caplog):
     """AccessLogMiddleware(core/middleware.py)는 ASGI "http" scope만 다뤄서 이
     WebSocket 연결은 지금까지 구조화된 접근 로그(haruhan.access)에 전혀 남지
@@ -1063,9 +1107,16 @@ def test_stream_create_review_disconnect_during_delta_send_logs_client_disconnec
     original_access_info = access_logger.info
 
     def _tracking_info(msg, *args, **kwargs):
+        # 먼저 실제 로거 호출을 완전히 끝내 caplog의 핸들러 체인에 레코드가
+        # 실제로 들어간 뒤에 Event를 세운다 - 순서를 뒤집으면(Event를 먼저
+        # 세우면) 메인 스레드가 wait()에서 깨어나 caplog.records를 확인하는
+        # 시점과 이 스레드가 실제로 handler.emit()까지 끝내는 시점 사이에
+        # 아주 좁은 경합 구간이 생겨, 드물게(전체 스위트에서 관찰됨) Event는
+        # 세워졌는데 레코드는 아직 안 보이는 상태로 읽어버릴 수 있다.
+        result = original_access_info(msg, *args, **kwargs)
         if isinstance(msg, str) and msg.startswith("ws_event=disconnect"):
             disconnect_logged.set()
-        return original_access_info(msg, *args, **kwargs)
+        return result
 
     access_logger.info = _tracking_info
 

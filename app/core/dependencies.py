@@ -68,6 +68,25 @@ async def get_current_user_ws(
     return user
 
 
+def is_ws_token_expired(token: str, settings: Settings) -> bool:
+    """get_current_user_ws()는 accept() 직전 딱 한 번만 토큰을 검증한다 - 그
+    뒤로 연결이 살아있는 동안(수명이 ws_idle_timeout_seconds로만 제한되는데,
+    이 타임아웃은 메시지를 주고받을 때마다 매번 새로 갱신되므로 활발히
+    쓰는 연결은 사실상 무기한 연장될 수 있다) 그 토큰의 만료(exp)를 다시
+    확인하는 곳이 없었다. REST 엔드포인트는 get_current_user()가 요청마다
+    매번 새로 검증하는 것과 달리, WS 스트리밍 라우트(학습챗/면접복기)는
+    connect 시점에 유효했던 토큰이 그 뒤로 만료돼도 계속 인증된 것처럼
+    메시지를 처리했다 - access_token_expire_minutes(기본 30분)가 명시적으로
+    지키려는 보안 경계(유출된 토큰이 계속 쓰이는 기간을 제한)가 이 두
+    엔드포인트에서만 사실상 무력화된 셈이다. 라우트가 매 메시지 처리 전에
+    이 함수로 다시 확인해, 만료됐으면 연결을 끊는다."""
+    try:
+        decode_access_token(token, settings)
+    except (jwt.InvalidTokenError, ValueError, KeyError):
+        return True
+    return False
+
+
 _active_ws_connections = 0
 _ws_connections_lock = asyncio.Lock()
 

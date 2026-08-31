@@ -7170,3 +7170,83 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (190라운드)
+
+- [x] 214. 학습챗/면접복기 WebSocket 스트리밍이 connect 시점에만 access
+      token을 검증하고, 그 뒤로 연결이 살아있는 동안은 만료(exp)를 다시
+      확인하지 않아서 - REST 엔드포인트(매 요청마다 `get_current_user()`가
+      매번 새로 검증)와 달리 `ACCESS_TOKEN_EXPIRE_MINUTES`(기본 30분)라는
+      명시적 보안 경계가 이 두 엔드포인트에서만 사실상 무력화돼 있던 문제
+      해소.
+
+      `get_current_user_ws()`(`app/core/dependencies.py`)는 FastAPI
+      의존성으로 `accept()` 직전 딱 한 번만 실행돼 토큰을 검증한다. 그
+      뒤로는 `while True:` 루프가 `websocket.receive_json()`을
+      `ws_idle_timeout_seconds`(기본 5분)로 기다리는데, 이 타임아웃은
+      메시지를 주고받을 때마다 매번 새로 갱신된다 - 즉 활발하게 채팅을
+      이어가는 연결은 처음 연결할 때 쓴 토큰 하나로 사실상 무기한
+      연장될 수 있고, 그 토큰이 그 사이 만료돼도 아무도 다시 확인하지
+      않는다. `access_token_expire_minutes`는 `app/core/config.py`에서
+      "유출된 토큰이 계속 쓰이는 기간을 제한"하는 명시적 보안 경계로
+      다뤄지는 값인데(0 이하를 시작 시점에 막는 검증까지 갖춤), 이
+      경계가 가장 오래 열려 있는(그리고 가장 민감한 LLM 채팅을 다루는)
+      두 엔드포인트에서만 지켜지지 않고 있었다.
+
+      실제로 재현했다: 정상 로그인 뒤 1초 후 만료되도록 access token을
+      직접 서명해(`app.core.tokens`가 쓰는 것과 같은 시크릿/알고리즘)
+      그 토큰으로 WS에 연결하고, 만료를 기다린 뒤 같은 토큰으로 REST
+      `GET /users/me`를 호출하면 이미 401이 나는 것과 대조적으로,
+      이미 열려 있던 WS 연결에는 그대로 메시지를 보내 정상적으로
+      스트리밍 응답을 받을 수 있었다.
+
+      `app/core/dependencies.py`에 `is_ws_token_expired(token, settings)`
+      헬퍼를 추가했다 - `decode_access_token()`을 다시 호출해 만료
+      여부만 boolean으로 돌려준다(`get_current_user_ws`와 같은 검증
+      함수를 재사용해 로직을 한 곳에 유지). 두 라우트(`routes/study.py`의
+      `stream_message`, `routes/interview_review.py`의
+      `stream_create_review`) 모두 매 메시지를 실제로 처리하기 전마다
+      (JSON 파싱 직후, 콘텐츠 검증/AI 호출 전) 이 헬퍼로 다시 확인해,
+      만료됐으면 유휴 타임아웃과 같은 패턴으로 `WS_1008_POLICY_VIOLATION`
+      으로 연결을 닫고 `disconnect_reason = "token_expired"`로 접근
+      로그에 남긴다.
+
+      `tests/test_study.py`/`tests/test_interview_review.py`에 각각
+      1개씩 추가했다 - 로그인 직후 실제 유효한 세션/토큰으로 정상
+      셋업한 뒤, 5초 후 만료되도록 직접 서명한 토큰으로 연결하고(핸드셰이크
+      자체가 끝나기 전에 만료되면 이 테스트가 확인하려는 상황과 달리
+      연결 자체가 거부돼버리므로, 전체 스위트처럼 스레드가 많을 때의
+      핸드셰이크 지연도 버틸 수 있게 여유를 넉넉히 뒀다) 만료를 기다린
+      뒤, 같은 토큰으로 REST 호출은 이미 401인 것을 확인(통제)하고, 그
+      다음 WS 메시지는 정상 처리되지 않고 연결이 거부되는지 확인한다.
+      `git stash`로 세 파일(`dependencies.py`/`study.py`/
+      `interview_review.py`) 수정만 되돌리면 두 테스트 다 정확히 위에서
+      재현한 것과 똑같은 증상(만료된 토큰으로도 메시지가 정상 처리됨)으로
+      실패하는 것까지 확인했다.
+
+      (부수적으로) 새 테스트를 검증하려고 전체 회귀를 여러 번 돌리는
+      과정에서, 188라운드가 고쳤던 두 WS 회귀 테스트의
+      `threading.Event` 기반 동기화가 여전히 드물게(전체 스위트 안에서만)
+      실패하는 걸 다시 발견했다 - 이번엔 `disconnect_logged.wait()`는
+      정상적으로 풀리는데(Event는 세워짐) 정작 `caplog.records`엔 그
+      레코드가 아직 없는 증상이었다. 원인은 그 헬퍼가 `access_logger.info()`
+      의 실제 호출(caplog 핸들러까지 실제로 전달하는 부분)보다 **먼저**
+      `Event.set()`을 해서, 메인 스레드가 `wait()`에서 깨어나
+      `caplog.records`를 확인하는 시점과 백그라운드 스레드가 실제로
+      로거 호출을 끝내는 시점 사이에 아주 좁은 경합 구간이 생기고
+      있었기 때문이다 - 순서를 뒤집어(실제 로거 호출을 완전히 끝낸
+      뒤에 `Event.set()`) 그 경합 구간 자체를 없앴다. 이 라운드가 새로
+      추가한 토큰 만료 테스트도 처음엔 전체 스위트 안에서만 드물게
+      실패했는데(핸드셰이크가 끝나기 전에 forged 토큰이 만료돼버림),
+      원인은 별개였고(위에서 설명한 여유 시간 부족) 마찬가지로 이번
+      라운드에서 함께 고쳐 확인했다. 두 수정 이후 전체 스위트를 연달아
+      2번 통과시켜 확인했다.
+
+      전체 615개 테스트 통과(613 → 615, 새 테스트 2개), `core/
+      dependencies.py`/`routes/study.py`/`routes/interview_review.py`
+      셋 다 커버리지 100% 유지, `mypy app tests scripts` 클린. 이번엔
+      클라이언트가 실제로 관찰할 수 있는 새 동작(오래 열어둔 WS 연결이
+      토큰 만료로 코드 1008로 끊길 수 있게 됨)이라 `docs/
+      FRONTEND_INTEGRATION.md`에도 반영했다 - `POST /auth/refresh`로
+      새 토큰을 받아 재연결하라는 안내를 추가했다. DB 스키마 변경은
+      없어 마이그레이션은 필요 없었다.
+

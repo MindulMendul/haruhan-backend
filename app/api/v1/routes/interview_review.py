@@ -24,6 +24,7 @@ from app.core.dependencies import (
     get_current_user_ws,
     get_ollama_service,
     get_rag_service,
+    is_ws_token_expired,
     limit_ws_connections,
 )
 from app.core.errors import sanitize_pydantic_errors
@@ -166,6 +167,9 @@ async def stream_create_review(
     """
     await websocket.accept()
     settings = get_settings()
+    # get_current_user_ws()가 이미 검증했으므로 항상 존재한다.
+    token = websocket.query_params.get("token")
+    assert token is not None
     client_ip = websocket.client.host if websocket.client else "127.0.0.1"
     connect_time = time.monotonic()
     access_logger.info(
@@ -185,6 +189,19 @@ async def stream_create_review(
             except json.JSONDecodeError:
                 await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
                 continue
+
+            # get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 -
+            # 그 뒤로는 REST(매 요청마다 get_current_user()가 다시 검증)와
+            # 달리 아무도 다시 확인하지 않아, connect 시점엔 유효했던 토큰이
+            # 그 사이 만료돼도 계속 인증된 것처럼 메시지를 처리했다(학습챗의
+            # 같은 픽스와 동일한 이유로 실제 재현해 확인함). 메시지를
+            # 처리하기 전마다 매번 다시 확인해, 만료됐으면 REST와 마찬가지로
+            # 거부한다.
+            if is_ws_token_expired(token, settings):
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="token expired")
+                disconnect_reason = "token_expired"
+                break
+
             try:
                 payload = InterviewReviewCreateRequest.model_validate(raw_payload)
             except ValidationError as exc:
