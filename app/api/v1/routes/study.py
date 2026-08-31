@@ -254,6 +254,27 @@ async def stream_message(
                         )
             except HTTPException as exc:
                 await websocket.send_json({"type": "error", "detail": exc.detail})
+            except WebSocketDisconnect:
+                # 스트리밍 도중(위 send_json 여러 번 중 아무 데서나) 클라이언트가
+                # 사라지면(탭 닫힘, 네트워크 끊김, 모바일 앱 백그라운드 전환 등)
+                # Starlette의 WebSocket.send()가 전송 계층의 OSError를 그대로
+                # WebSocketDisconnect(code=1006)로 바꿔서 던진다(websockets.py 참고) -
+                # 이 예외도 Exception의 하위 클래스라, 아래 `except Exception:`이
+                # 아니라 여기서 먼저 잡아야 한다. 여기서 잡지 않으면 아래
+                # `except Exception:`이 이걸 "예상 못 한 서버 오류"로 오분류해
+                # send_json으로 에러 메시지를 다시 보내려 하는데, 그 시점엔 이미
+                # Starlette가 소켓을 DISCONNECTED로 표시해둔 뒤라 그 재전송 시도
+                # 자체가 `RuntimeError('Cannot call "send" once a close message
+                # has been sent.')`로 실패한다 - 그 어디에도 안 잡혀서 코루틴
+                # 밖으로 그대로 새어나간다(184라운드 주석대로 ServerErrorMiddleware
+                # 도 websocket scope는 안 건드림). 실제 stream_message를 그대로
+                # 호출하면서 두 번째 send_json에서 OSError가 나도록 만들어 이
+                # RuntimeError가 실제로 코루틴을 뚫고 나가는 것까지 직접 재현해
+                # 확인했다. 여기서 다시 던져 바깥쪽 `except WebSocketDisconnect
+                # as exc:`(185라운드가 code로 종료 사유를 구분하도록 고친 바로 그
+                # 핸들러)가 정상적인 클라이언트 종료로 분류하게 한다 - 재전송을
+                # 시도하지 않는다.
+                raise
             except Exception:
                 # main.py의 전역 unhandled_exception_handler(app.exception_handler(Exception))는
                 # Starlette의 ServerErrorMiddleware에만 걸리는데, 이 미들웨어는 websocket

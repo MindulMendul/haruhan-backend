@@ -233,6 +233,18 @@ async def stream_create_review(
                         )
             except HTTPException as exc:
                 await websocket.send_json({"type": "error", "detail": exc.detail})
+            except WebSocketDisconnect:
+                # 스트리밍 도중(위 send_json 여러 번 중 아무 데서나) 클라이언트가
+                # 사라지면 Starlette의 WebSocket.send()가 전송 계층의 OSError를
+                # 그대로 WebSocketDisconnect(code=1006)로 바꿔서 던진다 - 이
+                # 예외도 Exception의 하위 클래스라, study.py의 stream_message와
+                # 같은 이유(그쪽 주석 참고, 실제로 재현해 확인함)로 아래
+                # `except Exception:`이 아니라 여기서 먼저 잡아 그대로 다시
+                # 던진다 - 이미 DISCONNECTED인 소켓에 에러 메시지를 다시
+                # 보내려다 잡히지 않는 RuntimeError로 새어나가는 것을 막고,
+                # 바깥쪽 `except WebSocketDisconnect as exc:`(185라운드)가
+                # 정상적인 클라이언트 종료로 분류하게 한다.
+                raise
             except Exception:
                 # main.py의 전역 unhandled_exception_handler(app.exception_handler(Exception))는
                 # Starlette의 ServerErrorMiddleware에만 걸리는데, 이 미들웨어는 websocket

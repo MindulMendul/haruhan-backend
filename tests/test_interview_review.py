@@ -851,6 +851,82 @@ def test_stream_create_review_unexpected_exception_sends_error_event_and_logs(cl
     assert "처리되지 않은 예외" in caplog.text
 
 
+def test_stream_create_review_disconnect_during_delta_send_logs_client_disconnect_not_error(
+    client, caplog
+):
+    """study.py의 stream_message와 같은 이유(그쪽 테스트 docstring 참고)로,
+    스트리밍 도중 클라이언트가 실제로 사라지면 Starlette의 WebSocket.send()가
+    전송 계층 OSError를 WebSocketDisconnect(1006)로 바꿔 던진다 - 이 라우트가
+    `except WebSocketDisconnect: raise`로 먼저 잡아 다시 던지지 않으면 아래
+    `except Exception:`이 이미 DISCONNECTED인 소켓에 에러 메시지를 다시
+    보내려다 RuntimeError로 새어나간다(186라운드 픽스). ASGI 전송 콜백
+    (self._send)만 특정 시점에 OSError를 던지게 바꿔치기해 WebSocket.send()의
+    실제 상태 전이 로직을 그대로 타면서 재현한다."""
+    import time as _time
+
+    from starlette.websockets import WebSocket
+
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+
+    call_count = {"n": 0}
+    original_send = WebSocket.send
+
+    async def _flaky_send(self, message):
+        call_count["n"] += 1
+        # 1번째 send=accept, 2번째=첫 delta("잘한"), 3번째=두 번째
+        # delta("점입니다") - 스트리밍이 이미 시작된 뒤(첫 delta는 정상 도착)
+        # 그 다음 전송에서 클라이언트가 사라지는 상황을 재현한다.
+        if call_count["n"] == 3:
+            original_transport_send = self._send
+
+            async def _raise_oserror(msg):
+                raise OSError("Broken pipe (simulated client disconnect)")
+
+            self._send = _raise_oserror
+            try:
+                await original_send(self, message)
+            finally:
+                self._send = original_transport_send
+        else:
+            await original_send(self, message)
+
+    import logging
+
+    caplog.set_level(logging.INFO)
+
+    monkeypatch_target = WebSocket.send
+    WebSocket.send = _flaky_send
+    try:
+        token = _signup_and_get_token(client, email="stream-review-mid-disconnect@example.com")
+
+        with client.websocket_connect(
+            f"/api/v1/interview/reviews/stream?token={token}"
+        ) as ws:
+            ws.send_json(_create_payload())
+            first_delta = ws.receive_json()
+            assert first_delta == {"type": "delta", "content": "잘한"}
+
+            # 서버가 실제로 3번째 send(두 번째 delta)까지 진행할 시간을 준다 -
+            # 이 시점 이후로는 서버가 더 이상 아무것도 보내지 않으므로(정상
+            # 처리 시에도, 버그 상황에도) 여기서 다시 receive_json()을 부르면
+            # 영원히 대기한다.
+            deadline = _time.monotonic() + 5
+            while call_count["n"] < 3 and _time.monotonic() < deadline:
+                _time.sleep(0.02)
+            assert call_count["n"] == 3, "서버가 3번째 send까지 도달하지 못했다"
+    finally:
+        WebSocket.send = monkeypatch_target
+
+    assert "처리되지 않은 예외" not in caplog.text
+    disconnect_records = [
+        r.getMessage() for r in caplog.records if r.name == "haruhan.access"
+    ]
+    disconnect_records = [m for m in disconnect_records if m.startswith("ws_event=disconnect")]
+    assert len(disconnect_records) == 1
+    assert "reason=client_disconnect" in disconnect_records[0]
+
+
 def test_stream_create_review_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):
     monkeypatch.setenv("CHAT_RATE_LIMIT", "1/minute")
     get_settings.cache_clear()

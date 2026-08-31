@@ -6898,3 +6898,77 @@
       정확도 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도, DB
       스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (186라운드)
+
+- [x] 210. 학습챗/면접복기 WebSocket 스트리밍 도중(첫 이벤트를 이미 보낸
+      뒤, 두 번째 이후의 `send_json` 호출 중 아무 데서나) 클라이언트가
+      실제로 사라지면(탭 닫힘, 네트워크 끊김, 모바일 앱 백그라운드
+      전환 등) 잡히지 않는 `RuntimeError`가 코루틴 밖으로 새어나가던
+      문제 해소 - 185라운드가 고친 것과는 다른 코드 경로다: 185라운드는
+      `receive_json()`으로 다음 메시지를 기다리는 바깥쪽 대기 지점에서
+      서버가 먼저 끊는 경우(재배포)를 다뤘고, 이번은 서버가 `send_json`으로
+      스트리밍 응답을 보내는 도중 클라이언트 쪽이 먼저 사라지는 경우다.
+
+      Starlette `WebSocket.send()`(`starlette/websockets.py`)의 상태
+      전이 로직을 직접 읽어 원인을 확인했다: `application_state`가
+      `CONNECTED`인 동안 ASGI 전송 계층 `_send()`가 `OSError`를 던지면
+      `application_state`를 `DISCONNECTED`로 바꾸고
+      `WebSocketDisconnect(code=1006)`를 그대로 다시 던진다. 그런데 이
+      예외도 `Exception`의 하위 클래스라, 두 라우트(`routes/study.py`의
+      `stream_message`, `routes/interview_review.py`의
+      `stream_create_review`) 모두 스트리밍 루프를 감싸는 `try` 블록에
+      전용 핸들러가 없어 그 아래 `except Exception:`(예상 못 한 서버
+      오류 처리용)이 그대로 붙잡았다. 이 핸들러는 "에러가 났으니
+      클라이언트에게 알려주자"며 `websocket.send_json({"type": "error",
+      ...})`을 다시 호출하는데, 이 시점엔 이미 소켓이 `DISCONNECTED`라
+      Starlette의 `WebSocket.send()`가 `else` 분기로 빠져
+      `RuntimeError('Cannot call "send" once a close message has been
+      sent.')`를 던진다 - 이 예외는 어디에도 안 잡혀서 라우트 코루틴
+      밖으로 그대로 새어나간다(184라운드가 확인한 대로
+      `ServerErrorMiddleware`도 websocket scope는 손대지 않아 이걸
+      막아줄 안전망이 없다). `TestClient`의 in-process 전송에서는 실제
+      전송 계층 `OSError`가 발생할 방법이 없어(174/175/185라운드가
+      정리한 것과 같은 이유) 지금까지 어느 테스트로도 드러난 적이
+      없었다.
+
+      두 단계로 재현해 확인했다: (1) Starlette `websockets.py`를 그대로
+      가져와 가짜 ASGI scope/receive/send로 `WebSocket.send()` 하나만
+      떼어내 OSError → WebSocketDisconnect(1006) → 이후 send 시도 시
+      RuntimeError 순서를 직접 확인, (2) 실제 `stream_message` 라우트를
+      그대로 호출하면서(가짜 Ollama 스트리밍 서비스 + 두 번째
+      ASGI-레벨 `send()` 호출에서만 `OSError`를 던지도록 `self._send`를
+      순간적으로 바꿔치기) 이 `RuntimeError`가 실제로 코루틴을 뚫고
+      나가는 것까지 end-to-end로 재현. (`send_json` 자체를 가로채는
+      방식은 시도했으나 실제 상태 전이를 건너뛰어 버그가 재현되지
+      않았다 - 반드시 `WebSocket.send()`가 진짜로 `application_state`를
+      `DISCONNECTED`로 바꾸도록 ASGI 전송 콜백 레벨에서 개입해야 한다.)
+
+      두 라우트 모두 스트리밍 `try` 블록에 `except HTTPException:`과
+      `except Exception:` 사이에 `except WebSocketDisconnect: raise`를
+      추가했다 - 이 예외를 별도로 잡아 그대로 다시 던져서, 바깥쪽
+      `except WebSocketDisconnect as exc:`(185라운드가 종료 코드로
+      사유를 구분하도록 고친 바로 그 핸들러)가 정상적인 클라이언트
+      종료(`disconnect_reason = "client_disconnect"`)로 분류하게
+      한다 - 이미 끊긴 소켓에 에러 메시지를 재전송하려는 시도 자체를
+      막는다.
+
+      `tests/test_study.py`/`tests/test_interview_review.py`에 각각
+      1개씩 회귀 테스트를 추가했다 - 위 (2)와 같은 방식(ASGI 전송
+      콜백을 특정 호출 순번에만 `OSError`를 던지도록 바꿔치기)으로
+      실제 `WebSocket.send()`의 상태 전이를 그대로 태우면서, 첫
+      이벤트는 정상 수신되고 그 다음 전송에서 서버가 끊기는 상황을
+      만든 뒤, 접근 로그에 `reason=client_disconnect`만 남고
+      "처리되지 않은 예외" 로그나 `RuntimeError`는 발생하지 않는지
+      확인한다. `git stash`로 두 라우트 파일 수정만 되돌리면 두
+      테스트 다 정확히 위에서 재현한 것과 똑같은 증상(`처리되지 않은
+      예외` 로그 + 잡히지 않은 `WebSocketDisconnect`/`RuntimeError`)으로
+      실패하는 것까지 확인했다.
+
+      전체 601개 테스트 통과(599 → 601), `routes/study.py`/`routes/
+      interview_review.py` 둘 다 커버리지 100% 유지, `mypy app tests
+      scripts` 클린. 클라이언트에게 보내는 메시지 프로토콜은 전혀
+      안 바뀌는(서버가 이미 끊긴 연결에 에러 메시지를 억지로 재전송하려던
+      시도를 그만두는, 로그 정확도와 예외 안전성 개선) 변경이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+
