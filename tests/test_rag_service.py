@@ -5,9 +5,10 @@ import uuid
 import pytest
 
 from app.core.config import get_settings
+from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
 from app.repositories.user_repository import UserRepository
 from app.services.ollama_service import OllamaServiceError
-from app.services.rag_service import RagService, _cosine_similarity
+from app.services.rag_service import RagService, _cosine_similarity, _rank_top_k
 import app.services.rag_service as rag_service_module
 
 
@@ -48,6 +49,31 @@ def test_cosine_similarity_zero_vector_is_zero():
     assert _cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
 
 
+def test_rank_top_k_skips_candidate_with_mismatched_embedding_dimension():
+    """list_for_user()는 같은 embedding_model "문자열"인 후보만 걸러줄 뿐,
+    실제 벡터 길이가 같다는 보장은 아무 데도 없다(같은 태그의 모델이 다른
+    차원으로 재배포되거나 EMBEDDING_MODEL 설정이 기존 색인 재생성 없이
+    바뀌면 차원이 다른 벡터끼리 섞일 수 있음). _cosine_similarity()의
+    zip(a, b)는 짧은 쪽에 맞춰 조용히 자르는데 norm은 원래 길이 그대로
+    계산되므로, 차원이 다른 벡터가 우연히 완벽한 점수(1.0)를 받아 실제로
+    관련 있는 기록을 밀어내고 1등을 차지할 수 있었다 - 이 재현을 그대로
+    unit test로 옮겨, 차원이 다른 후보가 채점에서 아예 제외되는지 확인한다."""
+    query = [1.0, 0.0, 0.0, 0.0]
+    dimension_mismatched = [1.0, 0.0]  # query와 차원이 다름 - 비교 불가능해야 함
+    true_relevant = [0.99, 0.01, 0.05, 0.1]
+
+    result = _rank_top_k(
+        query,
+        [
+            (dimension_mismatched, "차원 불일치 청크"),
+            (true_relevant, "진짜 관련 있는 청크"),
+        ],
+        top_k=1,
+    )
+
+    assert result == ["진짜 관련 있는 청크"]
+
+
 def test_index_and_retrieve_orders_by_similarity(db_session_factory):
     settings = get_settings()
 
@@ -74,6 +100,53 @@ def test_index_and_retrieve_orders_by_similarity(db_session_factory):
             results = await rag.retrieve_relevant(user_id=user.id, query="고양이에 대해 알려줘")
             assert results[0] == "고양이는 귀엽다"
             assert "강아지는 충성스럽다" in results
+
+    asyncio.run(_run())
+
+
+def test_retrieve_relevant_never_ranks_dimension_mismatched_chunk_first(db_session_factory):
+    """list_for_user()는 embedding_model "문자열"만 같은 청크를 후보로 주지,
+    실제 벡터 길이가 같다는 보장은 없다 - EMBEDDING_MODEL 설정이 기존 색인
+    재생성 없이 바뀌거나 같은 태그의 모델이 다른 차원으로 재배포되면, DB에
+    차원이 다른 embedding이 같은 embedding_model로 섞여 남을 수 있다.
+    KnowledgeChunkRepository.create()로 차원이 다른 청크를 실제 DB에 직접
+    심어(index_content()를 거치지 않고 embedding 길이를 정확히 통제하기
+    위해), retrieve_relevant()를 실제로 호출했을 때 그 청크가 진짜 관련
+    있는(같은 차원의) 청크를 밀어내고 1등을 차지하지 않는지 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            fake_ollama = FakeEmbeddingOllamaService({"질문": [1.0, 0.0, 0.0, 0.0]})
+            rag = RagService(session=session, ollama_service=fake_ollama, settings=settings)
+
+            chunks = KnowledgeChunkRepository(session)
+            # 차원이 다른(2차원) 청크 - query_embedding(4차원)과 zip()하면
+            # 짧은 쪽에 맞춰 잘려 우연히 완벽한 점수를 받을 수 있었다.
+            await chunks.create(
+                user_id=user.id,
+                source_type="study_message",
+                source_id=uuid.uuid4(),
+                content="차원 불일치 청크(가짜)",
+                embedding=[1.0, 0.0],
+                embedding_model=settings.embedding_model,
+            )
+            # 진짜 관련 있는(같은 4차원) 청크.
+            await chunks.create(
+                user_id=user.id,
+                source_type="study_message",
+                source_id=uuid.uuid4(),
+                content="진짜 관련 있는 청크",
+                embedding=[0.99, 0.01, 0.05, 0.1],
+                embedding_model=settings.embedding_model,
+            )
+            await session.commit()
+
+            results = await rag.retrieve_relevant(user_id=user.id, query="질문")
+            assert results == ["진짜 관련 있는 청크"]
 
     asyncio.run(_run())
 
@@ -268,6 +341,37 @@ def test_retrieve_relevant_scores_candidates_off_the_event_loop_thread(db_sessio
 
             assert scoring_threads, "채점 함수가 호출되지 않음"
             assert all(t is not main_thread for t in scoring_threads)
+
+    asyncio.run(_run())
+
+
+def test_retrieve_relevant_swallows_unexpected_ranking_error(db_session_factory, monkeypatch):
+    """list_for_user(DB 조회)/embed(임베딩 호출 실패) 두 단계는 이미 각자
+    예상 못한 오류를 삼키는데, 마지막 랭킹 단계(asyncio.to_thread(_rank_top_k,
+    ...))만 아무 보호가 없었다 - 189라운드가 정리한 "이 메서드의 모든 단계가
+    예상 못한 오류를 삼켜야 한다"는 원칙이 이 단계에서만 깨져 있었다.
+    _rank_top_k 자체가 예상 못한 예외를 던지도록 흉내내, 그 예외가 새어나가지
+    않고 빈 리스트로 처리되는지 확인한다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            fake_ollama = FakeEmbeddingOllamaService({"질문": [1.0, 0.0, 0.0]})
+            rag = RagService(session=session, ollama_service=fake_ollama, settings=settings)
+            await rag.index_content(
+                user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="내용"
+            )
+
+            def _broken_rank_top_k(query_embedding, candidates, top_k):
+                raise RuntimeError("랭킹 도중 예상 못한 오류라고 가정")
+
+            monkeypatch.setattr(rag_service_module, "_rank_top_k", _broken_rank_top_k)
+
+            result = await rag.retrieve_relevant(user_id=user.id, query="질문")
+            assert result == []
 
     asyncio.run(_run())
 
