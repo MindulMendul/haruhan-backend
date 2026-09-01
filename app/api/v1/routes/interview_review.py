@@ -196,6 +196,15 @@ async def stream_create_review(
                 # ASGI 메시지에 "text" 키가 없어 KeyError('text')가 그대로 새어나간다.
                 await websocket.send_json({"type": "error", "detail": "잘못된 요청 형식입니다."})
                 continue
+            except RecursionError:
+                # 204라운드: study.py의 stream_message()와 같은 이유(그쪽 주석 참고) -
+                # receive_json()이 결국 그대로 부르는 json.loads()는 배열/객체 중첩마다
+                # 재귀 호출을 쌓아서, "["*2000 + "1" + "]"*2000처럼 4KB도 안 되는 텍스트
+                # 프레임 하나로 파이썬 기본 재귀 한도(1000)를 넘겨 RecursionError를 낼 수
+                # 있다 - RuntimeError의 하위 클래스라 위 KeyError/JSONDecodeError 어느
+                # 쪽으로도 안 잡힌다.
+                await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
+                continue
 
             # get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 -
             # 그 뒤로는 REST(매 요청마다 get_current_user()가 다시 검증)와

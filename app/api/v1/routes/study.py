@@ -226,6 +226,21 @@ async def stream_message(
                 # 예외인데 클라이언트가 끊은 것처럼 보임).
                 await websocket.send_json({"type": "error", "detail": "잘못된 요청 형식입니다."})
                 continue
+            except RecursionError:
+                # 204라운드: receive_json()은 결국 json.loads(text)를 그대로 호출하는데
+                # (starlette/websockets.py), 파이썬 표준 JSON 디코더는 배열/객체 중첩마다
+                # 재귀 호출을 쌓는다 - "["*2000 + "1" + "]"*2000처럼 4KB도 안 되는 텍스트
+                # 프레임 하나로 파이썬 기본 재귀 한도(1000)를 넘겨 RecursionError를 낼 수
+                # 있는 것까지 재현해 확인했다. RecursionError는 RuntimeError의 하위
+                # 클래스라 위 KeyError/json.JSONDecodeError 어느 쪽으로도 안 잡힌다 -
+                # 203라운드가 "같은 receive_json() 호출부, 다른 예외 타입"으로 KeyError를
+                # 추가했던 것과 정확히 같은 모양의 형제 공백이다. Dockerfile의
+                # --ws-max-size=1048576(바이트 크기 상한)는 이 재현 페이로드(4KB
+                # 미만)를 전혀 못 막는다 - 문제는 바이트 "크기"가 아니라 중첩 "깊이"라서,
+                # 크기 제한을 아무리 낮춰도 얕고 넓은 대신 깊고 좁은 구조로 여전히
+                # 재귀 한도를 넘길 수 있다. 다른 잘못된 입력과 똑같이 삼킨다.
+                await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
+                continue
 
             # get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 -
             # 그 뒤로는 REST(매 요청마다 get_current_user()가 다시 검증)와

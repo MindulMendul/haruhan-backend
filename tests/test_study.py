@@ -1462,6 +1462,38 @@ def test_stream_message_rejects_binary_frame(client):
                 break
 
 
+def test_stream_message_rejects_deeply_nested_json_frame(client):
+    """204라운드: receive_json()이 결국 그대로 부르는 json.loads()는 배열/객체
+    중첩마다 재귀 호출을 쌓는다 - "["*2000 + "1" + "]"*2000처럼 4KB도 안 되는
+    텍스트 프레임 하나로 파이썬 기본 재귀 한도(1000)를 넘겨 RecursionError를
+    낼 수 있는 것까지 실제로 재현해 확인했다. RecursionError는 RuntimeError의
+    하위 클래스라 json.JSONDecodeError/KeyError(203라운드) 어느 쪽으로도 안
+    잡혀 그대로 새어나갔다 - Dockerfile의 --ws-max-size(바이트 크기 상한)도
+    이 재현 페이로드를 못 막는다(문제는 크기가 아니라 중첩 깊이). 연결이
+    죽지 않고 에러 이벤트를 받은 뒤에도 정상 메시지를 계속 처리할 수 있는지
+    확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "깊은 중첩 JSON 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        deeply_nested = "[" * 2000 + "1" + "]" * 2000
+        ws.send_text(deeply_nested)
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json({"content": "안녕"})
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
 def test_stream_message_rejects_content_over_max_length(client, monkeypatch):
     monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
     get_settings.cache_clear()

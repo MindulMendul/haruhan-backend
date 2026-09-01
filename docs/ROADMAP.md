@@ -8029,3 +8029,46 @@
       `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (204라운드)
+
+- [x] 228. 203라운드가 고친 것과 같은 `websocket.receive_json()` 호출부에,
+      같은 함수가 낼 수 있는 또 다른 예외 타입이 여전히 안 잡히고 있었다.
+      `receive_json()`은 결국 `json.loads(text)`를 그대로 호출하는데
+      (starlette/websockets.py), 파이썬 표준 JSON 디코더는 배열/객체
+      중첩마다 재귀 호출을 쌓는다 - `"["*2000 + "1" + "]"*2000`처럼 4KB도
+      안 되는 텍스트 프레임 하나로 파이썬 기본 재귀 한도(1000)를 넘겨
+      `RecursionError`를 낼 수 있는 것까지 실제 앱에 대고 재현해 확인했다.
+      `RecursionError`는 `RuntimeError`의 하위 클래스라 `json.JSONDecode
+      Error`/`KeyError`(203라운드) 어느 쪽으로도 안 잡혀 코루틴 밖으로
+      그대로 새어나갔다 - `KeyError`를 처음 잡은 203라운드의 원칙("같은
+      `receive_json()` 호출부, 다른 예외 타입도 마저 잡는다")이 아직
+      한 종류 더 빠져 있었던 셈이다. `Dockerfile`의 `--ws-max-size=
+      1048576`(프레임 바이트 크기 상한)도 이 재현 페이로드를 전혀 못
+      막는다는 것까지 확인했다 - 문제는 바이트 "크기"가 아니라 중첩
+      "깊이"라, 크기 제한을 아무리 낮춰도 얕고 넓은 대신 깊고 좁은
+      구조로 여전히 재귀 한도를 넘길 수 있다.
+
+      재현 과정에서 203라운드와 같은 access 로그 왜곡도 다시 확인했다 -
+      서버 쪽 크래시인데도 `disconnect_reason`이 기본값 `"client_
+      disconnect"`로 잘못 남고, 어디에도 `logger.exception(...)`이 없어
+      로그만 봐서는 정상 종료처럼 보였다.
+
+      두 라우트(`study.py`의 `stream_message`, `interview_review.py`의
+      `stream_create_review`) 모두 기존 `except KeyError:` 바로 뒤에
+      `except RecursionError:`를 추가해, 다른 잘못된 입력과 똑같이
+      `{"type": "error", "detail": "잘못된 JSON 형식입니다."}`로 응답하고
+      연결은 계속 유지한다. `tests/test_study.py`/`tests/test_interview_
+      review.py`에 기존 `..._rejects_binary_frame` 테스트와 같은
+      스타일로 `..._rejects_deeply_nested_json_frame` 테스트를 각각
+      추가했다 - 깊게 중첩된 JSON 프레임 전송 뒤 `{"type": "error"}`를
+      받는지, 그 뒤로도 연결이 살아있어 정상 메시지를 끝까지(`"done"`
+      까지) 처리할 수 있는지 확인한다. `git stash`로 두 라우트 수정만
+      되돌리면 새 테스트 2개 전부 정확히 재현한 증상(`RecursionError`)
+      으로 실패하는 것까지 확인했다.
+
+      전체 668개 테스트 통과(666 → 668), `app/api/v1/routes/study.py`/
+      `interview_review.py` 커버리지 100% 유지, `mypy app tests scripts`
+      클린. 클라이언트 프로토콜은 기존 `{"type": "error"}` 규약을 그대로
+      따르는 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

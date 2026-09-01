@@ -1075,6 +1075,30 @@ def test_stream_create_review_rejects_binary_frame(client):
                 break
 
 
+def test_stream_create_review_rejects_deeply_nested_json_frame(client):
+    """204라운드: study.py의 stream_message()와 같은 이유(그쪽 주석 참고) -
+    receive_json()이 결국 그대로 부르는 json.loads()는 배열/객체 중첩마다
+    재귀 호출을 쌓아서, "["*2000 + "1" + "]"*2000처럼 4KB도 안 되는 텍스트
+    프레임 하나로 파이썬 기본 재귀 한도(1000)를 넘겨 RecursionError를 낼 수
+    있다 - RuntimeError의 하위 클래스라 json.JSONDecodeError/KeyError(203
+    라운드) 어느 쪽으로도 안 잡혀 그대로 새어나갔다."""
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-review-recursion@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        deeply_nested = "[" * 2000 + "1" + "]" * 2000
+        ws.send_text(deeply_nested)
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json(_create_payload())
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
 def test_stream_create_review_sends_error_event_when_feedback_is_blank(client):
     """REST 버전(test_create_review_returns_502_when_feedback_is_blank)과 같은
     확인을 스트리밍(WebSocket) 경로에도 반복한다 - chat_stream()은 content가
