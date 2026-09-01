@@ -3,3 +3,11 @@ pytest==9.1.1
 pytest-cov==7.1.0
 pip-audit==2.10.1
 aiosqlite==0.22.1
+mypy==1.19.1
+# tests/test_docker_compose.py가 docker-compose.yml을 실제로 파싱해서(단순 텍스트
+# 검증이 아니라) 서비스마다 필요한 설정이 빠짐없이 있는지 확인한다.
+PyYAML==6.0.3
+# PyYAML 자체엔 인라인 타입 힌트가 없어(py.typed 마커 없음), mypy가 "Library stubs
+# not installed"로 실패한다 - CI의 `mypy app tests`가 test_docker_compose.py의
+# `import yaml`을 검사할 때 이게 없으면 그대로 깨진다.
+types-PyYAML==6.0.12.20260815

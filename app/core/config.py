@@ -1,6 +1,20 @@
 from functools import lru_cache
 
+from limits.util import parse_many
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_MIN_JWT_SECRET_KEY_LENGTH = 32
+# core/tokens.py는 jwt_secret_key를 대칭키(HMAC) 문자열로 그대로 쓴다 - RS/ES/PS
+# 계열(비대칭키)은 이 앱에 아예 배선돼 있지 않으므로(공개/개인키 쌍이 아니라 이
+# 하나의 문자열만 다룸) 지원 대상에서 제외한다. "none"은 PyJWT가 기본으로 지원하는
+# 진짜 알고리즘이지만 서명 검증 자체를 생략하는(누구나 위조 가능) 값이라 명시적으로
+# 뺀다 - 셋 다 PyJWT(2.13.0, requirements.txt에 고정)가 추가 의존성 없이 기본
+# 지원하는 알고리즘 목록(jwt.algorithms.get_default_algorithms())에서 "none"만 뺀
+# 나머지다.
+_VALID_JWT_ALGORITHMS = {"HS256", "HS384", "HS512"}
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_VALID_ENVIRONMENTS = {"development", "production"}
 
 
 class Settings(BaseSettings):
@@ -19,15 +33,37 @@ class Settings(BaseSettings):
     # 콤마로 구분된 origin 목록. 비어있으면 모든 cross-origin 요청을 차단한다(안전한 기본값).
     cors_origins: str = ""
 
-    # 설정되지 않으면 /api/chat 인증이 비활성화된다 (개발 편의용, 운영 환경에서는 반드시 설정할 것).
+    # 설정되지 않으면 /api/v1/chat 인증이 비활성화된다 (개발 편의용, 운영 환경에서는 반드시 설정할 것).
     api_key: str | None = None
 
     chat_rate_limit: str = "10/minute"
     max_prompt_length: int = 4000
 
+    # 학습챗 한 세션의 대화가 길어질수록 send_message/stream_message가 매번 그
+    # 세션의 전체 메시지 히스토리를 그대로 Ollama 프롬프트에 다시 실어 보낸다 -
+    # 대화가 계속될수록 한 번의 호출에 드는 토큰 수가 무한정 늘어나서, 언젠가
+    # 모델의 컨텍스트 윈도우를 넘기면 앞부분이 조용히 잘리거나 응답 품질/지연이
+    # 나빠진다. 가장 최근 이 개수만큼의 메시지만 골라 프롬프트에 포함한다
+    # (0 이하로 설정하면 히스토리 없이 이번 메시지만 보낸다).
+    max_chat_history_messages: int = 40
+
     # 로그인/회원가입/비밀번호 변경처럼 브루트포스 대상이 될 수 있는 엔드포인트용 제한.
     # LLM 호출 비용 때문에 두는 chat_rate_limit과는 성격이 달라 분리해둔다.
     auth_rate_limit: str = "5/minute"
+
+    # 데이터 export(/export/me)용 제한. 학습챗/퀴즈/면접연습/면접복기 전체 기록을
+    # 페이지네이션 없이 한 번에 조회하는 유일한 엔드포인트라, LLM 호출 비용이나
+    # 브루트포스와는 다른 이유(무제한 반복 호출 시 계정 이력 크기에 비례하는 DB
+    # 부하)로 별도로 분리해둔다.
+    export_rate_limit: str = "10/minute"
+
+    # 모델 목록 조회(/models)용 제한. 이 앱에서 인증 없이 공개된 유일한 엔드포인트라
+    # (민감 정보가 아니라 의도적으로 그렇게 둠) 레이트리밋이 아예 없으면 익명
+    # 호출자가 원하는 만큼 반복 호출할 수 있다 - 대부분은 60초 TTL 캐시로
+    # 막히지만, 캐시가 막 만료된 순간 동시에 들어온 요청들은 각자 Ollama를
+    # 직접 호출한다(캐시 미스 몰림). LLM 호출 자체가 아니라 목록 조회일
+    # 뿐이라 chat_rate_limit보다는 넉넉하게 잡는다.
+    models_rate_limit: str = "30/minute"
 
     # 요청 바디 최대 크기 (바이트). 기본 1MB.
     max_body_size_bytes: int = 1_048_576
@@ -43,11 +79,42 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
 
+    @field_validator("access_token_expire_minutes", "refresh_token_expire_days")
+    @classmethod
+    def _validate_token_expiry_is_positive(cls, value: int, info: ValidationInfo) -> int:
+        """core/tokens.py의 create_access_token()/refresh_token_expiry()는 이
+        값을 그대로 `now + value * 단위`로 만료 시각을 계산한다 - 0이나 음수가
+        들어오면(오타, 단위 착각 등) 발급되는 토큰이 태어날 때부터 이미 만료된
+        상태가 된다. Settings() 생성 자체는 성공하고 앱도 정상적으로 뜨기 때문에,
+        로그인/회원가입은 겉보기엔 멀쩡히 200을 반환하면서 발급한 토큰만 곧바로
+        무효가 되는, 시작 시점에는 전혀 티가 안 나는 전면적인 인증 장애로
+        이어진다. 다른 숫자 설정들(예: DEFAULT_QUIZ_QUESTION_COUNT)과 같은
+        이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            field_name = info.field_name or "value"
+            raise ValueError(f"{field_name.upper()}({value})는 0보다 커야 합니다.")
+        return value
+
     # 퀴즈 생성 소스 텍스트 최대 길이 (문자 수). 학습 세션 전체를 소스로 쓸 수 있어
     # 일반 프롬프트(max_prompt_length)보다 넉넉하게 둔다.
     max_quiz_source_length: int = 20_000
     default_quiz_question_count: int = 5
     max_quiz_question_count: int = 20
+    # 문항 하나당 보기(choices) 개수 상한 - AI가 생성한 퀴즈 검증용 안전장치.
+    # max_quiz_question_count와 마찬가지로 사용자 요청 시점(question_count)에만
+    # 걸리던 상한이 AI 출력(모델이 실제로 몇 문항/몇 보기를 뱉는지)에는 전혀
+    # 적용되지 않던 신뢰 경계 공백을 메운다 - 프롬프트로 "부탁"할 뿐 구조적으로
+    # 강제되지 않으므로, 응답 payload 비대화/DB 행 폭증을 막는 최후의 안전장치다.
+    max_quiz_choice_count: int = 8
+
+    # RAG 백필 cron(run_scheduled_rag_backfill)이 한 번의 실행에서 재시도하는
+    # "미색인" 행의 최대 개수(카테고리당). 평상시엔 임베딩 API 일시 실패 같은
+    # 극소수만 걸려 무해하지만, Ollama 임베딩 엔드포인트가 며칠 연속 다운되면
+    # 그 기간 쌓인 미색인 행 전체가 복구 후 첫 실행에 한꺼번에 몰려, 순차
+    # 임베딩 호출을 도는 동안 DB 커넥션 풀 커넥션 하나를 비정상적으로 오래
+    # 점유할 수 있다. 여유 있게 잡은 안전장치이고, 상한에 걸려 못 처리한
+    # 나머지는 멱등적인 LEFT JOIN 쿼리라 다음날 자동으로 다시 잡힌다.
+    rag_backfill_batch_size: int = 500
 
     # 면접 연습 세션 하나당 최대 질문 수. 도달하면 다음 질문을 생성하지 않고
     # 클라이언트가 /complete를 호출해 종합 피드백을 받도록 유도한다.
@@ -55,6 +122,466 @@ class Settings(BaseSettings):
 
     # 면접 복기 content 최대 길이 (문자 수).
     max_review_content_length: int = 10_000
+
+    # RAG 검색용 임베딩 모델. Ollama에 별도로 pull 되어 있어야 한다.
+    embedding_model: str = "nomic-embed-text"
+    # 학습챗 답변 생성 시 참고자료로 첨부할 최대 청크 개수.
+    rag_top_k: int = 3
+    # retrieve_relevant()가 코사인 유사도 채점 대상으로 삼는 후보 청크 수의
+    # 상한. 색인된 청크(학습챗 메시지/퀴즈 소스/면접복기)는 만료/정리 로직이
+    # 없어 계정이 오래될수록 계속 쌓이기만 하는데, 원래는 이 후보 전체를 매
+    # 채팅/면접연습 턴마다 DB에서 통째로 읽어와 채점했다 - 이 값은 그 조회
+    # 자체를 최근 것부터 이 개수만큼으로 제한하는 안전장치다. RAG는 원래
+    # "가장 관련 있는" 청크를 찾는 게 목적이라 최신순 제한은 이론적으로는
+    # 오래된(하지만 더 관련 있을 수 있는) 자료를 검색 대상에서 제외할 수
+    # 있지만, 기본값(2000)은 현실적인 사용량보다 훨씬 크게 잡아 정상적인
+    # 계정에서는 사실상 아무 영향이 없고 극단적으로 커진 계정에 대한
+    # 최후 방어선 역할만 한다 - 퀴즈 생성 시 학습 세션 소스가 너무 길면
+    # 가장 최근 대화만 남기는 것(max_quiz_source_length)과 같은 절충이다.
+    # 데이터 규모가 실제로 이 상한에 자주 걸릴 정도가 되면, 임베딩을 그대로
+    # JSON으로 저장해 파이썬에서 전수 비교하는 지금 방식 자체를 pgvector
+    # 같은 벡터 인덱스로 옮기는 게 근본적인 해결책이다(knowledge_chunk.py
+    # 모델 주석 참고).
+    rag_max_candidate_chunks: int = 2000
+
+    # WebSocket 스트리밍 엔드포인트(학습챗/면접복기)가 클라이언트로부터 다음
+    # 메시지를 이 시간(초) 안에 못 받으면 연결을 끊는다. get_db/get_ollama_service
+    # 의존성은 WebSocket 연결이 살아있는 동안 DB 커넥션 풀의 커넥션 하나와 Ollama
+    # httpx 클라이언트를 계속 붙잡고 있는데, 클라이언트가 접속만 해두고 메시지를
+    # 영영 안 보내면(느린 네트워크, 방치, 또는 의도적 남용) 이 자원이 무한정
+    # 잠긴다 - DB 풀 크기(기본 pool_size=5 + max_overflow=5 = 10)보다 적은 수의
+    # 이런 방치된 연결만으로도 풀 전체가 고갈되어 다른 모든 요청이 막힐 수 있다.
+    ws_idle_timeout_seconds: float = 300.0
+
+    # 동시에 열 수 있는 WebSocket 연결(학습챗/면접복기 스트리밍 합산) 수의 상한.
+    # 위 ws_idle_timeout_seconds는 "방치된" 연결이 DB 커넥션을 무한정 붙잡는
+    # 것만 막을 뿐, 클라이언트가 메시지를 계속 보내 "방치"로 안 잡히는 활성
+    # 연결을 동시에 여러 개(풀 크기보다 많이) 열어버리는 것까지는 막지 못한다 -
+    # WebSocket 연결 하나가 accept부터 종료까지 DB 커넥션 풀의 커넥션 하나를
+    # 계속 점유하므로(get_db가 연결 전체 수명 동안 열려 있는 FastAPI yield
+    # 의존성이라, 메시지 하나 처리할 때만 잠깐 빌리는 게 아님), 풀 크기(기본
+    # pool_size=5 + max_overflow=5 = 10)보다 많은 동시 연결이 열리면 풀 전체가
+    # 고갈돼 이 WebSocket 라우트뿐 아니라 앱의 다른 모든 HTTP/WebSocket 요청까지
+    # 막힌다. 기본값(6)은 풀 용량보다 낮게 잡아, 일반 HTTP 트래픽이 쓸 여유
+    # 커넥션을 남겨둔다.
+    max_concurrent_ws_connections: int = 6
+
+    # /health/ready(오케스트레이터/로드밸런서가 트래픽 라우팅 판단에 쓰는 엔드포인트)
+    # 가 DB/Redis/Ollama 각각을 확인할 때 쓰는 타임아웃. 이 값이 없으면 각 확인은
+    # 그 클라이언트 자신의 기본 타임아웃(asyncpg 연결 60초, redis-py socket_timeout
+    # 5초, OllamaService 기본 60초)을 그대로 물려받는데, 그 상대가 완전히
+    # 죽은(연결 거부, 즉시 실패) 게 아니라 응답만 느려지는 상황(패킷 유실, GPU
+    # 과부하 등)에서는 readiness 확인 하나가 최대 60초까지 걸릴 수 있다 -
+    # readiness probe는 원래 "몇 초 안에 빠르게" 답해야 트래픽 라우팅에 의미가
+    # 있는데, 이러면 오케스트레이터의 probe 자체가 타임아웃나 계속 unready로
+    # 잘못 판정되고, 그 사이 도착한 다른 폴러들도 _readiness_cache_lock 때문에
+    # 같은 느린 확인을 함께 기다리게 된다. rate_limit.py의
+    # REDIS_SOCKET_TIMEOUT_SECONDS(1초, 147라운드)와 같은 "정상 왕복 시간보다
+    # 훨씬 넉넉하지만 무한정은 아닌" 상한 철학이다.
+    health_check_timeout_seconds: float = 3.0
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _validate_jwt_secret_key_length(cls, value: str) -> str:
+        """너무 짧은(추측/무차별대입에 취약한) 시크릿으로 앱이 조용히 뜨는 걸 막는다 -
+        HS256 권장 최소 길이(32바이트)에 맞춘 방어선. `openssl rand -hex 32`로
+        생성하면 64자가 나와 여유 있게 통과한다."""
+        if len(value) < _MIN_JWT_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"JWT_SECRET_KEY는 최소 {_MIN_JWT_SECRET_KEY_LENGTH}자 이상이어야 합니다 "
+                f"(예: `openssl rand -hex 32`로 생성). 현재 {len(value)}자."
+            )
+        return value
+
+    @field_validator("jwt_algorithm")
+    @classmethod
+    def _validate_jwt_algorithm(cls, value: str) -> str:
+        """200라운드: 이 필드는 바로 위 jwt_secret_key와 나란히 있으면서도 정작
+        검증이 하나도 없었다 - core/tokens.py의 create_access_token()이 이 값을
+        그대로 jwt.encode(algorithm=...)에 넘기는데, PyJWT가 모르는 값(오타,
+        대소문자 실수, 앞뒤 공백 등)이면 `NotImplementedError: Algorithm not
+        supported`를 던진다. Settings() 생성 자체와 앱 기동은 멀쩡히 성공하므로
+        (log_level/environment 등 이 파일의 다른 검증들과 같은 이유), 배포
+        직후에는 전혀 티가 안 나다가 첫 로그인/회원가입/게스트 세션 생성/토큰
+        갱신 요청에서야 처음으로 500이 터지는, 인증 기능 전체가 조용히 마비되는
+        장애로 이어진다 - 실제로 `JWT_ALGORITHM="HS256 "`(끝에 공백 하나)만으로
+        `Settings()`는 통과하고 `create_access_token()`이 그대로
+        `NotImplementedError`를 내는 것까지 재현해 확인했다. "none"은 PyJWT가
+        기본 지원하는 진짜 알고리즘이지만 서명 검증 자체를 생략해버리는(토큰을
+        아무나 위조 가능) 값이라 허용 목록에서 명시적으로 제외한다. log_level과
+        같은 이유로 앞뒤 공백/대소문자는 정규화해서 받아준다."""
+        normalized = value.strip().upper()
+        if normalized not in _VALID_JWT_ALGORITHMS:
+            raise ValueError(
+                f"JWT_ALGORITHM은 {sorted(_VALID_JWT_ALGORITHMS)} 중 하나여야 합니다. "
+                f'현재 "{value}".'
+            )
+        return normalized
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        """`logging.basicConfig(level=...)`는 소문자("info")나 오타("INOF")를
+        `create_app()`이 호출될 때(테스트마다도 매번!)마다 `ValueError: Unknown
+        level: ...`라는 불명확한 예외로 실패시킨다 - 설정 로딩 시점에 미리
+        검증해서, 뭐가 문제인지 바로 알 수 있는 메시지로 막는다. 대소문자는
+        나머지 설정과 같은 관례(`case_sensitive=False`)로 맞춰 정규화한다."""
+        normalized = value.strip().upper()
+        if normalized not in _VALID_LOG_LEVELS:
+            raise ValueError(
+                f"LOG_LEVEL은 {sorted(_VALID_LOG_LEVELS)} 중 하나여야 합니다. "
+                f"현재 값: {value!r}"
+            )
+        return normalized
+
+    @field_validator("environment")
+    @classmethod
+    def _validate_environment(cls, value: str) -> str:
+        """`main.py`는 `settings.environment == "production"`일 때만 /docs,
+        /redoc, /openapi.json을 끈다 - 이 비교가 정확히 "production"과만
+        일치해야 하므로, `ENVIRONMENT=Production`처럼 대소문자를 틀리거나
+        `prod`처럼 줄여 쓰면 조용히 False로 평가되어 실제 프로덕션 배포에서도
+        Swagger/ReDoc이 계속 공개로 열려 있게 된다 - 실패가 안전한(fail-closed)
+        게 아니라 안전하지 않은(fail-open) 방향으로 조용히 새는 설정이라, 다른
+        검증들과 달리 이건 named-값 오타를 반드시 시작 시점에 잡아야 한다.
+        대소문자는 정규화하되(관용적인 `Production` 정도는 받아줌), 그 외
+        값은 무엇을 의도했는지 알 수 없으므로 거부한다."""
+        normalized = value.strip().lower()
+        if normalized not in _VALID_ENVIRONMENTS:
+            raise ValueError(
+                f"ENVIRONMENT은 {sorted(_VALID_ENVIRONMENTS)} 중 하나여야 합니다. "
+                f"현재 값: {value!r} (오타가 있으면 프로덕션에서도 Swagger/ReDoc이 "
+                f"계속 노출될 수 있어 엄격하게 검증합니다)."
+            )
+        return normalized
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _strip_trailing_slash_from_ollama_base_url(cls, value: str) -> str:
+        """`OllamaService`(services/ollama_service.py)의 모든 메서드가
+        `f"{self._base_url}/api/generate"`처럼 이 값 뒤에 곧바로 `/api/...`를
+        이어붙인다 - 이 값 끝에 슬래시가 붙어 있으면(브라우저 주소창에서
+        그대로 복사하거나 ngrok/터널 루트 URL을 그대로 쓰는 등 흔한 실수)
+        요청 경로가 `//api/generate`처럼 슬래시 두 개로 나가고, 실제 uvicorn/
+        Caddy 서버 둘 다 이걸 별개 경로로 취급해 404를 낸다(직접 재현해
+        확인함 - 슬래시 하나면 200, 두 개면 404). `Settings()` 생성 자체는
+        성공해 앱도 정상적으로 뜨고, 로그인/DB 등 나머지 기능은 전혀 문제
+        없어 보이는데, 학습챗/퀴즈 생성/RAG 임베딩/`GET /models`/`/health/
+        ready`의 Ollama 확인까지 이 서비스에 의존하는 기능 전부가 동시에
+        조용히 깨진다 - `OLLAMA_BASE_URL`엔 지금까지 검증이 전혀 없었다.
+        거부하는 대신 조용히 정규화한다 - 트레일링 슬래시는 사용자 의도를
+        해치지 않는 흔한 표기 차이일 뿐이라, 다른 이름 오타(ENVIRONMENT
+        등)처럼 "무엇을 의도했는지 알 수 없는" 경우가 아니다."""
+        return value.rstrip("/")
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _strip_trailing_slash_from_cors_origins(cls, value: str) -> str:
+        """Starlette의 `CORSMiddleware.is_allowed_origin()`은 브라우저가 보낸
+        `Origin` 헤더를 `origin in self.allow_origins`로 정확히 문자열
+        일치시킬 뿐 정규화하지 않는다 - 그런데 브라우저는 `Origin` 헤더에
+        경로를 절대 안 붙인다(`scheme://host[:port]`뿐, 트레일링 슬래시
+        없음). 운영자가 브라우저 주소창이나 Vercel의 "Domains" 목록에서
+        그대로 복사하면(이 프로젝트의 실제 프론트 도메인이 바로 그런
+        Vercel 배포다) 트레일링 슬래시가 붙은 `CORS_ORIGINS=https://
+        example.com/`이 되기 쉬운데, 이러면 실제 브라우저가 보내는
+        `Origin: https://example.com`과 정확히 일치하지 않아 그 origin의
+        모든 cross-origin 요청이 조용히 막힌다 - 실제 앱으로 직접
+        재현했다: 트레일링 슬래시가 있으면 단순 요청엔 `Access-Control-
+        Allow-Origin` 헤더 자체가 안 붙고, preflight는 `400 Disallowed
+        CORS origin`으로 거부된다(슬래시 없이 같은 origin으로 요청하면
+        정상적으로 허용됨). `Settings()` 생성과 앱 부팅 자체는 멀쩡히
+        성공하고 로그인/DB 등 나머지 기능도 전혀 문제 없어 보이는데,
+        그 프론트 도메인에서 오는 모든 API 호출만 조용히 깨지는(브라우저
+        콘솔엔 그냥 알 수 없는 네트워크 오류로 보임) 시작 시점에는 전혀
+        티가 안 나는 문제다 - `ollama_base_url`과 같은 이유로, 거부하는
+        대신 콤마로 나눈 각 origin의 트레일링 슬래시만 조용히 제거한다."""
+        origins = [origin.strip().rstrip("/") for origin in value.split(",") if origin.strip()]
+        return ",".join(origins)
+
+    @field_validator("chat_rate_limit", "auth_rate_limit", "export_rate_limit", "models_rate_limit")
+    @classmethod
+    def _validate_rate_limit_string(cls, value: str) -> str:
+        """`limiter.limit(lambda: get_settings().xxx_rate_limit)`(HTTP)와
+        `check_rate_limit()`(WebSocket, `core/rate_limit.py`)가 이 문자열을 각각
+        요청마다 파싱하는데, 잘못된 값(예: 사람이 자연스럽게 쓰기 쉬운
+        `"10 per minute"`이 아니라 `"10/min"`처럼 지원 안 되는 축약형, 또는
+        빈 문자열)이 들어오면 두 경로가 서로 다른, 둘 다 나쁜 방식으로
+        실패한다 - HTTP 쪽(slowapi)은 파싱 실패를 조용히 로그만 남기고 그
+        요청의 레이트리밋을 그냥 건너뛰어(fail-open) 브루트포스/DoS 방어가
+        티도 안 나게 꺼져버리고, WebSocket 쪽(`check_rate_limit`)은 파싱
+        예외를 전혀 잡지 않아 학습챗/면접복기 스트리밍이 첫 메시지마다
+        처리되지 않은 예외로 죽어버린다(100번 라운드에서 확인한 대로
+        WebSocket 스코프에는 전역 예외 핸들러가 적용되지 않음). 두 경로가
+        실제로 쓰는 것과 같은 파서(`limits.util.parse_many`, slowapi 내부와
+        동일)로 시작 시점에 미리 검증해서, 이 값이 잘못됐다는 걸 요청이
+        들어올 때가 아니라 앱이 뜰 때 바로 알 수 있게 한다."""
+        try:
+            parse_many(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"레이트리밋 문자열이 올바르지 않습니다: {value!r} ({exc}). "
+                '"10/minute"처럼 <횟수>/<단위> 형식이어야 합니다.'
+            ) from exc
+        return value
+
+    @field_validator("max_prompt_length")
+    @classmethod
+    def _validate_max_prompt_length_is_positive(cls, value: int) -> int:
+        """`ChatRequest`/`StudyMessageCreateRequest`/`InterviewPracticeAnswerRequest`
+        의 `validate_*_length` field_validator와 `routes/study.py`의 WS
+        스트리밍 경로가 전부 이 값을 `len(value) > max_length`로 검사한다.
+        이 값이 0 이하면(단위 착각, 오타 등) `min_length=1`을 통과한(=빈
+        문자열이 아닌) 어떤 메시지든 항상 이 조건을 만족해 거부된다 -
+        `/api/v1/chat`/학습챗(REST+WS)/면접연습 답변 제출 전부를 포함해 이 앱의
+        AI 메시징 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속
+        막히게 된다(159라운드가 고친 `MAX_QUIZ_CHOICE_COUNT`보다 영향
+        범위가 더 넓다 - 그쪽은 퀴즈 생성만 막았지만 이건 메시지를 보내는
+        모든 기능을 막는다). `Settings()` 생성 자체는 성공해 앱도 정상적으로
+        뜨므로, 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_PROMPT_LENGTH({value})는 0보다 커야 합니다 - 0 이하면 빈 "
+                "문자열이 아닌 어떤 메시지도 항상 길이 초과로 거부되어 학습챗/"
+                "면접연습/일반 채팅 등 메시지를 보내는 모든 기능이 막힙니다."
+            )
+        return value
+
+    @field_validator("max_body_size_bytes")
+    @classmethod
+    def _validate_max_body_size_bytes_is_positive(cls, value: int) -> int:
+        """`MaxBodySizeMiddleware`(core/middleware.py)는 `Content-Length`
+        헤더가 있는 모든 요청에 대해 `parsed_content_length > self.max_body_size`
+        면 413로 거부한다. 이 값이 0 이하면 본문이 있는(=`Content-Length`가
+        1 이상인) 요청은 전부 거부되고, 음수라면 본문이 없는(`Content-Length:
+        0`) 요청까지도 거부된다 - 회원가입/로그인/학습챗/퀴즈 제출/면접복기
+        등 이 앱의 쓰기 API 사실상 전체가 시작 시점에는 전혀 티가 안 나는
+        상태로 막히게 된다(160라운드가 고친 `MAX_PROMPT_LENGTH`보다도 영향
+        범위가 넓다 - 그쪽은 메시지를 보내는 기능만 막았지만 이건
+        회원가입/로그인처럼 메시지가 아닌 요청까지 포함한다).
+        `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로, 다른 숫자
+        설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_BODY_SIZE_BYTES({value})는 0보다 커야 합니다 - 0 이하면 "
+                "본문이 있는(0 이하일 땐 본문이 없는 요청까지) 모든 요청이 413으로 "
+                "거부되어 회원가입/로그인/학습챗/퀴즈 제출 등 쓰기 API 전체가 막힙니다."
+            )
+        return value
+
+    @field_validator("max_quiz_choice_count")
+    @classmethod
+    def _validate_max_quiz_choice_count(cls, value: int) -> int:
+        """`_build_quiz_prompt()`(quiz_service.py)는 모델에게 항상 "각 문항은
+        4개의 보기를 가지고"라고 고정으로 요청한다 - `MAX_QUIZ_CHOICE_COUNT`와
+        무관하게 정상적으로 동작하는 모델은 매번 보기 4개를 뱉는다는 뜻이다.
+        그런데 이 값을 4 미만(예: "문항당 보기 수"로 오해해 2나 3으로 설정)으로
+        두면, 모델이 시키는 대로 4개를 뱉을 때마다 `len(q.choices) <=
+        max_quiz_choice_count` 검증에 매번 걸려 재시도(`_MAX_QUIZ_GENERATION_
+        ATTEMPTS`)까지 전부 소진하고 502로 끝난다 - `POST /quizzes`(퀴즈 생성)
+        기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속 실패하게
+        된다. 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value < 4:
+            raise ValueError(
+                f"MAX_QUIZ_CHOICE_COUNT({value})는 4 이상이어야 합니다 - 퀴즈 생성 "
+                "프롬프트가 모델에게 항상 보기 4개를 요청하므로, 4 미만이면 정상적인 "
+                "생성 결과도 검증에 걸려 퀴즈 생성 자체가 계속 실패합니다."
+            )
+        return value
+
+    @field_validator("ws_idle_timeout_seconds")
+    @classmethod
+    def _validate_ws_idle_timeout_seconds_is_positive(cls, value: float) -> float:
+        """학습챗/면접복기 WebSocket 스트리밍 라우트(routes/study.py의
+        stream_message, routes/interview_review.py의 stream_create_review)는
+        매 메시지 대기마다 `asyncio.wait_for(websocket.receive_json(),
+        timeout=ws_idle_timeout_seconds)`를 쓴다. 이 값이 0 이하면
+        `asyncio.wait_for`가 코루틴이 완료될 기회조차 주지 않고 즉시
+        `TimeoutError`를 낸다(직접 재현해 확인함) - 클라이언트가 연결하자마자
+        메시지를 보내도 첫 대기에서 곧바로 "idle timeout"으로 연결이 끊겨,
+        두 스트리밍 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로
+        계속 끊기게 된다. `Settings()` 생성 자체는 성공해 앱도 정상적으로
+        뜨므로, 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"WS_IDLE_TIMEOUT_SECONDS({value})는 0보다 커야 합니다 - 0 이하면 "
+                "asyncio.wait_for가 즉시 타임아웃되어, 연결하자마자 메시지를 보내도 "
+                "학습챗/면접복기 WebSocket 스트리밍이 매번 곧바로 끊깁니다."
+            )
+        return value
+
+    @field_validator("max_concurrent_ws_connections")
+    @classmethod
+    def _validate_max_concurrent_ws_connections_is_positive(cls, value: int) -> int:
+        """`limit_ws_connections`(core/dependencies.py)는 `_active_ws_connections
+        >= max_concurrent_ws_connections`면 `accept()` 전에 연결을 거부한다.
+        `_active_ws_connections`는 0에서 시작하므로, 이 값이 0이면 `0 >= 0`이
+        항상 참이 되어 첫 연결 시도부터 매번 거부되고, 음수라면 두말할 것도
+        없다 - 학습챗/면접복기 WebSocket 스트리밍(139라운드가 예외 처리를
+        보강한 바로 그 두 경로) 전체가 시작 시점에는 전혀 티가 안 나는 상태로
+        계속 막히게 된다(REST 엔드포인트는 이 검사를 거치지 않아 영향이 없다).
+        `Settings()` 생성 자체는 성공해 앱도 정상적으로 뜨므로, 다른 숫자
+        설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value < 1:
+            raise ValueError(
+                f"MAX_CONCURRENT_WS_CONNECTIONS({value})는 1 이상이어야 합니다 - "
+                "0 이하면 활성 연결 수 카운터가 0에서 시작하므로 첫 WebSocket 연결"
+                "시도부터 매번 거부되어 학습챗/면접복기 스트리밍 전체가 막힙니다."
+            )
+        return value
+
+    @field_validator("health_check_timeout_seconds")
+    @classmethod
+    def _validate_health_check_timeout_seconds_is_positive(cls, value: float) -> float:
+        """core/health.py의 check_db_health/check_redis_health/check_ollama_health는
+        각각 이 값으로 `asyncio.wait_for(..., timeout=...)`를 건다(ws_idle_timeout_seconds
+        와 같은 이유) - 이 값이 0 이하면 asyncio.wait_for가 각 확인이 완료될 기회조차
+        주지 않고 즉시 TimeoutError를 내, DB/Redis/Ollama가 전부 정상이어도
+        /health/ready가 항상 503(unavailable)만 응답하게 된다. `Settings()` 생성
+        자체는 성공해 앱도 정상적으로 뜨므로, 다른 숫자 설정들과 같은 이유로 시작
+        시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"HEALTH_CHECK_TIMEOUT_SECONDS({value})는 0보다 커야 합니다 - 0 이하면 "
+                "asyncio.wait_for가 즉시 타임아웃되어, DB/Redis/Ollama가 전부 정상이어도 "
+                "/health/ready가 항상 503(unavailable)만 응답합니다."
+            )
+        return value
+
+    @field_validator("max_review_content_length")
+    @classmethod
+    def _validate_max_review_content_length_is_positive(cls, value: int) -> int:
+        """`InterviewReviewCreateRequest`/`InterviewReviewUpdateRequest`의
+        `validate_content_length` field_validator(schemas/interview_review.py)가
+        이 값을 `len(value) > max_length`로 검사한다. 이 값이 0 이하면
+        `min_length=1`을 통과한(=빈 문자열이 아닌) 어떤 content도 항상 이
+        조건을 만족해 거부된다 - `POST /interview-reviews`(생성)와
+        `PATCH /interview-reviews/{id}`(수정, content 포함 시) 전부가 시작
+        시점에는 전혀 티가 안 나는 상태로 계속 막히게 된다(160라운드가 고친
+        `MAX_PROMPT_LENGTH`와 같은 성격이지만 이쪽은 면접복기 기능으로
+        범위가 한정된다). `Settings()` 생성 자체는 성공해 앱도 정상적으로
+        뜨므로, 다른 숫자 설정들과 같은 이유로 시작 시점에 미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_REVIEW_CONTENT_LENGTH({value})는 0보다 커야 합니다 - 0 이하면 "
+                "빈 문자열이 아닌 어떤 면접복기 내용도 항상 길이 초과로 거부되어 "
+                "면접복기 생성/수정 기능 전체가 막힙니다."
+            )
+        return value
+
+    @field_validator("max_quiz_source_length")
+    @classmethod
+    def _validate_max_quiz_source_length_is_positive(cls, value: int) -> int:
+        """이 값은 두 경로에서 서로 다른 방식으로 소비되는데, 둘 다 0 이하에서
+        깨진다.
+
+        (1) `QuizCreateRequest`(schemas/quiz.py)의 직접 붙여넣기 경로:
+        `len(source_text) > max_quiz_source_length`로 검사한다 - 0 이하면
+        `min_length=1`을 통과한(=빈 문자열이 아닌) 어떤 `source_text`도 항상
+        이 조건을 만족해 거부된다(`MAX_PROMPT_LENGTH`/`MAX_REVIEW_CONTENT_
+        LENGTH`와 같은 "항상 거부" 형태의 버그).
+
+        (2) `quiz_service.py`의 학습 세션 소스 경로: 상한을 넘으면
+        `source_text[-max_quiz_source_length:]`로 뒤쪽(최근)만 남긴다 - 그런데
+        0에서는 파이썬 슬라이싱 특성상 `-0 == 0`이라 `source_text[-0:]`가
+        `source_text[0:]`(전체 문자열)이 되어버려, 잘라내기는커녕 오히려
+        아무것도 안 자른 것과 같아진다. 즉 이 truncate 안전장치(Ollama 호출
+        지연/타임아웃/컨텍스트 윈도우 초과 방지용)가 조용히 무력화된다 -
+        (1)과 달리 요청이 거부되지 않고 그냥 넘어가버려서 더 알아채기 어렵다.
+
+        `max_chat_history_messages`처럼 "0 이하 = 특수 모드"가 문서화된
+        필드도 이 파일에 있지만, 이 필드는 그런 의미가 문서화되어 있지 않고
+        순수하게 AI 입력 길이를 제한하는 안전장치라 `MAX_PROMPT_LENGTH`와
+        같은 성격이다 - "무제한"으로 취급하지 않고 같은 이유로 시작 시점에
+        미리 막는다."""
+        if value <= 0:
+            raise ValueError(
+                f"MAX_QUIZ_SOURCE_LENGTH({value})는 0보다 커야 합니다 - 0 이하면 "
+                "직접 붙여넣은 source_text는 항상 길이 초과로 거부되고, 학습 "
+                "세션 소스는 truncate 안전장치가 조용히 무력화됩니다."
+            )
+        return value
+
+    @field_validator("rag_top_k", "rag_max_candidate_chunks", "rag_backfill_batch_size")
+    @classmethod
+    def _validate_rag_settings_not_negative(cls, value: int, info: ValidationInfo) -> int:
+        """152라운드(176번 항목)가 이 세 필드를 "0 이하에서 크래시 없이 우아하게
+        성능이 저하될 뿐"이라 판단해 검증 없이 남겨뒀는데, 직접 재현해보니 셋 다
+        음수에서는 그 판단과 다르게 동작한다.
+
+        `rag_max_candidate_chunks`/`rag_backfill_batch_size`는 각각
+        `KnowledgeChunkRepository.list_for_user`/`backfill_unindexed_content`의
+        SQLAlchemy `.limit(...)`을 거쳐 SQL `LIMIT`으로 그대로 내려가는데,
+        Postgres는 음수 LIMIT을 값 자체 오류(`LIMIT must not be negative`)로
+        거부한다(SQLite는 음수를 "무제한"으로 받아줘서 이 테스트 스위트로는
+        전혀 드러나지 않았다 - 직접 재현해 확인함). `rag_max_candidate_chunks`가
+        음수면 `RagService.retrieve_relevant`가 이 쿼리를 그 어떤 try/except도
+        거치지 않고 바로 실행해, 학습챗/면접연습 매 턴마다 처리되지 않은
+        `DBAPIError`가 그대로 터진다 - "RAG 그라운딩이 빈 배열"이 아니라 두
+        스트리밍 기능 전체가 시작 시점에는 전혀 티가 안 나는 상태로 계속 500/
+        연결 끊김으로 이어진다. `rag_backfill_batch_size`가 음수인 경우는 이
+        예외가 `run_scheduled_rag_backfill`의 최상위 `except Exception`에 잡혀
+        크래시가 밖으로 새지는 않지만, 그날 백필 job 전체(4개 카테고리 전부)가
+        예외 하나로 조기 중단된다 - "아무 일도 안 함"과 결과는 비슷해도 예상한
+        경로(빈 결과)가 아니라 예외 경로다.
+
+        `rag_top_k`는 SQL과 무관하게 순수 파이썬 슬라이싱(`scored[:top_k]`)이라
+        크래시는 나지 않지만, 음수 slice는 "빈 배열"이 아니라 뒤에서부터
+        `|top_k|`개를 뺀 나머지 전부를 반환한다(직접 재현: 후보 5개에
+        `top_k=-1`이면 4개가 반환됨) - 정렬 기준(코사인 유사도 내림차순)상
+        오히려 가장 관련 없는 것 하나만 빼고 전부를 프롬프트에 그라운딩으로
+        욱여넣는 정반대의 결과라, "우아한 성능 저하"라는 원래 판단이 이
+        필드에도 맞지 않는다.
+
+        `max_interview_questions`는 같은 조사에서 재확인한 네 번째 필드지만
+        `len(turns) < max_interview_questions` 비교로만 쓰여 음수여도 조건이
+        항상 거짓이 되어 첫 질문 뒤 바로 종료될 뿐이라(진짜 우아한 성능 저하),
+        이 필드는 그대로 검증 없이 남겨둔다. 0은 세 필드 모두에서 "RAG/백필을
+        끈다"는 안전한 의미로 그대로 동작하므로(`LIMIT 0`은 빈 결과,
+        `scored[:0]`도 빈 리스트) 0은 계속 허용한다."""
+        if value < 0:
+            field_name = info.field_name or "value"
+            raise ValueError(
+                f"{field_name.upper()}({value})는 0 이상이어야 합니다 - 음수면 "
+                "SQL LIMIT으로 쓰이는 필드는 Postgres가 즉시 오류로 거부하고, "
+                "rag_top_k는 파이썬 음수 슬라이싱 때문에 오히려 가장 관련 없는 "
+                "것만 빼고 전부를 그라운딩에 욱여넣습니다."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_quiz_question_count_defaults(self) -> "Settings":
+        """`QuizCreateRequest`는 `question_count`를 안 보낸 요청에는
+        `default_quiz_question_count`를 그대로 채워 넣을 뿐, 그 값을
+        `max_quiz_question_count`와 비교하지 않는다 - 제한 검사는 클라이언트가
+        `question_count`를 직접 보낸 경우에만 걸린다. 그래서 운영자가 둘 중
+        하나만 바꾸면(예: 비용 절감 위해 MAX만 낮추거나, "더 풍성한 기본값"을
+        위해 DEFAULT만 올리면) `question_count`를 생략한 - 아마 대다수인 -
+        요청들이 조용히 그 한도를 넘는 문항 수를 요청하게 된다. 요청 시점에
+        걸러내는 대신, 다른 검증들처럼 시작 시점에 막아 이 모순된 설정 조합
+        자체가 배포되지 못하게 한다.
+
+        아래쪽 한계(1 이상)도 여기서 함께 검증한다 - 요청 스키마 쪽
+        `QuizCreateRequest.question_count`는 `Field(ge=1)`로 이미 막혀
+        있지만, `question_count`를 생략했을 때 그 자리를 채우는
+        `default_quiz_question_count`는 그 검증을 거치지 않는다.
+        `DEFAULT_QUIZ_QUESTION_COUNT=0`(혹은 음수)이 설정되면 매번
+        "0문항을 만들어달라"는 프롬프트가 나가고, `_GeneratedQuiz.questions`
+        가 `min_length=1`이라 항상 검증에 실패해 재시도(`_MAX_QUIZ_
+        GENERATION_ATTEMPTS`)까지 다 쓴 뒤 502로 끝난다 - `question_count`를
+        생략한 모든 퀴즈 생성 요청이 Ollama 호출만 낭비하고 항상 실패하게
+        되므로, 이 조합도 시작 시점에 막는다."""
+        if self.default_quiz_question_count < 1:
+            raise ValueError(
+                f"DEFAULT_QUIZ_QUESTION_COUNT({self.default_quiz_question_count})는 1 이상이어야 합니다."
+            )
+        if self.default_quiz_question_count > self.max_quiz_question_count:
+            raise ValueError(
+                "DEFAULT_QUIZ_QUESTION_COUNT"
+                f"({self.default_quiz_question_count})는 MAX_QUIZ_QUESTION_COUNT"
+                f"({self.max_quiz_question_count})보다 클 수 없습니다."
+            )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

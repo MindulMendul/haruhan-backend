@@ -6,9 +6,11 @@ apscheduler==3.11.3
 pydantic-settings==2.14.2
 python-dotenv==1.2.2
 slowapi==0.1.10
+limits==5.8.0
 redis==8.0.1
 sqlalchemy==2.0.51
 alembic==1.18.5
 bcrypt==5.0.0
 pyjwt==2.13.0
 email-validator==2.3.0
+prometheus-client==0.26.0

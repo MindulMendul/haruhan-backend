@@ -1,15 +1,35 @@
-from fastapi import HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
 
+from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
+
+from app.core.metrics import guest_conversions_total
 from app.core.password import PasswordTooLongError, hash_password, verify_password
 from app.db.models.user import User
+from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
+
+# get_current_user가 검증한 시점과 이 요청이 실제로 커밋하는 시점 사이에 (다른 탭의
+# delete_account() 호출이든, 159라운드가 추가한 cleanup_stale_guest_accounts cron
+# job이든) 이 계정이 지워지면, ORM이 로드해둔 User 객체를 수정한 뒤 커밋할 때
+# "UPDATE ... WHERE id = :id"가 0행에 매치되어 StaleDataError가 난다 - IntegrityError
+# (자식 테이블 INSERT가 사라진 FK를 참조하는 경우, 143~171라운드)와는 다른 경쟁으로,
+# users 테이블 자신에 대한 UPDATE가 대상이다. study_service.py 등이 쓰는 것과 같은
+# 코드/메시지로 응답해, 클라이언트가 재시도해도 get_current_user가 어차피 이 코드로
+# 401을 낼 상황과 동일하게 다루도록 한다.
+_ACCOUNT_GONE = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"code": "invalid_token", "message": "Could not validate credentials"},
+)
 
 
 class UserService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._users = UserRepository(session)
+        self._refresh_tokens = RefreshTokenRepository(session)
 
     async def update_profile(
         self,
@@ -18,10 +38,17 @@ class UserService:
         password: str | None,
         current_password: str | None,
     ) -> User:
-        if current_password is not None and not verify_password(current_password, user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
-            )
+        if current_password is not None:
+            # 게스트 계정은 hashed_password가 없어 비교 자체가 불가능하다 (아직 계정 전환 기능 없음).
+            # bcrypt는 호출당 이 환경 기준 약 300ms가 걸리는 계산 비용이 큰 함수라,
+            # 이벤트 루프에서 그대로 부르면 그 시간만큼 다른 모든 동시 요청이 멈춘다 -
+            # auth_service.py의 로그인/가입과 같은 이유로 스레드 풀에 위임한다.
+            if user.hashed_password is None or not await asyncio.to_thread(
+                verify_password, current_password, user.hashed_password
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
+                )
 
         if email is not None and email != user.email:
             existing = await self._users.get_by_email(email)
@@ -31,9 +58,115 @@ class UserService:
 
         if password is not None:
             try:
-                user.hashed_password = hash_password(password)
+                user.hashed_password = await asyncio.to_thread(hash_password, password)
             except PasswordTooLongError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-        await self._session.commit()
+        # 위 get_by_email 확인과 이 commit 사이에는(비밀번호 해싱 시간까지 포함해)
+        # 시간차가 있다 - 같은 이메일로 두 프로필 변경/가입 요청이 동시에 오면 둘 다
+        # 통과해버릴 수 있다. DB unique 제약 위반(IntegrityError)이 그대로 새어나가면
+        # 나머지 흐름과 다르게 처리되지 않은 예외(500)가 되므로, 정상적인 "이미
+        # 존재함" 케이스와 같은 409로 변환한다.
+        try:
+            if password is not None:
+                # 비밀번호를 바꾸는 건 보통 "계정이 뚫린 것 같다"는 의심에서 나오는
+                # 행동인데, 여기서 refresh token을 그대로 두면 공격자가 훔친 refresh
+                # token으로 최대 refresh_token_expire_days(기본 14일)까지 계속
+                # 로그인 상태를 유지할 수 있어 비밀번호 변경의 의미가 없어진다 -
+                # auth_service.py가 재사용 탐지/전체 로그아웃에 이미 쓰고 있는
+                # revoke_all_for_user()로 이 계정의 모든 refresh token을 함께
+                # 폐기한다(지금 이 요청을 보낸 클라이언트 자신의 refresh token도
+                # 포함 - access token만으로는 어느 refresh token이 이 세션 것인지
+                # 구분할 수 없어 DELETE /auth/sessions 전체 로그아웃과 똑같이
+                # 다시 로그인해야 한다). revoke_all_for_user()는 내부에서
+                # session.flush()를 호출하는데, 이 시점에 이미 위에서 건드린
+                # user.email/hashed_password의 dirty 상태도 같은 flush로 함께
+                # 나간다 - 이 commit()의 try/except 바깥에서 flush가 먼저
+                # 일어나면(계정이 이 요청 도중 지워진 경쟁 상황에서) users 테이블
+                # UPDATE가 0행에 매치되는 StaleDataError가 이 try 블록 밖으로
+                # 새어나가 버린다. 그래서 revoke_all_for_user()도 반드시 이
+                # try 안, commit() 바로 앞에서 호출한다.
+                await self._refresh_tokens.revoke_all_for_user(user.id)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
+            ) from None
+        except StaleDataError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
         return user
+
+    async def upgrade_guest(self, user: User, email: str, password: str) -> User:
+        """게스트 계정을 email/password가 있는 실계정으로 승격시킨다.
+
+        이미 hashed_password가 있는(=실계정인) 사용자가 호출하면 거부한다 - 그 경우는
+        current_password 확인이 필요한 update_profile()을 대신 써야 한다.
+        """
+        if user.hashed_password is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 실계정입니다.")
+
+        existing = await self._users.get_by_email(email)
+        if existing is not None and existing.id != user.id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+
+        try:
+            user.hashed_password = await asyncio.to_thread(hash_password, password)
+        except PasswordTooLongError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        user.email = email
+
+        # update_profile()과 같은 이유(check-then-act 경쟁 상태)로, DB unique
+        # 제약 위반이 그대로 새어나가지 않도록 같은 409로 변환한다.
+        try:
+            # 게스트는 hashed_password가 없어(=승격 전까지 자격 증명 검증 자체가
+            # 불가능) refresh_token만 가지고 있으면 사실상 계정을 통째로 쥐고
+            # 있는 것과 같다 - 그 refresh_token이 로그/공유 기기/XSS 등으로
+            # 새어나갔더라도 여기서 그대로 두면, 사용자가 방금 비밀번호를 설정해
+            # "이제 계정이 보호된다"고 믿는 것과 달리 공격자는 계속 그
+            # refresh_token으로 최대 refresh_token_expire_days(기본 14일)까지
+            # 로그인 상태를 유지할 수 있다 - update_profile()의 비밀번호 변경
+            # 분기가 같은 이유로 이미 쓰고 있는 revoke_all_for_user()로 이 계정의
+            # 모든 refresh token을 함께 폐기한다(지금 이 요청을 보낸 클라이언트
+            # 자신의 refresh token도 포함 - access token만으로는 어느 refresh
+            # token이 이 세션 것인지 구분할 수 없다). access token은 만료 전까지는
+            # 계속 유효해 즉시 재로그인할 필요는 없지만, 그 뒤 refresh를 시도하면
+            # 새 email/password로 다시 로그인해야 한다. update_profile()에서와
+            # 같은 이유로(revoke_all_for_user()가 내부에서 호출하는 flush()가
+            # 위에서 건드린 user.email/hashed_password의 dirty 상태까지 함께
+            # 내보내므로) 이 try 안, commit() 바로 앞에서 호출해야 한다 - 그래야
+            # 계정이 이 요청 도중 지워진 경쟁 상황에서 나는 StaleDataError가 이
+            # 블록의 except로 잡힌다.
+            await self._refresh_tokens.revoke_all_for_user(user.id)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
+            ) from None
+        except StaleDataError:
+            await self._session.rollback()
+            raise _ACCOUNT_GONE from None
+        guest_conversions_total.inc()
+        return user
+
+    async def delete_account(self, user: User, current_password: str | None) -> None:
+        """계정과 연관 데이터(학습챗/퀴즈/면접연습/면접복기/RAG 색인/refresh
+        token) 전체를 영구 삭제한다. User row만 지우면 나머지는 DB의
+        ON DELETE CASCADE로 함께 지워진다.
+
+        실계정은 탈취된 access token만으로 계정을 통째로 지우지 못하도록
+        현재 비밀번호로 재확인해야 한다. 게스트는 hashed_password가 없어
+        비교 자체가 불가능하므로 확인 없이 진행한다.
+        """
+        if user.hashed_password is not None:
+            if current_password is None or not await asyncio.to_thread(
+                verify_password, current_password, user.hashed_password
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="현재 비밀번호가 일치하지 않습니다."
+                )
+
+        await self._users.delete(user)
+        await self._session.commit()

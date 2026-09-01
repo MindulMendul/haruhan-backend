@@ -1,10 +1,11 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.quiz_answer import QuizAnswer
 from app.db.models.quiz_attempt import QuizAttempt
+from app.db.models.quiz_question import QuizQuestion
 
 
 class QuizAttemptRepository:
@@ -18,12 +19,61 @@ class QuizAttemptRepository:
         return attempt
 
     async def get_latest_for_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> QuizAttempt | None:
+        """submitted_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상
+        정의되어 있지 않다 - id를 2차 정렬 기준으로 추가해 동률을 항상 같은
+        순서로 결정론적으로 깨지도록 한다(list_for_quiz와 같은 이유)."""
         result = await self._session.execute(
             select(QuizAttempt)
             .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_id)
-            .order_by(QuizAttempt.submitted_at.desc())
+            .order_by(QuizAttempt.submitted_at.desc(), QuizAttempt.id.desc())
         )
         return result.scalars().first()
+
+    async def list_for_user(self, user_id: uuid.UUID) -> list[QuizAttempt]:
+        """사용자의 모든 퀴즈에 걸친 전체 제출 이력 - 데이터 export용.
+
+        submitted_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상 정의되어
+        있지 않다 - list_for_quiz()/get_latest_for_quiz()는 이미 id를 2차 정렬
+        기준으로 추가했지만, 이 메서드는 페이지네이션이 없어(중복/누락 위험은
+        없음) 그 수정에서 빠졌었다. 페이지네이션 여부와 무관하게 같은 호출이
+        매번 같은 순서를 반환하도록 일관되게 맞춘다(export 결과가 호출마다
+        달라 보이는 걸 방지).
+        """
+        result = await self._session.execute(
+            select(QuizAttempt)
+            .where(QuizAttempt.user_id == user_id)
+            .order_by(QuizAttempt.submitted_at, QuizAttempt.id)
+        )
+        return list(result.scalars().all())
+
+    async def list_for_quiz(
+        self, quiz_id: uuid.UUID, user_id: uuid.UUID, limit: int, offset: int
+    ) -> list[QuizAttempt]:
+        """한 퀴즈에 대한 재도전 이력 (최신순) - 점수 추이 확인용.
+
+        submitted_at만으로 정렬하면 값이 같은 행 사이의 순서가 SQL 표준상
+        정의되어 있지 않다 - 페이지마다 그 순서가 달라질 수 있어서, LIMIT/OFFSET
+        으로 나눠 받으면 같은 시도가 두 페이지에 다시 나오거나 어느 페이지에도
+        안 나올 수 있다. id를 2차 정렬 기준으로 추가해 동률을 항상 같은 순서로
+        결정론적으로 깨지도록 한다(InterviewPracticeSessionRepository.list_for_user
+        와 같은 이유).
+        """
+        result = await self._session.execute(
+            select(QuizAttempt)
+            .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_id)
+            .order_by(QuizAttempt.submitted_at.desc(), QuizAttempt.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
+
+    async def count_for_quiz(self, quiz_id: uuid.UUID, user_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(QuizAttempt)
+            .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_id)
+        )
+        return result.scalar_one()
 
 
 class QuizAnswerRepository:
@@ -43,8 +93,65 @@ class QuizAnswerRepository:
         await self._session.flush()
         return answer
 
+    async def create_many(
+        self, attempt_id: uuid.UUID, answers: list[tuple[uuid.UUID, int, bool]]
+    ) -> None:
+        """create()의 배치 버전 - QuizQuestionRepository.create_many()(136라운드)와
+        같은 이유로, 문항 하나씩 개별 flush()(=DB 왕복)하는 대신 add_all() + flush()
+        한 번으로 처리한다. 퀴즈 생성은 계정당 한 번이지만 이 메서드가 쓰이는
+        submit_answers()는 제출/재도전마다(퀴즈 재도전 이력 기능이 있어 반복
+        호출을 실제로 유도함) 매번 실행되는 훨씬 더 뜨거운 경로다.
+
+        answers의 각 항목은 (question_id, selected_index, is_correct) 3개 튜플이다.
+        """
+        session_answers = [
+            QuizAnswer(
+                attempt_id=attempt_id,
+                question_id=question_id,
+                selected_index=selected_index,
+                is_correct=is_correct,
+            )
+            for question_id, selected_index, is_correct in answers
+        ]
+        self._session.add_all(session_answers)
+        await self._session.flush()
+
     async def list_for_attempt(self, attempt_id: uuid.UUID) -> list[QuizAnswer]:
+        """quiz_service.py의 submit_answers()는 클라이언트가 보낸 answers 배열
+        순서 그대로 QuizAnswer 행을 INSERT한다 - 요청 스키마(QuizSubmitRequest)는
+        클라이언트가 문항 순서(order_index)대로 제출하도록 강제하지 않으므로,
+        이 순서는 실제로는 임의다. ORDER BY 없이 조회하면 결과 순서가 SQL
+        표준상 정의되어 있지 않아, 문항을 순서 안 맞게 제출한 클라이언트의
+        경우 GET /quizzes/{id}로 보는 퀴즈 문항 순서(order_index)와
+        POST /submit·GET /result의 답안 순서가 서로 어긋나 보일 수 있었다.
+        QuizQuestion과 조인해 그 문항의 order_index로 정렬한다."""
         result = await self._session.execute(
-            select(QuizAnswer).where(QuizAnswer.attempt_id == attempt_id)
+            select(QuizAnswer)
+            .join(QuizQuestion, QuizAnswer.question_id == QuizQuestion.id)
+            .where(QuizAnswer.attempt_id == attempt_id)
+            .order_by(QuizQuestion.order_index)
+        )
+        return list(result.scalars().all())
+
+    async def list_for_attempts(self, attempt_ids: list[uuid.UUID]) -> list[QuizAnswer]:
+        """여러 시도의 답안을 한 번에 가져온다 (데이터 export처럼 시도마다
+        따로 조회하면 시도 개수만큼 쿼리가 느는 N+1을 피하려는 용도). 호출부에서
+        attempt_id별로 묶어서 쓴다.
+
+        정렬은 attempt_id까지만이라 각 시도 내부의 답안 순서는 여전히 SQL
+        표준상 정의되어 있지 않았다 - list_for_attempt()(단수, GET /result가
+        씀)는 154라운드에서 이 문제를 QuizQuestion과 조인해 order_index로
+        정렬하는 방식으로 이미 고쳤는데, 이 복수형 메서드(데이터 export가
+        씀)는 그 수정에서 빠져 있었다. 같은 이유로 같은 시도의 답안이
+        GET /quizzes/{id}/result가 보여주는 순서와 GET /export/me가 보여주는
+        순서가 서로 어긋나 보일 수 있었다. attempt_id 그룹 안에서도
+        order_index로 정렬되도록 2차 정렬 기준을 추가한다."""
+        if not attempt_ids:
+            return []
+        result = await self._session.execute(
+            select(QuizAnswer)
+            .join(QuizQuestion, QuizAnswer.question_id == QuizQuestion.id)
+            .where(QuizAnswer.attempt_id.in_(attempt_ids))
+            .order_by(QuizAnswer.attempt_id, QuizQuestion.order_index)
         )
         return list(result.scalars().all())

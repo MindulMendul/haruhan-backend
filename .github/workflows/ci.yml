@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# 같은 브랜치/PR에 짧은 간격으로 커밋이 여러 번 push되면(이 저장소는 로드맵 자동
+# 개발 루프가 시간마다 push하는 브랜치가 있음), 취소 없이는 과거 커밋에 대한 실행이
+# 전부 끝까지 돌아 CI 분(minute)을 낭비한다 - 최신 커밋 결과만 의미 있으므로, 같은
+# ref에 새 실행이 시작되면 그 ref의 진행 중이던 이전 실행을 취소한다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,11 +26,101 @@ jobs:
       - name: Install dependencies
         run: pip install --no-cache-dir -r requirements-dev.txt
 
+      - name: Type check (mypy)
+        run: mypy app tests scripts
+
       - name: Run tests
-        run: pytest -v --cov=app
+        # 커버리지가 90% 밑으로 떨어지면 빌드를 실패시킨다. 현재 실제 커버리지(~95%)보다
+        # 살짝 낮게 잡아서, 사소한 변동에 CI가 계속 깨지지 않도록 여유를 뒀다.
+        run: pytest -v --cov=app --cov-report=term-missing --cov-fail-under=90
 
       - name: Dependency vulnerability scan (pip-audit)
         run: pip-audit -r requirements.txt
+
+      - name: Dependency vulnerability scan for dev tools (pip-audit)
+        # requirements.txt는 이미 위에서 감사했으니, 여기서는 requirements-dev.txt가
+        # 추가로 얹는 개발/CI 전용 패키지(pytest, mypy, pip-audit 자신, aiosqlite 등)만
+        # 따로 확인한다. 운영에는 배포되지 않는 도구들이지만, CI 실행 환경 자체를
+        # 공급망 공격으로부터 지키는 것도 의미가 있다 - 지금까지는 이 파일 전체가
+        # pip-audit 대상에서 아예 빠져 있었다.
+        run: pip-audit -r requirements-dev.txt
+
+  migrations:
+    # 테스트는 db_session_factory 픽스처가 Base.metadata.create_all()로 SQLite에
+    # 스키마를 직접 만들어서 쓰기 때문에(마이그레이션 체인을 완전히 건너뜀), test
+    # job이 전부 통과해도 alembic 마이그레이션이 실제 모델과 어긋나 있을 수 있다 -
+    # 운영은 create_all이 아니라 이 마이그레이션들로 스키마를 만들므로, 여기서
+    # 놓치면 배포 시점에야 스키마 불일치가 드러난다. alembic check는 실제 DB
+    # 연결이 있어야 하고(alembic/env.py가 DATABASE_URL로 엔진을 만듦) SQLite가
+    # 아닌 운영과 같은 Postgres 방언이어야 신뢰할 수 있어 서비스 컨테이너로 띄운다.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: haruhan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/haruhan
+      # Settings.jwt_secret_key는 32자 이상을 요구한다 - 이 job은 서버를 띄우지
+      # 않고 alembic만 돌리지만 get_settings()가 Settings()를 생성하는 순간
+      # 검증이 걸리므로 형식만 맞는 더미 값을 준다.
+      JWT_SECRET_KEY: ci-only-dummy-secret-key-not-for-production-use
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements-dev.txt
+
+      - name: Apply migrations
+        run: alembic upgrade head
+
+      - name: Check for model/migration drift
+        run: alembic check
+
+  deploy-config:
+    # 113/114라운드가 docker-compose.yml/Caddyfile에서 실제 배포 사고(ENVIRONMENT가
+    # 컨테이너에 전달되지 않아 프로덕션에서도 /docs가 공개로 열려 있던 문제,
+    # Caddy가 /metrics를 경로 제한 없이 공개로 프록시하던 문제)를 찾아 고쳤는데,
+    # 정작 CI는 test/migrations job 둘 다 app/과 migrations/만 다루고 이 배포
+    # 파일들은 사람이 리뷰할 때만 걸러지고 있었다. docker compose config는 YAML/
+    # 스키마 구조 자체가 깨졌는지, `${VAR:?...}`로 필수 처리된 변수가 실제로
+    # 채워졌는지를 검증한다(변수가 아예 environment: 목록에서 빠진 채로 조용히
+    # 통과하는 것까지는 못 잡는다 - 그건 tests/test_docker_compose.py가 텍스트
+    # 검증으로 이미 잡고 있음). caddy validate는 Caddyfile 문법 자체가 유효한지
+    # 검증한다(경로 차단 로직 존재 여부는 tests/test_caddyfile.py가 이미 검증).
+    # 두 검증 모두 "파일이 문법적으로 유효한가"를 보는 것이라, Python 텍스트
+    # 검증 테스트들과 서로 다른 종류의 회귀를 잡는 상호 보완 관계다.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        run: docker compose config
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/haruhan
+          JWT_SECRET_KEY: ci-only-dummy-secret-key-not-for-production-use
+          ENVIRONMENT: production
+          DOMAIN: ci.example.com
+          GRAFANA_ADMIN_PASSWORD: ci-only-dummy-password
+
+      - name: Validate Caddyfile
+        run: |
+          docker run --rm --entrypoint caddy -e DOMAIN=ci.example.com \
+            -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
   secret-scan:
     runs-on: ubuntu-latest

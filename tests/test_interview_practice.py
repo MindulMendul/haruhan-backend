@@ -1,8 +1,21 @@
+import asyncio
 import json
 
-from app.core.config import get_settings
+from fastapi import HTTPException
+from sqlalchemy import select
+
+from app.core.config import Settings, get_settings
 from app.core.dependencies import get_ollama_service
+from app.db.models.interview_practice_turn import InterviewPracticeTurn
+from app.repositories.interview_practice_repository import (
+    InterviewPracticeSessionRepository,
+    InterviewPracticeTurnRepository,
+)
+from app.repositories.user_repository import UserRepository
+from app.services.interview_practice_service import InterviewPracticeService
 from app.services.ollama_service import OllamaServiceError
+from app.services.rag_service import RagService
+from app.services.rag_service import RagService
 
 
 class FakeOllamaService:
@@ -15,6 +28,9 @@ class FakeOllamaService:
     async def chat(self, messages, model):
         return "피드백 또는 총평 텍스트입니다."
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
 
 class FailingOllamaService:
     async def generate(self, prompt, model):
@@ -25,6 +41,153 @@ class FailingOllamaService:
 
     async def chat(self, messages, model):
         raise OllamaServiceError("boom")
+
+    async def embed(self, text, model):
+        # RAG의 retrieve_relevant()가 chat()/generate_json() 실패보다 먼저 embed()를
+        # 호출한다 - 여기서도 실패하면 원하는 502(생성 실패) 대신 embed 관련 예외가
+        # 먼저 터진다. RAG 조회 자체는 정상 동작한다고 가정하고 성공시킨다.
+        return [1.0, 0.0, 0.0]
+
+
+class AlwaysMalformedJsonOllamaService:
+    """generate_json()이 매번 깨진 JSON을 뱉는다 - 재시도까지 전부 소진되는
+    경로(tests/test_quiz.py의 MalformedJsonOllamaService와 같은 패턴)."""
+
+    def __init__(self):
+        self.generate_json_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        self.generate_json_call_count += 1
+        return "not valid json {{{"
+
+    async def chat(self, messages, model):
+        return "피드백 또는 총평 텍스트입니다."
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
+class AlwaysBlankFirstQuestionOllamaService:
+    """generate()가 매번 빈 문자열을 뱉는다 - OllamaService.generate()는 응답
+    본문에 response 키가 없거나 모델이 빈/공백 텍스트만 내보내도
+    OllamaServiceError를 던지지 않고 그냥 빈 문자열을 돌려주는데, 그대로
+    저장되면 새 세션의 첫 턴이 사용자가 답할 내용이 아예 없는 빈 질문이 되어
+    세션이 시작부터 조용히 멈춰버릴 수 있었다."""
+
+    def __init__(self):
+        self.generate_call_count = 0
+
+    async def generate(self, prompt, model):
+        self.generate_call_count += 1
+        return "   "
+
+    async def generate_json(self, prompt, model, schema):
+        return json.dumps({"feedback": "좋은 답변입니다.", "next_question": "다음 면접 질문입니다."})
+
+    async def chat(self, messages, model):
+        return "피드백 또는 총평 텍스트입니다."
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
+class AlwaysBlankNextQuestionOllamaService:
+    """generate_json()이 매번 next_question이 공백인 응답을 뱉는다 - 스키마는
+    str 타입만 보장할 뿐 non-blank는 강제하지 않아, 그대로 저장되면 사용자가
+    답할 내용이 아예 없는 빈 질문으로 세션이 조용히 멈춰버릴 수 있었다
+    (tests/test_quiz.py의 BlankChoiceOllamaService와 같은 패턴)."""
+
+    def __init__(self):
+        self.generate_json_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        self.generate_json_call_count += 1
+        return json.dumps({"feedback": "좋은 답변입니다.", "next_question": "   "})
+
+    async def chat(self, messages, model):
+        return "피드백 또는 총평 텍스트입니다."
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
+class AlwaysBlankChatOllamaService:
+    """chat()이 매번 빈 문자열을 뱉는다 - submit_answer()의 마지막 문항 피드백이나
+    complete_session()의 총평에 그대로 저장되면, 둘 다 한 번 기록되면 다시
+    되돌릴 방법이 없는 상태(마지막 문항은 mark_answered_if_pending()의 단발성
+    CAS로, 세션 총평은 status를 completed로 바꾸는 동시에)로 조용히 굳어버릴
+    수 있었다."""
+
+    def __init__(self):
+        self.chat_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        return json.dumps({"feedback": "좋은 답변입니다.", "next_question": "다음 면접 질문입니다."})
+
+    async def chat(self, messages, model):
+        self.chat_call_count += 1
+        return "   "
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
+class RecoversOnRetryOllamaService:
+    """generate_json() 첫 호출은 깨진 JSON을 뱉고, 두 번째 호출부터는 정상
+    응답을 준다(tests/test_quiz.py의 RecoversOnRetryOllamaService와 같은
+    패턴)."""
+
+    def __init__(self):
+        self.generate_json_call_count = 0
+
+    async def generate(self, prompt, model):
+        return "첫 번째 면접 질문입니다."
+
+    async def generate_json(self, prompt, model, schema):
+        self.generate_json_call_count += 1
+        if self.generate_json_call_count == 1:
+            return "not valid json {{{"
+        return json.dumps({"feedback": "좋은 답변입니다.", "next_question": "다음 면접 질문입니다."})
+
+    async def chat(self, messages, model):
+        return "피드백 또는 총평 텍스트입니다."
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+
+class GroundingFakeOllamaService:
+    """마지막으로 모델에 전달된 프롬프트를 기록해두고, 태그가 포함된 텍스트만 서로 가까운
+    벡터로 임베딩한다."""
+
+    def __init__(self):
+        self.last_prompt = None
+
+    async def generate(self, prompt, model):
+        self.last_prompt = prompt
+        return "질문"
+
+    async def generate_json(self, prompt, model, schema):
+        self.last_prompt = prompt
+        return json.dumps({"feedback": "피드백", "next_question": "다음 질문"})
+
+    async def chat(self, messages, model):
+        self.last_prompt = messages[0]["content"]
+        return "총평"
+
+    async def embed(self, text, model):
+        if "기억할 사실" in text:
+            return [1.0, 0.0]
+        return [0.0, 1.0]
 
 
 def _signup_and_get_token(client, email="interview@example.com"):
@@ -57,6 +220,121 @@ def test_create_session_generates_first_question(client):
     assert body["turns"][0]["feedback"] is None
 
 
+def test_list_sessions_pagination(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    for i in range(5):
+        client.post(
+            "/api/v1/interview/practice-sessions",
+            json={"topic": f"주제 {i}"},
+            headers=_auth_headers(token),
+        )
+
+    first_page = client.get(
+        "/api/v1/interview/practice-sessions?limit=2&offset=0", headers=_auth_headers(token)
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert first_page.headers["X-Total-Count"] == "5"
+
+    second_page = client.get(
+        "/api/v1/interview/practice-sessions?limit=2&offset=2", headers=_auth_headers(token)
+    )
+    assert len(second_page.json()) == 2
+
+    first_ids = {s["id"] for s in first_page.json()}
+    second_ids = {s["id"] for s in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_list_for_user_breaks_updated_at_ties_deterministically():
+    """`ORDER BY updated_at DESC`만으로는 값이 같은 행 사이의 순서가 SQL
+    표준상 정의돼 있지 않다 - 페이지마다 그 순서가 달라질 수 있어서,
+    LIMIT/OFFSET으로 나눠 받으면 같은 세션이 두 페이지에 다시 나오거나
+    (중복) 어느 페이지에도 안 나올(누락) 수 있다. 이 동시성은 SQLite
+    기반 테스트로 재현할 수 없어(68번 라운드와 같은 성격의 한계),
+    리포지토리가 세션에 전달하는 statement를 가로채 컴파일된 SQL의
+    ORDER BY 절에 updated_at뿐 아니라 id도 2차 기준으로 포함돼 있는지
+    직접 확인한다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.interview_practice_repository import InterviewPracticeSessionRepository
+
+    class _CapturingResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = InterviewPracticeSessionRepository(session)
+    asyncio.run(repo.list_for_user(uuid.uuid4(), limit=20, offset=0))
+
+    assert session.captured_statement is not None
+    order_by_clause = str(session.captured_statement).split("ORDER BY")[1]
+    assert "updated_at" in order_by_clause
+    assert "id" in order_by_clause
+
+
+def test_list_all_for_user_breaks_updated_at_ties_deterministically():
+    """list_for_user()(페이지네이션 있음)는 위 테스트처럼 이미 id를 2차 정렬
+    기준으로 쓰는데, 데이터 export가 쓰는 list_all_for_user()(페이지네이션
+    없음)는 updated_at만으로 정렬해 같은 문제(SQL 표준상 동률 순서 미정의)가
+    남아 있었다 - 페이지네이션이 없어 중복/누락 위험은 없지만, 같은 호출이
+    매번 다른 순서를 반환할 수 있다는 점은 동일하다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.interview_practice_repository import InterviewPracticeSessionRepository
+
+    class _CapturingResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = InterviewPracticeSessionRepository(session)
+    asyncio.run(repo.list_all_for_user(uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    order_by_clause = str(session.captured_statement).split("ORDER BY")[1]
+    assert "updated_at" in order_by_clause
+    assert "id" in order_by_clause
+
+
+def test_list_sessions_default_pagination_returns_all_when_under_limit(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    client.post(
+        "/api/v1/interview/practice-sessions", json={"topic": "백엔드"}, headers=_auth_headers(token)
+    )
+
+    listing = client.get("/api/v1/interview/practice-sessions", headers=_auth_headers(token))
+    assert listing.status_code == 200
+    assert len(listing.json()) == 1
+    assert listing.headers["X-Total-Count"] == "1"
+
+
 def test_create_session_ai_failure_returns_502(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
     token = _signup_and_get_token(client)
@@ -67,6 +345,92 @@ def test_create_session_ai_failure_returns_502(client):
         headers=_auth_headers(token),
     )
     assert response.status_code == 502
+
+
+def test_create_session_returns_502_when_first_question_is_blank(client):
+    """공백뿐인 첫 질문이 그대로 세션의 첫 턴으로 저장되지 않고, 재시도(2회)까지
+    소진한 뒤 502로 실패 처리되는지 확인한다."""
+    fake = AlwaysBlankFirstQuestionOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+
+    response = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+    assert fake.generate_call_count == 2
+
+
+def test_submit_answer_rejects_answer_over_max_length(client, monkeypatch):
+    monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "이 답변은 5자보다 훨씬 깁니다"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_submit_answer_rejects_whitespace_only_answer(client):
+    """min_length=1은 빈 문자열만 막을 뿐 공백만 있는 값은 통과시킨다 - 통과하면
+    mark_answered_if_pending()의 단발성 CAS(재제출 엔드포인트 없음)로 그 턴을
+    빈 답변인 채로 영구히 소비해버린다. 121/122라운드가 범위 밖으로 미뤄뒀던
+    필드다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "   "},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_submit_answer_rejects_invisible_only_answer(client):
+    """`str.strip()`은 공백류만 제거하고 zero-width space(U+200B) 같은 유니코드
+    Cf 카테고리 문자는 제거하지 못한다 - 이런 문자로만 이루어진 answer가
+    공백-only 검사를 통과해버렸다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "​​"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+    # 거부됐다면 그 턴은 여전히 미답변 상태로 남아, 정상적인 답변으로 다시
+    # 제출할 수 있어야 한다.
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert detail.json()["turns"][0]["answer"] is None
 
 
 def test_submit_answer_returns_feedback_and_next_question(client):
@@ -96,6 +460,186 @@ def test_submit_answer_returns_feedback_and_next_question(client):
         f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
     )
     assert len(detail.json()["turns"]) == 2
+
+
+def test_mark_answered_if_pending_rejects_second_writer(db_session_factory):
+    """submit_answer()는 "현재 턴이 미답변 상태인가"를 읽은 뒤 AI 응답을 계산해서
+    쓰는 check-then-act 구조다 - 같은 질문에 거의 동시에 두 번 답변이 제출되면
+    (이중 클릭, 네트워크 재시도 등) 둘 다 "미답변"을 보고 통과해서 각자 결과를
+    쓰려고 할 수 있다. 일반 UPDATE로 그냥 덮어쓰면 나중 요청이 먼저 요청의
+    답변/피드백을 조용히 지운다(lost update). 이걸 막는 compare-and-swap인
+    mark_answered_if_pending()을 같은 turn에 순서대로 두 번 호출해서, 첫 번째만
+    성공(True)하고 두 번째는 실패(False)하며 - 무엇보다 - 두 번째 호출이 첫
+    번째가 이미 기록한 값을 덮어쓰지 않는지 직접 확인한다. (실제 동시 요청
+    타이밍 재현은 SQLite의 파일 락 모델이 너무 불안정해 이 저장소 메서드
+    자체의 CAS 동작을 결정적으로 검증하는 쪽을 택했다.)"""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            settings = Settings(jwt_secret_key="a" * 32)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, _first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            turns = await InterviewPracticeTurnRepository(session).list_for_session(practice_session.id)
+            current_turn = turns[-1]
+
+            repo = InterviewPracticeTurnRepository(session)
+            first = await repo.mark_answered_if_pending(current_turn.id, "답변A", "피드백A")
+            second = await repo.mark_answered_if_pending(current_turn.id, "답변B", "피드백B")
+            await session.commit()
+
+            refreshed = (
+                await session.execute(
+                    select(InterviewPracticeTurn).where(InterviewPracticeTurn.id == current_turn.id)
+                )
+            ).scalar_one()
+            return first, second, refreshed.answer, refreshed.feedback
+
+    first, second, final_answer, final_feedback = asyncio.run(_run())
+
+    assert first is True
+    assert second is False
+    assert final_answer == "답변A"
+    assert final_feedback == "피드백A"
+
+
+def test_submit_answer_returns_409_when_turn_answered_while_ai_call_in_flight(db_session_factory):
+    """submit_answer()는 AI 응답을 계산하는 동안(generate_json/chat 호출 중) 다른
+    요청이 같은 턴에 먼저 답변을 기록해버릴 수 있다 - 이 요청이 계산을 끝내고
+    돌아왔을 때는 이미 늦은 상태다. 가짜 Ollama 서비스가 응답을 반환하기
+    "직전"에 같은 turn을 다른 곳에서 먼저 답변 완료 처리하도록 만들어서, 이
+    타이밍을 결정적으로 재현하고 submit_answer()가 다음 턴을 만들지 않고
+    깔끔한 409로 끝나는지 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            repo = InterviewPracticeTurnRepository(session)
+
+            class RaceInjectingOllamaService:
+                def __init__(self, turn_id_holder):
+                    self._turn_id_holder = turn_id_holder
+
+                async def generate(self, prompt, model):
+                    return "첫 질문"
+
+                async def generate_json(self, prompt, model, schema):
+                    await repo.mark_answered_if_pending(
+                        self._turn_id_holder[0], "먼저 도착한 답변", "먼저 온 피드백"
+                    )
+                    return json.dumps({"feedback": "늦은 피드백", "next_question": "늦은 다음 질문"})
+
+                async def chat(self, messages, model):
+                    return "총평"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0]
+
+            turn_id_holder = [None]
+            ollama = RaceInjectingOllamaService(turn_id_holder)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            turn_id_holder[0] = first_turn.id
+
+            try:
+                await service.submit_answer(
+                    session_id=practice_session.id, user_id=user.id, answer="늦은 답변"
+                )
+                return None
+            except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
+
+
+def test_submit_answer_at_final_turn_returns_409_when_answered_while_ai_call_in_flight(
+    db_session_factory, monkeypatch
+):
+    """위 테스트와 같은 경쟁 상태를, 이미 마지막 질문이라 다음 턴을 안 만드는
+    분기(else)에서도 재현한다 - MAX_INTERVIEW_QUESTIONS=1로 첫 답변이 곧바로
+    마지막 답변이 되게 만들고, chat() 호출 중에 같은 턴이 먼저 답변 완료
+    처리되도록 한다."""
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32, max_interview_questions=1)
+            repo = InterviewPracticeTurnRepository(session)
+
+            class RaceInjectingOllamaService:
+                def __init__(self, turn_id_holder):
+                    self._turn_id_holder = turn_id_holder
+
+                async def generate(self, prompt, model):
+                    return "첫 질문"
+
+                async def generate_json(self, prompt, model, schema):
+                    return json.dumps({"feedback": "피드백", "next_question": "다음 질문"})
+
+                async def chat(self, messages, model):
+                    await repo.mark_answered_if_pending(
+                        self._turn_id_holder[0], "먼저 도착한 답변", "먼저 온 피드백"
+                    )
+                    return "늦은 총평"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0]
+
+            turn_id_holder = [None]
+            ollama = RaceInjectingOllamaService(turn_id_holder)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            turn_id_holder[0] = first_turn.id
+
+            try:
+                await service.submit_answer(
+                    session_id=practice_session.id, user_id=user.id, answer="늦은 답변"
+                )
+                return None
+            except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
 
 
 def test_reaching_max_questions_stops_next_question(client, monkeypatch):
@@ -128,6 +672,228 @@ def test_reaching_max_questions_stops_next_question(client, monkeypatch):
         headers=_auth_headers(token),
     )
     assert no_pending.status_code == 409
+
+
+def test_submit_answer_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_submit_answer_ai_failure_returns_502(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    # 다음 질문을 생성해야 하는(마지막 턴이 아닌) 경로에서 AI 호출이 실패하는 경우.
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+
+
+def test_submit_answer_retries_once_and_recovers_from_malformed_json(client):
+    """quiz_service._generate_quiz는 8번 라운드에서 Ollama의 구조적 JSON 출력이
+    가끔 스키마 검증에 실패하는 것에 대비해 같은 프롬프트로 한 번 더 시도하는
+    재시도를 넣었는데, generate_json()을 쓰는 또 다른 호출 지점인 이 서비스의
+    submit_answer()는 그 수정을 빠뜨리고 있었다. submit_answer()는 AI 호출을
+    답변 커밋과 한 트랜잭션으로 묶어 실패 시 답변까지 롤백시키므로, 재시도 없이는
+    일회성 파싱 실패로 사용자가 방금 입력한 답변이 통째로 날아갔다 - 첫 호출이
+    깨진 JSON을 뱉어도 재시도로 복구해 200이 나오는지 확인한다."""
+    fake = RecoversOnRetryOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 200
+    assert fake.generate_json_call_count == 2
+
+
+def test_submit_answer_returns_502_after_exhausting_retries_on_malformed_json(client):
+    """재시도(2회)까지 전부 깨진 JSON이면 결국 502로 실패 처리되는지, 그리고
+    실제로 정확히 2번만 시도하고 무한 재시도하지 않는지 확인한다."""
+    fake = AlwaysMalformedJsonOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+    assert fake.generate_json_call_count == 2
+
+
+def test_submit_answer_returns_502_when_next_question_is_blank(client):
+    """공백뿐인 next_question이 그대로 새 턴으로 저장되지 않고, 재시도(2회)까지
+    소진한 뒤 502로 실패 처리되는지 확인한다."""
+    fake = AlwaysBlankNextQuestionOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+    assert fake.generate_json_call_count == 2
+
+
+def test_submit_answer_at_final_turn_ai_failure_returns_502(client, monkeypatch):
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    # 마지막 턴(다음 질문 없이 종합 피드백만 생성)에서 AI 호출이 실패하는 경우.
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "마지막 답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+
+
+def test_submit_answer_at_final_turn_returns_502_when_feedback_is_blank(client, monkeypatch):
+    """공백뿐인 마지막 문항 피드백이 mark_answered_if_pending()으로 그대로
+    기록되지 않고(한 번 기록되면 되돌릴 방법이 없는 단발성 CAS), 재시도(2회)까지
+    소진한 뒤 502로 실패 처리되는지 확인한다. 이 턴이 여전히 미답변 상태로
+    남아 있어(=CAS가 아예 호출되지 않아) 나중에 다시 제출할 수 있어야 한다."""
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "마지막 답변"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 502
+    assert fake.chat_call_count == 2
+
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    last_turn = detail.json()["turns"][-1]
+    assert last_turn["answer"] is None
+    assert last_turn["feedback"] is None
+
+
+def test_complete_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000/complete",
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_complete_session_ai_failure_returns_502(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/complete", headers=_auth_headers(token)
+    )
+    assert response.status_code == 502
+
+
+def test_complete_session_returns_502_when_overall_feedback_is_blank(client):
+    """공백뿐인 총평이 status를 completed로 바꾸며 그대로 저장되지 않고,
+    재시도(2회)까지 소진한 뒤 502로 실패 처리되는지 확인한다. complete_session()
+    자신도 completed 세션을 다시 안 건드리므로(_ALREADY_FINISHED), 세션이
+    여전히 in_progress로 남아 있어야 나중에 다시 종료를 시도할 수 있다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "백엔드 개발자"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "답변"},
+        headers=_auth_headers(token),
+    )
+
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    response = client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/complete", headers=_auth_headers(token)
+    )
+    assert response.status_code == 502
+    assert fake.chat_call_count == 2
+
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert detail.json()["status"] == "in_progress"
+    assert detail.json()["overall_feedback"] is None
 
 
 def test_complete_session_generates_overall_feedback(client):
@@ -169,6 +935,30 @@ def test_complete_session_generates_overall_feedback(client):
     assert answer_after_complete.status_code == 409
 
 
+def test_complete_session_is_rate_limited(client, monkeypatch):
+    """complete_session()은 내부적으로 종합 피드백을 생성하려고 LLM(ollama.chat)을
+    호출하는데도, create_session/submit_answer와 달리 라우트에 @limiter.limit()이
+    빠져 있었다 - LLM 호출 비용을 막으려고 두는 chat_rate_limit이 이 경로에는
+    전혀 적용되지 않던 누락이었다. 데코레이터는 핸들러 본문(404/409 등) 실행
+    전에 카운트를 소비하므로, 존재하지 않는 세션 id로 반복 호출해도 레이트리밋은
+    그대로 걸려야 한다."""
+    monkeypatch.setenv("CHAT_RATE_LIMIT", "2/minute")
+    get_settings.cache_clear()
+
+    token = _signup_and_get_token(client, email="complete-ratelimit@example.com")
+    headers = _auth_headers(token)
+    nonexistent_url = "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000/complete"
+
+    first = client.post(nonexistent_url, headers=headers)
+    second = client.post(nonexistent_url, headers=headers)
+    third = client.post(nonexistent_url, headers=headers)
+
+    assert first.status_code == 404
+    assert second.status_code == 404
+    assert third.status_code == 429
+    assert third.json()["error"]["code"] == "rate_limited"
+
+
 def test_complete_without_any_answer_returns_400(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
     token = _signup_and_get_token(client)
@@ -184,6 +974,49 @@ def test_complete_without_any_answer_returns_400(client):
         f"/api/v1/interview/practice-sessions/{session_id}/complete", headers=_auth_headers(token)
     )
     assert complete.status_code == 400
+
+
+def test_first_session_has_no_grounding_when_corpus_is_empty(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+
+    client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "일반 주제"},
+        headers=_auth_headers(token),
+    )
+
+    assert fake.last_prompt is not None
+    assert "[참고자료]" not in fake.last_prompt
+
+
+def test_later_session_is_grounded_with_relevant_legacy_content(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "일반 주제"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "기억할 사실 관련 질문"},
+        headers=_auth_headers(token),
+    )
+
+    assert "[참고자료]" in fake.last_prompt
+    assert "기억할 사실: 스레드는 프로세스 안에서 돈다" in fake.last_prompt
 
 
 def test_other_user_cannot_access_session(client):
@@ -202,3 +1035,648 @@ def test_other_user_cannot_access_session(client):
         f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token_b)
     )
     assert response.status_code == 404
+
+
+def test_rename_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="rename-practice@example.com")
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "원래 주제"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    rename = client.patch(
+        f"/api/v1/interview/practice-sessions/{session_id}",
+        json={"topic": "새 주제"},
+        headers=_auth_headers(token),
+    )
+    assert rename.status_code == 200
+    assert rename.json()["topic"] == "새 주제"
+
+    detail = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert detail.json()["topic"] == "새 주제"
+
+
+def test_rename_session_rejects_empty_topic(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="rename-practice-empty@example.com")
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "원래 주제"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/interview/practice-sessions/{session_id}",
+        json={"topic": ""},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_rename_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client, email="rename-practice-404@example.com")
+    response = client.patch(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000",
+        json={"topic": "새 주제"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_session_404_for_other_users_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token_a = _signup_and_get_token(client, email="rename-practice-a@example.com")
+    token_b = _signup_and_get_token(client, email="rename-practice-b@example.com")
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "A의 면접"},
+        headers=_auth_headers(token_a),
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/interview/practice-sessions/{session_id}",
+        json={"topic": "가로채기 시도"},
+        headers=_auth_headers(token_b),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_session_returns_404_when_session_deleted_during_request(db_session_factory, monkeypatch):
+    """rename_session()의 get_for_user() 조회는 잠금이 없어, 그 조회와
+    update_topic()의 UPDATE 사이에 다른 요청이 DELETE
+    /interview/practice-sessions/{id}로 같은 세션을 지우면 UPDATE가 0행에
+    매치돼 StaleDataError가 난다 - 184라운드가 고친 "계정 자체가 지워지는"
+    경쟁과는 별개로, 계정은 멀쩡한 채 이 리소스만 지워지는 경우다.
+    update_topic()을 몽키패치해 그 안에서 별도 세션으로 실제 삭제를 수행해
+    이 좁은 타이밍을 결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            settings = Settings(jwt_secret_key="a" * 32)
+            service = InterviewPracticeService(
+                session=session,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session, ollama_service=ollama, settings=settings),
+            )
+            practice_session, _first_turn = await service.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            session_id = practice_session.id
+
+            original_update_topic = InterviewPracticeSessionRepository.update_topic
+
+            async def _deleting_update_topic(self, target_session, topic):
+                async with db_session_factory() as session_b:
+                    sessions_b = InterviewPracticeSessionRepository(session_b)
+                    target = await sessions_b.get_for_user(session_id, user.id)
+                    await sessions_b.delete(target)
+                    await session_b.commit()
+                return await original_update_topic(self, target_session, topic)
+
+            monkeypatch.setattr(
+                InterviewPracticeSessionRepository, "update_topic", _deleting_update_topic
+            )
+
+            try:
+                await service.rename_session(session_id=session_id, user_id=user.id, topic="새 주제")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
+def test_delete_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="delete-practice@example.com")
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "삭제할 면접"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+
+    delete = client.delete(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert delete.status_code == 204
+
+    get_after_delete = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert get_after_delete.status_code == 404
+
+    listing = client.get("/api/v1/interview/practice-sessions", headers=_auth_headers(token))
+    assert listing.json() == []
+
+
+def test_delete_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client, email="delete-practice-404@example.com")
+    response = client.delete(
+        "/api/v1/interview/practice-sessions/00000000-0000-0000-0000-000000000000",
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_delete_session_404_for_other_users_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token_a = _signup_and_get_token(client, email="delete-practice-a@example.com")
+    token_b = _signup_and_get_token(client, email="delete-practice-b@example.com")
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "A의 면접"},
+        headers=_auth_headers(token_a),
+    )
+    session_id = create.json()["id"]
+
+    response = client.delete(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token_b)
+    )
+    assert response.status_code == 404
+
+    still_there = client.get(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token_a)
+    )
+    assert still_there.status_code == 200
+
+
+def test_delete_session_with_answered_turns(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="delete-practice-answered@example.com")
+
+    create = client.post(
+        "/api/v1/interview/practice-sessions",
+        json={"topic": "답변 있는 면접"},
+        headers=_auth_headers(token),
+    )
+    session_id = create.json()["id"]
+    client.post(
+        f"/api/v1/interview/practice-sessions/{session_id}/answers",
+        json={"answer": "제 답변입니다."},
+        headers=_auth_headers(token),
+    )
+
+    delete = client.delete(
+        f"/api/v1/interview/practice-sessions/{session_id}", headers=_auth_headers(token)
+    )
+    assert delete.status_code == 204
+
+
+def test_get_for_user_locked_requests_row_lock_on_postgres():
+    """submit_answer()/complete_session()은 둘 다 세션 status가 "in_progress"인지
+    확인한 뒤 느린 Ollama 호출을 거쳐서야 쓰는 check-then-act다 - 이 잠금 없이는
+    "마지막 답변 제출"과 "면접 종료"를 거의 동시에 누르면 둘 다 "아직 진행중"을
+    보고 통과해, 이미 completed로 끝난 세션에 아무도 답할 수 없는 턴이 하나
+    남는 데이터 정합성 문제가 생길 수 있다. get_for_user_locked()가 실제로
+    FOR UPDATE를 요청하는 쿼리를 만드는지, 세션에 전달되는 실제 statement를
+    가로채 확인한다(92/101번 라운드의 같은 패턴).
+
+    SQLite는 FOR UPDATE 자체를 지원하지 않아 컴파일 시 조용히 빠져버리므로,
+    이 잠금에 의존하는 동시성은 SQLite 기반 테스트 스위트로 재현/검증할 수
+    없다 - 가로챈 statement를 실제로 잠그는 Postgres 방언으로 다시 컴파일해
+    SQL 문자열에 "FOR UPDATE"가 포함되는지 확인하는 것으로 대신한다."""
+    import uuid
+
+    from sqlalchemy.dialects import postgresql
+
+    from app.repositories.interview_practice_repository import InterviewPracticeSessionRepository
+
+    class _CapturingResult:
+        def scalar_one_or_none(self):
+            return None
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = InterviewPracticeSessionRepository(session)
+    asyncio.run(repo.get_for_user_locked(uuid.uuid4(), uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    compiled = str(session.captured_statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
+
+
+def test_submit_answer_rejects_stale_retry_instead_of_misapplying_to_next_turn(db_session_factory):
+    """102번 라운드에서 submit_answer()/complete_session() 경쟁을 막으려고 추가한
+    get_for_user_locked()가, submit_answer()를 자기 자신과도 직렬화시켜버린다는
+    걸 뒤늦게 발견했다(102번 라운드 자체가 만든 회귀) - 이 잠금 때문에 대기했다
+    깨어난 요청이 "지금 마지막 턴"을 위치로 다시 고르면, 그 사이 다른 제출이
+    이미 답변하고 새로 만든 턴을 자기 것인 양 잘못 답변해버릴 수 있다(원래는
+    mark_answered_if_pending의 CAS가 같은 턴에 대한 중복 제출을 깔끔히
+    거부했는데, 잠금이 둘째 요청을 완전히 다른 -다음- 턴 앞으로 데려다
+    놓아버린다).
+
+    실제 운영 환경처럼 요청마다 별도 세션(별도 identity map)을 쓰지 않고 하나의
+    세션을 공유해서 재현하면, mark_answered_if_pending()의 세션 단위 bulk
+    update 동기화(synchronize_session)가 이 테스트가 붙잡고 있는 "오래된"
+    current_turn 객체의 answer 속성까지 우연히 갱신해버려서, 진짜 원인(턴을
+    위치로 잘못 고름)과 무관하게 기존 `current_turn.answer is not None` 체크만
+    으로도 우연히 거부돼버린다(고쳐야 할 버그를 재현하지 못하고 통과해버림 -
+    실제로 확인함). 서로 다른 세션 두 개(같은 커넥션을 쓰지만 순차적으로만
+    동작해 SQLite의 단일 커넥션 제약을 안 건드림)로 진짜 격리된 상태를 만든다.
+
+    실제 Postgres에서는 바깥쪽 요청이 `get_for_user_locked()`의 `FOR UPDATE`
+    잠금 자체에서 (다른 요청의 트랜잭션이 끝날 때까지) 블록된다 - 즉 바깥쪽
+    요청은 그 어떤 턴 조회도 하기 전에 멈춰 있다가, 다른 요청이 완전히 끝난
+    "뒤에야" 깨어나서 그제서야 처음(구버전 코드라면 유일한) 턴 조회를 한다.
+    그래서 경쟁은 `get_for_user_locked()` 호출 지점에 주입해야 실제 타이밍과
+    맞다 - `list_for_session()` 호출 "이후"에 다른 요청을 끼워넣으면(바깥쪽이
+    이미 자기 몫의 조회를 마친 뒤라) 최초 재현 시도에서는 구버전 코드도
+    우연히 통과해버렸다(직접 확인함 - `mark_answered_if_pending`이 자기가
+    들고 있던 오래된 turn.id에 대해서는 여전히 CAS로 정상 거부했기 때문).
+    `get_for_user_locked()`를 가로채, 첫 호출이 반환하기 "전에" 별도 세션의
+    "다른 요청"이 같은 턴에 완전히 답하고 커밋하도록 만든다 - 이러면 바깥쪽
+    요청이 잠금을 얻은 뒤 읽는 턴 목록은 진짜로 다른 세션이 막 커밋한 최신
+    상태([첫 턴 답변 완료, 다음 턴 미답변])다. submit_answer()가 이 상황에서
+    엉뚱한(다음) 턴에 조용히 답을 붙이는 대신 깔끔한 409로 끝나는지 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            ollama = FakeOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    # 바깥쪽(session_a)이 여기까지 오면서 이미 읽었을 수 있는
+                    # 읽기전용 트랜잭션을 커밋해 커넥션을 비운 뒤, 별도 세션의
+                    # "다른 요청"이 같은 턴에 완전히 답하고 다음 턴을 만들도록
+                    # 한다 - Postgres라면 이 시점에 바깥쪽 요청이 FOR UPDATE에서
+                    # 블록돼 있었을 것이다.
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            answered_turn, next_turn = await service_b.submit_answer(
+                                session_id=practice_session.id,
+                                user_id=user.id,
+                                answer="먼저 도착한 답변",
+                            )
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                    assert answered_turn.id == first_turn.id
+                    assert next_turn is not None
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id,
+                        user_id=user.id,
+                        answer="뒤늦게 도착한 답변(사실 첫 턴용이었음)",
+                    )
+                    return None
+                except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    return exc
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
+
+
+def test_submit_answer_rejects_when_session_completed_while_waiting_for_lock(db_session_factory):
+    """submit_answer()가 잠금을 얻은 뒤 세션 status를 다시 확인하는 부분(102번
+    라운드의 원래 목적: complete_session과의 경쟁 방지)이 여전히 제대로
+    동작하는지 확인한다 - 위 테스트가 잠금 지점에 주입한 것과 같은 방식으로,
+    이번엔 "다른 요청"이 완전한 답변 1개를 가진 세션을 완전히 종료시키도록
+    해서, 바깥쪽 제출이 (엉뚱한 턴에 답하는 대신) 이미 종료된 세션이라고
+    올바르게 거부하는지 검증한다."""
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            ollama = FakeOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+            # 첫 턴을 미리 정상적으로 답변해서 complete_session이 종합 피드백을
+            # 만들 답변한 질문을 최소 1개 갖도록 만든다.
+            _, second_turn = await service_a.submit_answer(
+                session_id=practice_session.id, user_id=user.id, answer="첫 답변"
+            )
+            assert second_turn is not None
+            await session_a.commit()
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            completed = await service_b.complete_session(
+                                session_id=practice_session.id, user_id=user.id
+                            )
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                    assert completed.status == "completed"
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id, user_id=user.id, answer="두 번째 답변"
+                    )
+                    return None
+                except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    return exc
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "이미 종료된 면접 연습입니다."
+
+
+def test_submit_answer_rejects_when_session_deleted_while_waiting_for_lock(db_session_factory):
+    """submit_answer()가 잠금을 얻은 뒤 세션 존재 여부를 다시 확인하는 부분이
+    여전히 제대로 동작하는지 확인한다 - "다른 요청"이 그 사이 세션 자체를
+    삭제해버리면, 바깥쪽 제출이 (이미 사라진 세션의 턴에 답하려 드는 대신)
+    404로 거부하는지 검증한다."""
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32)
+            ollama = FakeOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            await service_b.delete_session(session_id=practice_session.id, user_id=user.id)
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id, user_id=user.id, answer="답변"
+                    )
+                    return None
+                except Exception as exc:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    return exc
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
+def test_submit_answer_rejects_stale_retry_on_final_turn_without_wasting_ai_call(
+    db_session_factory, monkeypatch
+):
+    """103번 라운드가 잠금 뒤 다시 읽은 턴이 애초에 답하려던 턴과 여전히
+    일치하는지 확인하도록 고쳤지만, 마지막 질문(다음 턴을 새로 만들지 않는
+    분기)에서는 이 재확인이 무력화된다는 걸 놓쳤다 - `list_for_session()`에는
+    `get_for_user_locked()`(103번 라운드)와 달리 `populate_existing`이 없어서,
+    잠금 대기 중 다른 요청이 이미 답해버린 바로 그 턴(새 턴이 안 생기므로
+    두 번째 조회도 같은 turn 객체를 돌려받음)을 여전히 "미답변"으로 잘못
+    보고, 값싸게 걸러내야 할 재확인을 통과해버린 뒤 AI 호출까지 낭비하고서야
+    (mark_answered_if_pending의 CAS로) 뒤늦게 409로 거부한다 - 데이터가
+    잘못 저장되진 않지만, 재확인을 추가한 원래 목적(AI 호출 낭비 없이 안전하게
+    거부하기)이 이 분기에서만 무력화된다. MAX_INTERVIEW_QUESTIONS=1로 설정해
+    첫 답변이 곧바로 마지막 답변이 되게 만들고, 잠금 지점에서 "다른 요청"이
+    그 턴에 먼저 완전히 답하도록 한 뒤, 바깥쪽 제출이 (여전히 409로 거부되긴
+    하지만) 실제로 AI를 다시 호출하지 않는지 확인한다."""
+    monkeypatch.setenv("MAX_INTERVIEW_QUESTIONS", "1")
+    get_settings.cache_clear()
+
+    async def _run():
+        async with db_session_factory() as session_a:
+            user = await UserRepository(session_a).create_guest()
+            await session_a.commit()
+
+            settings = Settings(jwt_secret_key="a" * 32, max_interview_questions=1)
+
+            class CountingOllamaService(FakeOllamaService):
+                def __init__(self):
+                    self.chat_calls = 0
+
+                async def chat(self, messages, model):
+                    self.chat_calls += 1
+                    return await super().chat(messages, model)
+
+            ollama = CountingOllamaService()
+            service_a = InterviewPracticeService(
+                session=session_a,
+                ollama_service=ollama,
+                settings=settings,
+                rag_service=RagService(session=session_a, ollama_service=ollama, settings=settings),
+            )
+            practice_session, first_turn = await service_a.create_session(
+                user_id=user.id, topic="백엔드 개발자", model="qwen2.5:3b"
+            )
+
+            original_get_for_user_locked = InterviewPracticeSessionRepository.get_for_user_locked
+            call_count = {"n": 0}
+
+            async def racing_get_for_user_locked(self, session_id, user_id):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    await session_a.commit()
+                    InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+                    try:
+                        async with db_session_factory() as session_b:
+                            service_b = InterviewPracticeService(
+                                session=session_b,
+                                ollama_service=ollama,
+                                settings=settings,
+                                rag_service=RagService(
+                                    session=session_b, ollama_service=ollama, settings=settings
+                                ),
+                            )
+                            answered_turn, next_turn = await service_b.submit_answer(
+                                session_id=practice_session.id,
+                                user_id=user.id,
+                                answer="먼저 도착한 답변",
+                            )
+                    finally:
+                        InterviewPracticeSessionRepository.get_for_user_locked = (
+                            racing_get_for_user_locked
+                        )
+                    assert answered_turn.id == first_turn.id
+                    assert next_turn is None  # 마지막 질문이라 다음 턴이 생기지 않음
+                return await original_get_for_user_locked(self, session_id, user_id)
+
+            InterviewPracticeSessionRepository.get_for_user_locked = racing_get_for_user_locked
+            try:
+                try:
+                    await service_a.submit_answer(
+                        session_id=practice_session.id,
+                        user_id=user.id,
+                        answer="뒤늦게 도착한 답변(사실 첫 턴용이었음)",
+                    )
+                    exc = None
+                except Exception as e:  # noqa: BLE001 - 예외 자체를 검사해야 함
+                    exc = e
+            finally:
+                InterviewPracticeSessionRepository.get_for_user_locked = original_get_for_user_locked
+
+            return exc, ollama.chat_calls
+
+    exc, chat_calls = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 409
+    assert exc.detail == "답변할 질문이 없습니다."
+    # 다른 요청이 이미 답한 것과 같은 턴이라는 걸 잠금 후 재확인에서 값싸게
+    # 걸러냈어야 한다 - chat()이 두 번(먼저 도착한 요청 몫 + 뒤늦은 요청이
+    # 낭비한 몫) 호출됐다면 이 재확인이 무력화된 것이다.
+    assert chat_calls == 1
+
+
+def test_create_session_returns_401_when_account_deleted_during_generation(db_session_factory):
+    """create_session()은 RAG 조회 + 첫 질문 생성을 위한 Ollama 호출을 거쳐서야
+    InterviewPracticeSession을 만든다(user_id는 nullable=False FK) - 그 사이
+    다른 요청이 UserService.delete_account()로 이 계정을 지워버리면, 이 INSERT가
+    IntegrityError로 실패한다. 143~145라운드가 고친 것과 같은 종류의 경쟁이다 -
+    잡지 않으면 처리되지 않은 예외(500)로 새어나간다. 가짜 Ollama가 첫 질문을
+    반환하기 "직전"에 별도 세션에서 이 계정을 완전히 지우도록 만들어서 이
+    타이밍을 결정적으로 재현한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            class DeletingOllamaService:
+                async def generate(self, prompt, model):
+                    async with db_session_factory() as session_b:
+                        users_b = UserRepository(session_b)
+                        target = await users_b.get_by_id(user_id)
+                        await users_b.delete(target)
+                        await session_b.commit()
+                    return "늦게 도착한 질문"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0, 0.0]
+
+            settings = get_settings()
+            ollama = DeletingOllamaService()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = InterviewPracticeService(
+                session=session, ollama_service=ollama, settings=settings, rag_service=rag
+            )
+
+            try:
+                await service.create_session(user_id=user_id, topic="백엔드 개발자", model="qwen2.5:3b")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401

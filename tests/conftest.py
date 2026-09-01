@@ -11,21 +11,31 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import app.db.models  # noqa: F401  (Base.metadata에 테이블을 등록하기 위해 임포트)
+from app.api.v1.routes.health import _readiness_cache
+from app.api.v1.routes.models import _models_cache
 from app.core.config import get_settings
+from app.core.dependencies import reset_ws_connection_counter
 from app.core.rate_limit import limiter
 from app.db.base import Base
-from app.db.session import get_db
+from app.db.session import enable_sqlite_foreign_keys, get_db
 from app.main import create_app
 
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    """테스트 간 rate limiter 상태와 캐시된 설정을 초기화한다."""
+    """테스트 간 rate limiter/설정 캐시/모델 목록 캐시/WebSocket 동시 연결
+    카운터를 초기화한다."""
     limiter.reset()
     get_settings.cache_clear()
+    _models_cache.clear()
+    _readiness_cache.clear()
+    reset_ws_connection_counter()
     yield
     limiter.reset()
     get_settings.cache_clear()
+    _models_cache.clear()
+    _readiness_cache.clear()
+    reset_ws_connection_counter()
 
 
 @pytest.fixture
@@ -40,6 +50,7 @@ def db_session_factory():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    enable_sqlite_foreign_keys(engine)
 
     async def _create_all():
         async with engine.begin() as conn:

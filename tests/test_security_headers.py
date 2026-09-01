@@ -9,6 +9,8 @@ def test_security_headers_present(client):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+    assert response.headers["strict-transport-security"] == "max-age=63072000; includeSubDomains"
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_docs_enabled_in_development(client):

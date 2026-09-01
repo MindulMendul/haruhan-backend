@@ -1,4 +1,13 @@
-version: '3.8'
+# Docker의 기본 로깅 드라이버(json-file)는 max-size/max-file을 지정하지 않으면
+# 로그 파일 크기에 상한이 없다 - uvicorn 기본 access log(요청마다 1줄)가 로테이션
+# 없이 계속 쌓이면, 운영 개월 수가 쌓일수록 디스크가 서서히 채워져 결국 Caddy
+# 인증서 갱신 실패나 DB 쓰기 실패로 스택 전체가 조용히 멎을 수 있는 장기 리스크다.
+# 모든 서비스가 공유하는 앵커로 한 곳에서만 값을 관리한다.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   haruhan-backend:
@@ -7,9 +16,32 @@ services:
       dockerfile: Dockerfile
     container_name: haruhan-backend
     restart: unless-stopped
+    logging: *default-logging
+    # 이 호스트는 mindul-net으로 다른 스택(Ollama 포함)과 리소스를 공유한다 - 이
+    # 서비스 중 하나가 메모리 누수나 버그로 폭주하면 호스트 전체 메모리를 잠식해
+    # 같은 호스트의 다른 스택까지 함께 죽일 수 있다. 튜닝된 상한이 아니라, 정상
+    # 사용량(개인/소규모 트래픽의 FastAPI 프로세스는 보통 수백MB 안쪽)보다 훨씬
+    # 넉넉하게 잡아 평소엔 절대 안 걸리고 진짜 폭주할 때만 막는 안전장치다(95/99/
+    # 131라운드의 "넉넉한 안전장치, 주 방어선 아님" 패턴과 동일) - 실사용 데이터로
+    # 운영자가 더 타이트하게 조정해도 된다.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
     # 외부 접근은 caddy가 대신 받으므로 호스트 포트를 열어두지 않는다
     # (필요하면 디버깅용으로 "18000:8000"을 임시로 되살려도 됨).
     environment:
+      # main.py는 이 값이 정확히 "production"일 때만 /docs, /redoc, /openapi.json을
+      # 끈다(공격 표면 축소) - .env 파일은 .dockerignore로 빌드 컨텍스트에서
+      # 아예 제외되므로(이미지 안에 .env가 없음), 컨테이너는 이 environment: 목록에
+      # 없는 변수를 전혀 보지 못하고 Settings의 기본값("development")으로 조용히
+      # fallback한다. 여기 안 넣으면 .env에 ENVIRONMENT=production을 아무리 정확히
+      # 적어도 실제 배포 컨테이너에는 전달되지 않아 문서 엔드포인트가 공개
+      # 인터넷에 계속 열려 있게 된다 - 필수값으로 만들어 안 채워졌으면 시작 시
+      # 바로 실패하게 한다(JWT_SECRET_KEY/DOMAIN과 같은 방식).
+      - ENVIRONMENT=${ENVIRONMENT:?ENVIRONMENT must be set (development or production)}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DATABASE_URL=${DATABASE_URL}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
@@ -20,14 +52,145 @@ services:
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
       - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-14}
+      # 비워두면(.env에서 REDIS_URL 미설정) 아래 내장 redis 서비스를 기본으로 쓴다.
+      # 외부 관리형 Redis를 쓰려면 .env에 REDIS_URL을 직접 채워 이 기본값을 덮어쓰면 된다.
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      # ENVIRONMENT/LOG_LEVEL과 같은 이유로(113라운드) 위 13개 변수 말고도
+      # Settings의 나머지 필드 17개가 이 목록에서 전부 빠져 있었다 - .env에
+      # 값을 채워도 컨테이너에는 절대 전달되지 않고 코드 기본값으로 조용히
+      # fallback되는 상태였다. AUTH_RATE_LIMIT(브루트포스 방어)/
+      # MAX_BODY_SIZE_BYTES(요청 크기 DoS 방어)/WS_IDLE_TIMEOUT_SECONDS·
+      # MAX_CONCURRENT_WS_CONNECTIONS(WS DB 커넥션 풀 고갈 방지)처럼 여러
+      # 라운드에 걸쳐 만든 안전장치들이 실제 배포 경로에서는 운영자가
+      # 조정할 방법이 없는 죽은 설정이었던 셈이다.
+      - AUTH_RATE_LIMIT=${AUTH_RATE_LIMIT:-5/minute}
+      - EXPORT_RATE_LIMIT=${EXPORT_RATE_LIMIT:-10/minute}
+      - MODELS_RATE_LIMIT=${MODELS_RATE_LIMIT:-30/minute}
+      - MAX_CHAT_HISTORY_MESSAGES=${MAX_CHAT_HISTORY_MESSAGES:-40}
+      - MAX_QUIZ_SOURCE_LENGTH=${MAX_QUIZ_SOURCE_LENGTH:-20000}
+      - DEFAULT_QUIZ_QUESTION_COUNT=${DEFAULT_QUIZ_QUESTION_COUNT:-5}
+      - MAX_QUIZ_QUESTION_COUNT=${MAX_QUIZ_QUESTION_COUNT:-20}
+      - MAX_QUIZ_CHOICE_COUNT=${MAX_QUIZ_CHOICE_COUNT:-8}
+      - RAG_BACKFILL_BATCH_SIZE=${RAG_BACKFILL_BATCH_SIZE:-500}
+      - MAX_INTERVIEW_QUESTIONS=${MAX_INTERVIEW_QUESTIONS:-5}
+      - MAX_REVIEW_CONTENT_LENGTH=${MAX_REVIEW_CONTENT_LENGTH:-10000}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - RAG_TOP_K=${RAG_TOP_K:-3}
+      - RAG_MAX_CANDIDATE_CHUNKS=${RAG_MAX_CANDIDATE_CHUNKS:-2000}
+      - WS_IDLE_TIMEOUT_SECONDS=${WS_IDLE_TIMEOUT_SECONDS:-300}
+      - MAX_CONCURRENT_WS_CONNECTIONS=${MAX_CONCURRENT_WS_CONNECTIONS:-6}
+      - HEALTH_CHECK_TIMEOUT_SECONDS=${HEALTH_CHECK_TIMEOUT_SECONDS:-3}
+      - MAX_BODY_SIZE_BYTES=${MAX_BODY_SIZE_BYTES:-1048576}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # 이미지에 curl/wget이 없어서(python:3.11-slim) 항상 있는 python으로 대신한다.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - haruhan-net
       - mindul-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: haruhan-redis
+    restart: unless-stopped
+    logging: *default-logging
+    # 레이트리밋 카운터는 휘발성 데이터라 영속 볼륨이 필요 없다. 메모리 상한 + LRU
+    # 축출 정책만 걸어서 무한정 커지는 것을 막는다. 외부 포트는 열지 않는다
+    # (haruhan-backend에서만 내부 네트워크로 접근).
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    # --maxmemory는 redis 프로세스 내부의 데이터 상한일 뿐 프로세스 자체의 메모리
+    # 사용량(연결 버퍼 등 부가 오버헤드 포함) 상한이 아니다 - 컨테이너 레벨에서
+    # 그 위에 여유를 두고 상한을 걸어 이중으로 방어한다.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - haruhan-net
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: haruhan-prometheus
+    restart: unless-stopped
+    logging: *default-logging
+    # haruhan-backend의 /metrics를 스크레이프한다. 대시보드 UI는 아직 아무도 안 쓰므로
+    # 외부 포트는 열지 않는다 (필요하면 SSH 터널로 접근).
+    # 라벨 카디널리티가(예: 실수로 사용자별 값이 라벨에 섞이는 버그) 갑자기 폭증하면
+    # 시계열 저장 메모리가 빠르게 커질 수 있다 - 넉넉한 안전장치.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      haruhan-backend:
+        condition: service_healthy
+    healthcheck:
+      # prom/prometheus는 busybox 기반이라 wget은 있지만 curl은 없다.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - haruhan-net
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: haruhan-grafana
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256m
+    # Prometheus 데이터소스는 자동 프로비저닝되지만, 대시보드 패널 구성은 사람이
+    # 직접 만든다 (이번 자동화 범위 밖). 사람이 실제로 들여다볼 UI라 호스트 포트를 연다.
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - haruhan-net
 
   caddy:
     image: caddy:2-alpine
     container_name: haruhan-caddy
     restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256m
     ports:
       - "80:80"
       - "443:443"
@@ -40,7 +203,22 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - haruhan-backend
+      haruhan-backend:
+        condition: service_healthy
+    healthcheck:
+      # 다른 서비스(redis/prometheus/grafana/haruhan-backend)는 전부 healthcheck가
+      # 있는데 caddy만 빠져 있었다 - 이 컨테이너가 유일하게 80/443을 호스트에 노출하는
+      # 실제 진입점인데도, 프로세스가 멈추거나(인증서 갱신 루프 등) Caddyfile 설정
+      # 오류로 제대로 못 뜬 상태를 감지할 방법이 없었다. 외부 도메인/TLS 인증서
+      # 상태와 무관하게 항상 떠 있는 Caddy 관리 API(기본적으로 localhost:2019)를
+      # 확인한다 - DNS/인증서 문제로 실제 사이트가 응답 못 해도 프로세스 자체는
+      # 살아있을 수 있어, "프로세스가 응답하는가"만 보는 게 이 healthcheck의 목적과
+      # 더 맞다.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - haruhan-net
 
@@ -58,3 +236,6 @@ volumes:
   # (없으면 재배포 때마다 인증서를 새로 발급받으려다 rate limit에 걸릴 수 있음).
   caddy_data:
   caddy_config:
+  # 시계열 데이터/대시보드 설정도 재배포 후에 유지되도록 볼륨에 저장한다.
+  prometheus_data:
+  grafana_data:

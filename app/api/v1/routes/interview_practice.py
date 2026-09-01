@@ -1,10 +1,10 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.dependencies import get_current_user, get_ollama_service
+from app.core.dependencies import get_current_user, get_ollama_service, get_rag_service
 from app.core.rate_limit import limiter
 from app.db.models.user import User
 from app.db.session import get_db
@@ -15,9 +15,11 @@ from app.schemas.interview_practice import (
     InterviewPracticeSessionDetailResponse,
     InterviewPracticeSessionResponse,
     InterviewPracticeTurnResponse,
+    InterviewPracticeUpdateRequest,
 )
 from app.services.interview_practice_service import InterviewPracticeService
 from app.services.ollama_service import OllamaService
+from app.services.rag_service import RagService
 
 router = APIRouter(prefix="/interview/practice-sessions", tags=["interview-practice"])
 
@@ -26,14 +28,18 @@ def get_interview_practice_service(
     session: AsyncSession = Depends(get_db),
     ollama_service: OllamaService = Depends(get_ollama_service),
     settings: Settings = Depends(get_settings),
+    rag_service: RagService = Depends(get_rag_service),
 ) -> InterviewPracticeService:
-    return InterviewPracticeService(session=session, ollama_service=ollama_service, settings=settings)
+    return InterviewPracticeService(
+        session=session, ollama_service=ollama_service, settings=settings, rag_service=rag_service
+    )
 
 
 @router.post("", response_model=InterviewPracticeSessionDetailResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def create_session(
     request: Request,
+    response: Response,
     payload: InterviewPracticeCreateRequest,
     current_user: User = Depends(get_current_user),
     service: InterviewPracticeService = Depends(get_interview_practice_service),
@@ -55,10 +61,14 @@ async def create_session(
 
 @router.get("", response_model=list[InterviewPracticeSessionResponse])
 async def list_sessions(
+    response: Response,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     service: InterviewPracticeService = Depends(get_interview_practice_service),
 ) -> list[InterviewPracticeSessionResponse]:
-    sessions = await service.list_sessions(user_id=current_user.id)
+    sessions, total = await service.list_sessions(user_id=current_user.id, limit=limit, offset=offset)
+    response.headers["X-Total-Count"] = str(total)
     return [InterviewPracticeSessionResponse.model_validate(s) for s in sessions]
 
 
@@ -83,10 +93,33 @@ async def get_session(
     )
 
 
+@router.patch("/{session_id}", response_model=InterviewPracticeSessionResponse)
+async def rename_session(
+    session_id: uuid.UUID,
+    payload: InterviewPracticeUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    service: InterviewPracticeService = Depends(get_interview_practice_service),
+) -> InterviewPracticeSessionResponse:
+    practice_session = await service.rename_session(
+        session_id=session_id, user_id=current_user.id, topic=payload.topic
+    )
+    return InterviewPracticeSessionResponse.model_validate(practice_session)
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    service: InterviewPracticeService = Depends(get_interview_practice_service),
+) -> None:
+    await service.delete_session(session_id=session_id, user_id=current_user.id)
+
+
 @router.post("/{session_id}/answers", response_model=InterviewPracticeAnswerResponse)
 @limiter.limit(lambda: get_settings().chat_rate_limit)
 async def submit_answer(
     request: Request,
+    response: Response,
     session_id: uuid.UUID,
     payload: InterviewPracticeAnswerRequest,
     current_user: User = Depends(get_current_user),
@@ -102,7 +135,10 @@ async def submit_answer(
 
 
 @router.post("/{session_id}/complete", response_model=InterviewPracticeSessionResponse)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
 async def complete_session(
+    request: Request,
+    response: Response,
     session_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     service: InterviewPracticeService = Depends(get_interview_practice_service),

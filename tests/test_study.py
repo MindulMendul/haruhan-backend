@@ -1,3 +1,6 @@
+import pytest
+
+from app.core.config import get_settings
 from app.core.dependencies import get_ollama_service
 from app.services.ollama_service import OllamaServiceError
 
@@ -6,10 +9,104 @@ class FakeOllamaService:
     async def chat(self, messages, model):
         return f"assistant reply to: {messages[-1]['content']}"
 
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        for chunk in ["안녕", "하세요"]:
+            yield chunk
+
 
 class FailingOllamaService:
     async def chat(self, messages, model):
         raise OllamaServiceError("boom")
+
+    async def chat_stream(self, messages, model):
+        raise OllamaServiceError("boom")
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
+
+
+class CrashingOllamaService:
+    """OllamaServiceError가 아닌, 라우트가 예상하지 못한 예외를 흉내낸다
+    (예: 임베딩 응답 파싱 실패, DB 커넥션 끊김 등)."""
+
+    async def chat_stream(self, messages, model):
+        raise RuntimeError("boom")
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
+
+
+class AlwaysBlankChatOllamaService:
+    """chat()/chat_stream()이 매번 공백만 뱉는다 - OllamaService.chat()/
+    chat_stream()은 Ollama가 200을 응답해도 본문에 message.content가 없거나
+    명시적 null이면 OllamaServiceError를 던지지 않고 그냥 빈 문자열을(스트리밍
+    버전은 아무 delta도) 돌려주는데, 재시도 없이 그대로 저장되면 학습챗 대화
+    기록에 빈 assistant 말풍선이 영구히 남는다
+    (interview_practice_service.py의 AlwaysBlankChatOllamaService와 같은 패턴)."""
+
+    def __init__(self):
+        self.chat_call_count = 0
+        self.chat_stream_call_count = 0
+
+    async def chat(self, messages, model):
+        self.chat_call_count += 1
+        return "   "
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        self.chat_stream_call_count += 1
+        return
+        yield ""  # pragma: no cover - async generator 문법상 필요 (도달 안 함)
+
+
+class RecoversOnRetryOllamaService:
+    """chat()/chat_stream() 첫 호출은 공백만 뱉고, 두 번째 호출부터는 정상
+    응답을 준다(interview_practice_service.py의 RecoversOnRetryOllamaService와
+    같은 패턴)."""
+
+    def __init__(self):
+        self.chat_call_count = 0
+        self.chat_stream_call_count = 0
+
+    async def chat(self, messages, model):
+        self.chat_call_count += 1
+        if self.chat_call_count == 1:
+            return "   "
+        return f"assistant reply to: {messages[-1]['content']}"
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        self.chat_stream_call_count += 1
+        if self.chat_stream_call_count == 1:
+            return
+        for chunk in ["안녕", "하세요"]:
+            yield chunk
+
+
+class WhitespaceDeltaLeakOllamaService:
+    """chat_stream()이 공백뿐인 조각(" ")을 하나 yield하고 끝난다 -
+    OllamaService.chat_stream()은 content가 "있는" 조각만 yield하지만, 그
+    content가 공백뿐이어도 파이썬에서는 truthy라 그대로 yield된다. 이 조각은
+    이미 study_service.stream_message()가 "delta" 이벤트로 클라이언트에
+    전송한 뒤라, 전체 응답이 결국 공백뿐이라고 판단해 조용히 재시도하면
+    이미 보낸 그 delta가 재시도로 만든 새 델타들과 뒤섞여 클라이언트가
+    관찰하는 delta 연결 결과가 최종 done.data.content와 달라진다."""
+
+    def __init__(self):
+        self.chat_stream_call_count = 0
+
+    async def chat(self, messages, model):
+        return "unused"
+
+    async def embed(self, text, model):
+        return [1.0, 0.0, 0.0]
+
+    async def chat_stream(self, messages, model):
+        self.chat_stream_call_count += 1
+        yield " "
 
 
 def _signup_and_get_token(client, email="study@example.com"):
@@ -22,6 +119,68 @@ def _signup_and_get_token(client, email="study@example.com"):
 
 def _auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_create_session_returns_401_when_account_deleted_during_creation(db_session_factory, monkeypatch):
+    """create_session()은 get_current_user 인증 확인과 이 INSERT 사이에(다른
+    create류 메서드들과 달리 AI 호출 없이 곧바로 이어지지만) 다른 요청이
+    UserService.delete_account()로 이 계정을 지워버리면(StudySession.user_id는
+    nullable=False FK) IntegrityError로 실패할 수 있다 - 143~146라운드가 고친
+    것과 같은 종류의 경쟁이다. StudySessionRepository.create가 실제 INSERT를
+    하기 "직전" 별도 세션에서 이 계정을 완전히 지우도록 만들어서 이 좁은
+    타이밍을 결정적으로 재현한다."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            user_id = user.id
+
+            class FakeOllamaService:
+                async def chat(self, messages, model):
+                    return "안 씀"
+
+                async def chat_stream(self, messages, model):
+                    yield "안 씀"
+
+                async def embed(self, text, model):
+                    return [1.0, 0.0, 0.0]
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            original_create = StudySessionRepository.create
+
+            async def _deleting_create(self, user_id, title, model):
+                async with db_session_factory() as session_b:
+                    users_b = UserRepository(session_b)
+                    target = await users_b.get_by_id(user_id)
+                    await users_b.delete(target)
+                    await session_b.commit()
+                return await original_create(self, user_id, title, model)
+
+            monkeypatch.setattr(StudySessionRepository, "create", _deleting_create)
+
+            try:
+                await service.create_session(user_id=user_id, title="세션", model="qwen2.5:3b")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
 
 
 def test_create_and_list_sessions(client):
@@ -38,6 +197,118 @@ def test_create_and_list_sessions(client):
     listing = client.get("/api/v1/study/sessions", headers=_auth_headers(token))
     assert listing.status_code == 200
     assert len(listing.json()) == 1
+
+
+def test_list_sessions_pagination(client):
+    token = _signup_and_get_token(client)
+    for i in range(5):
+        client.post(
+            "/api/v1/study/sessions", json={"title": f"세션 {i}"}, headers=_auth_headers(token)
+        )
+
+    first_page = client.get(
+        "/api/v1/study/sessions?limit=2&offset=0", headers=_auth_headers(token)
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert first_page.headers["X-Total-Count"] == "5"
+
+    second_page = client.get(
+        "/api/v1/study/sessions?limit=2&offset=2", headers=_auth_headers(token)
+    )
+    assert len(second_page.json()) == 2
+
+    first_ids = {s["id"] for s in first_page.json()}
+    second_ids = {s["id"] for s in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_list_for_user_breaks_updated_at_ties_deterministically():
+    """`ORDER BY updated_at DESC`만으로는 값이 같은 행(같은 순간에 만들어졌거나
+    touch()된 세션들) 사이의 순서가 SQL 표준상 정의돼 있지 않다 - 페이지마다
+    그 순서가 달라질 수 있어서, LIMIT/OFFSET으로 나눠 받으면 같은 세션이 두
+    페이지에 다시 나오거나(중복) 어느 페이지에도 안 나올(누락) 수 있다.
+    updated_at은 마이크로초 정밀도라 실제로 동률이 나기는 훨씬 드물지만
+    (interview_review의 interview_date처럼 날짜 단위는 아님), 이 정렬
+    로직 자체는 여전히 SQL 표준상 순서가 보장되지 않는 미정의 동작에
+    기대고 있었다. 이 동시성은 SQLite 기반 테스트로 재현할 수 없어(68번
+    라운드와 같은 성격의 한계), 리포지토리가 세션에 전달하는 statement를
+    가로채 컴파일된 SQL의 ORDER BY 절에 updated_at뿐 아니라 id도 2차
+    기준으로 포함돼 있는지 직접 확인한다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.study_session_repository import StudySessionRepository
+
+    class _CapturingResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = StudySessionRepository(session)
+    asyncio.run(repo.list_for_user(uuid.uuid4(), limit=20, offset=0))
+
+    assert session.captured_statement is not None
+    order_by_clause = str(session.captured_statement).split("ORDER BY")[1]
+    assert "updated_at" in order_by_clause
+    assert "id" in order_by_clause
+
+
+def test_list_all_for_user_breaks_created_at_ties_deterministically():
+    """list_for_user()(페이지네이션 있음)는 위 테스트처럼 이미 id를 2차 정렬
+    기준으로 쓰는데, 데이터 export가 쓰는 list_all_for_user()(페이지네이션
+    없음)는 created_at만으로 정렬해 같은 문제(SQL 표준상 동률 순서 미정의)가
+    남아 있었다 - 페이지네이션이 없어 중복/누락 위험은 없지만, 같은 호출이
+    매번 다른 순서를 반환할 수 있다는 점은 동일하다."""
+    import asyncio
+    import uuid
+
+    from app.repositories.study_session_repository import StudySessionRepository
+
+    class _CapturingResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.captured_statement = None
+
+        async def execute(self, statement):
+            self.captured_statement = statement
+            return _CapturingResult()
+
+    session = _CapturingSession()
+    repo = StudySessionRepository(session)
+    asyncio.run(repo.list_all_for_user(uuid.uuid4()))
+
+    assert session.captured_statement is not None
+    order_by_clause = str(session.captured_statement).split("ORDER BY")[1]
+    assert "created_at" in order_by_clause
+    assert "id" in order_by_clause
+
+
+def test_list_sessions_default_pagination_returns_all_when_under_limit(client):
+    token = _signup_and_get_token(client)
+    client.post("/api/v1/study/sessions", json={"title": "세션"}, headers=_auth_headers(token))
+
+    listing = client.get("/api/v1/study/sessions", headers=_auth_headers(token))
+    assert listing.status_code == 200
+    assert len(listing.json()) == 1
+    assert listing.headers["X-Total-Count"] == "1"
 
 
 def test_session_requires_auth(client):
@@ -71,6 +342,265 @@ def test_send_message_persists_history_and_calls_ai(client):
     assert messages[1]["role"] == "assistant"
 
 
+def test_send_message_returns_502_when_ai_reply_is_blank(client):
+    """공백뿐인 AI 응답이 그대로 assistant 메시지로 저장되지 않고, 재시도(2회)까지
+    소진한 뒤 502로 실패 처리되는지 확인한다 - 재시도가 없으면 학습챗 대화
+    기록에 빈 assistant 말풍선이 영구히 남는다."""
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="blank-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "OS"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    send = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "안녕"},
+        headers=_auth_headers(token),
+    )
+    assert send.status_code == 502
+    assert fake.chat_call_count == 2
+
+    # 사용자 메시지는 AI 호출 전에 이미 커밋됐으니 보존되고, 빈 assistant
+    # 메시지는 커밋되지 않아야 한다.
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+
+
+def test_send_message_recovers_when_first_ai_reply_is_blank(client):
+    """AI 응답 재시도가 실제로 성공을 복구하는지(무조건 실패 처리하는 게
+    아니라) 확인한다 - 첫 시도는 공백, 두 번째 시도는 정상 응답."""
+    fake = RecoversOnRetryOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="recovers-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "OS"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    send = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "안녕"},
+        headers=_auth_headers(token),
+    )
+    assert send.status_code == 200
+    assert fake.chat_call_count == 2
+    assert "assistant reply to" in send.json()["assistant_message"]["content"]
+
+
+def test_send_message_rejects_content_over_max_length(client, monkeypatch):
+    monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "길이 초과 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "이 메시지는 5자보다 훨씬 깁니다"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+
+def test_send_message_rejects_whitespace_only_content(client):
+    """WS 스트리밍 경로(stream_message)는 공백만 있는 content를 이미
+    "content는 비어 있을 수 없습니다"로 거부한다. REST 경로는 min_length=1만
+    체크해 " " 같은 공백 문자열을 그대로 통과시켜, 빈 메시지가 저장되고
+    불필요한 Ollama 호출까지 발생했다 - 두 경로가 동일한 규칙을 쓰도록
+    맞춘다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "공백 메시지 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "   "},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    assert detail.json()["messages"] == []
+
+
+def test_send_message_rejects_invisible_only_content(client):
+    """`str.strip()`은 공백류만 제거하고 zero-width space(U+200B) 같은 유니코드
+    Cf 카테고리 문자는 제거하지 못한다 - 이런 문자로만 이루어진 content가
+    `not value.strip()` 검사를 통과해 저장되고 불필요한 Ollama 호출까지
+    발생시켰다. is_blank()로 바꾼 뒤에도 공백-only 케이스와 동일하게
+    거부되는지 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "보이지 않는 문자 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "​​"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 422
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    assert detail.json()["messages"] == []
+
+
+def test_list_recent_for_session_returns_last_n_in_chronological_order(db_session_factory):
+    """send_message/stream_message가 채팅 프롬프트에 넣을 최근 히스토리를
+    구하던 이전 방식은 list_for_session()으로 세션 전체를 가져온 뒤 파이썬
+    슬라이싱(`history[-limit:]`)으로 뒤쪽 N개만 남겼다 - 대화가 길어질수록
+    (메시지 수 제한 없음) 매 턴마다 이미 안 쓸 앞부분까지 통째로 읽어오는
+    낭비였다. list_recent_for_session()이 SQL `ORDER BY DESC LIMIT`으로
+    필요한 만큼만 가져오면서도 순서/개수/경계값이 이전 파이썬 슬라이싱과
+    동일하게 동작하는지 실제 DB 조회로 확인한다 - 특히 limit=0/음수를
+    빈 리스트로 명시 처리하는지(파이썬의 `history[-0:]`이 빈 리스트가 아니라
+    전체 리스트가 되어버리는 것과 같은 종류의 함정이 SQL `LIMIT`에도 있다).
+
+    created_at은 server_default=func.now()라 짧은 시간에 여러 메시지를
+    만들면 SQLite에서는(초 단위 정밀도) 값이 전부 같아지기 쉬워서, 실제로는
+    id를 2차 정렬 기준으로 쓴다 - 하지만 id는 무작위 UUID라 순서 검증용으로는
+    쓸 수 없다. 그래서 각 메시지의 created_at을 명시적으로 서로 다른 값으로
+    지정해, 동률 없이 실제 시간순 정렬/자르기만 검증한다."""
+    import asyncio
+    import uuid
+    from datetime import timedelta
+
+    from app.core.clock import utcnow_naive
+    from app.db.models.study_message import StudyMessage
+    from app.repositories.study_message_repository import StudyMessageRepository
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="히스토리 테스트", model="qwen2.5:3b"
+            )
+            await session.commit()
+
+            base = utcnow_naive()
+            for i in range(4):
+                session.add(
+                    StudyMessage(
+                        id=uuid.uuid4(),
+                        session_id=study_session.id,
+                        role="user",
+                        content=f"메시지 {i}",
+                        created_at=base + timedelta(seconds=i),
+                    )
+                )
+            await session.commit()
+
+            messages = StudyMessageRepository(session)
+            return (
+                await messages.list_recent_for_session(study_session.id, 2),
+                await messages.list_recent_for_session(study_session.id, 0),
+                await messages.list_recent_for_session(study_session.id, -1),
+                await messages.list_recent_for_session(study_session.id, 100),
+            )
+
+    last_two, zero_limit, negative_limit, over_limit = asyncio.run(_run())
+
+    assert [m.content for m in last_two] == ["메시지 2", "메시지 3"]
+    assert zero_limit == []
+    assert negative_limit == []
+    assert [m.content for m in over_limit] == [f"메시지 {i}" for i in range(4)]
+
+
+class HistoryTrackingOllamaService:
+    """chat()/chat_stream()에 실제로 전달된 메시지 목록을 그대로 기록해둔다.
+    embed()는 항상 빈 벡터를 반환해 RAG 그라운딩이 절대 끼어들지 않게 해서,
+    히스토리 길이 자체만 결정적으로 검증할 수 있게 한다."""
+
+    def __init__(self):
+        self.last_messages = None
+
+    async def chat(self, messages, model):
+        self.last_messages = messages
+        return "assistant reply"
+
+    async def chat_stream(self, messages, model):
+        self.last_messages = messages
+        yield "assistant reply"
+
+    async def embed(self, text, model):
+        return []
+
+
+def test_send_message_truncates_history_to_configured_limit(client, monkeypatch):
+    """send_message는 세션의 지금까지 전체 메시지 히스토리를 매번 그대로 다시
+    프롬프트에 실어 Ollama에 보낸다 - 대화가 길어질수록 한 번의 호출에 드는
+    토큰 수가 무한정 늘어나서, 언젠가 모델의 컨텍스트 윈도우를 넘기면 앞부분이
+    조용히 잘리거나 응답 품질/지연이 나빠질 수 있다. MAX_CHAT_HISTORY_MESSAGES로
+    가장 최근 메시지만 프롬프트에 포함되는지 확인한다."""
+    monkeypatch.setenv("MAX_CHAT_HISTORY_MESSAGES", "2")
+    get_settings.cache_clear()
+    fake = HistoryTrackingOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "히스토리 제한 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    for i in range(3):
+        response = client.post(
+            f"/api/v1/study/sessions/{session_id}/messages",
+            json={"content": f"메시지 {i}"},
+            headers=_auth_headers(token),
+        )
+        assert response.status_code == 200
+
+    # 세 번째 호출 시점엔 이전 대화 4개(사용자 2 + 어시스턴트 2)가 이미 쌓여 있었다 -
+    # MAX_CHAT_HISTORY_MESSAGES=2라 그중 최근 2개만 프롬프트에 포함되고, 거기에
+    # 이번에 새로 보낸 메시지 1개가 더해져 총 3개여야 한다(전체 히스토리를 그대로
+    # 실었다면 4 + 1 = 5개였을 것).
+    assert len(fake.last_messages) == 3
+    assert fake.last_messages[-1] == {"role": "user", "content": "메시지 2"}
+
+
+def test_stream_message_truncates_history_to_configured_limit(client, monkeypatch):
+    """위 REST 버전과 같은 확인을 stream_message(WebSocket)에도 반복한다 - 두
+    경로가 같은 _recent_history() 헬퍼를 쓰지만 별도 코드 경로(제너레이터)라
+    회귀가 한쪽에만 생길 수 있다."""
+    monkeypatch.setenv("MAX_CHAT_HISTORY_MESSAGES", "2")
+    get_settings.cache_clear()
+    fake = HistoryTrackingOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "WS 히스토리 제한 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        for i in range(3):
+            ws.send_json({"content": f"메시지 {i}"})
+            ws.receive_json()  # user_message
+            ws.receive_json()  # delta
+            ws.receive_json()  # done
+        ws.close()
+
+    assert len(fake.last_messages) == 3
+    assert fake.last_messages[-1] == {"role": "user", "content": "메시지 2"}
+
+
 def test_other_user_cannot_access_session(client):
     token_a = _signup_and_get_token(client, email="a@example.com")
     token_b = _signup_and_get_token(client, email="b@example.com")
@@ -100,6 +630,358 @@ def test_delete_session(client):
     assert get_after_delete.status_code == 404
 
 
+def test_delete_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.delete(
+        "/api/v1/study/sessions/00000000-0000-0000-0000-000000000000",
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_send_message_404_for_nonexistent_session(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    response = client.post(
+        "/api/v1/study/sessions/00000000-0000-0000-0000-000000000000/messages",
+        json={"content": "안녕"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_session(client):
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "원래 제목"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    rename = client.patch(
+        f"/api/v1/study/sessions/{session_id}",
+        json={"title": "새 제목"},
+        headers=_auth_headers(token),
+    )
+    assert rename.status_code == 200
+    assert rename.json()["title"] == "새 제목"
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    assert detail.json()["title"] == "새 제목"
+
+
+def test_rename_session_rejects_empty_title(client):
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "원래 제목"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/study/sessions/{session_id}", json={"title": ""}, headers=_auth_headers(token)
+    )
+    assert response.status_code == 422
+
+
+def test_rename_session_404_for_nonexistent_session(client):
+    token = _signup_and_get_token(client)
+    response = client.patch(
+        "/api/v1/study/sessions/00000000-0000-0000-0000-000000000000",
+        json={"title": "새 제목"},
+        headers=_auth_headers(token),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_session_404_for_other_users_session(client):
+    token_a = _signup_and_get_token(client, email="rename-a@example.com")
+    token_b = _signup_and_get_token(client, email="rename-b@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "A의 세션"}, headers=_auth_headers(token_a)
+    )
+    session_id = create.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/study/sessions/{session_id}",
+        json={"title": "가로채기 시도"},
+        headers=_auth_headers(token_b),
+    )
+    assert response.status_code == 404
+
+
+def test_rename_session_returns_404_when_session_deleted_during_request(db_session_factory, monkeypatch):
+    """rename_session()의 get_for_user() 조회는 잠금이 없어(get_for_user_locked()를
+    쓰는 다른 메서드와 달리), 그 조회와 update_title()의 UPDATE 사이에 다른 요청이
+    DELETE /study/sessions/{id}로 같은 세션을 지우면 UPDATE가 0행에 매치돼
+    StaleDataError가 난다 - 184라운드가 고친 "계정 자체가 지워지는" 경쟁과는
+    별개로, 계정은 멀쩡한 채 이 리소스만 지워지는 경우다. update_title()을
+    몽키패치해 그 안에서 별도 세션으로 실제 삭제를 수행해 이 좁은 타이밍을
+    결정적으로 재현한다."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            sessions_repo = StudySessionRepository(session)
+            study_session = await sessions_repo.create(user_id=user.id, title="세션", model="qwen2.5:3b")
+            await session.commit()
+            session_id = study_session.id
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            original_update_title = StudySessionRepository.update_title
+
+            async def _deleting_update_title(self, target_session, title):
+                async with db_session_factory() as session_b:
+                    sessions_b = StudySessionRepository(session_b)
+                    target = await sessions_b.get_for_user(session_id, user.id)
+                    await sessions_b.delete(target)
+                    await session_b.commit()
+                return await original_update_title(self, target_session, title)
+
+            monkeypatch.setattr(StudySessionRepository, "update_title", _deleting_update_title)
+
+            try:
+                await service.rename_session(session_id=session_id, user_id=user.id, title="새 제목")
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 404
+
+
+def test_send_message_survives_rag_db_error_without_missing_greenlet(db_session_factory, monkeypatch):
+    """198라운드: RagService.retrieve_relevant()가 자기 자신의 list_for_user()
+    DB 조회 실패(커넥션 드롭 등)를 삼킬 때, 예전엔 `await self._session.
+    rollback()`을 불렀다 - Session.rollback()은 expire_on_commit 설정과 무관하게
+    이 세션에 이미 로드된 study_session/user_message 같은, retrieve_relevant()와
+    전혀 무관한 다른 객체까지 전부 expire시킨다. send_message()가 retrieve_
+    relevant() 바로 다음 study_session.model에 동기적으로 접근하는데(chat()
+    호출 인자로), 그게 expire된 상태라 SQLAlchemy가 MissingGreenlet으로 죽였다 -
+    "RAG 실패는 절대 본 기능을 막지 않는다"는 이 클래스의 약속과 정반대로,
+    부가 기능의 일시적 DB 오류가 본 기능을 확실히 크래시시켰다. list_for_user를
+    몽키패치해 세션에 실제 쿼리를 한 번 날려 진짜 트랜잭션을 연 뒤 실패하게
+    만들어(트랜잭션을 전혀 안 연 채 즉시 raise하면 rollback()이 애초에 아무것도
+    expire 안 시켜 이 버그가 재현되지 않는다) send_message()가 크래시 없이
+    정상 응답을 돌려주는지 확인한다."""
+    import asyncio
+
+    from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    async def _broken_list_for_user(self, *args, **kwargs):
+        from sqlalchemy import text
+
+        await self._session.execute(text("SELECT 1"))
+        raise RuntimeError("simulated mid-query DB connection drop")
+
+    monkeypatch.setattr(KnowledgeChunkRepository, "list_for_user", _broken_list_for_user)
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen2.5:3b"
+            )
+            await session.commit()
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            return await service.send_message(session_id=study_session.id, user_id=user.id, content="안녕")
+
+    user_message, assistant_message = asyncio.run(_run())
+
+    assert user_message.content == "안녕"
+    assert assistant_message.content == "assistant reply to: 안녕"
+
+
+def test_send_message_survives_rag_index_content_commit_failure_without_missing_greenlet(
+    db_session_factory, monkeypatch
+):
+    """199라운드: send_message()의 두 번째(마지막) index_content() 호출은 이 요청의
+    진짜 마지막 DB 작업이라 is_final_session_use=True를 넘긴다(rag_service.py의
+    _safe_commit()/index_content() docstring 참고) - 그 안의 commit() 자체가
+    실패하면(SAVEPOINT로 이미 flush를 끝내둔 뒤라 순수하게 COMMIT 실행 자체만
+    실패하는 경우), rollback() 없이는 세션이 "prepared" 상태로 남지만, 이
+    호출부는 그 뒤로 같은 세션을 더 쓰지 않으므로 rollback()을 생략해 study_
+    session/user_message/assistant_message 같은 이미 로드된 다른 객체가
+    expire되지 않게 한다. 두 번째 색인 대상 청크가 실제로 생성된(create() 호출)
+    직후의 첫 commit()만 실패하도록 몽키패치해(첫 번째 index_content() 호출의
+    commit들은 정상 통과) 정확히 그 지점을 재현하고, send_message()가 크래시
+    없이 정상 응답을 돌려주는지 확인한다."""
+    import asyncio
+
+    from app.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+    from app.repositories.study_session_repository import StudySessionRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.rag_service import RagService
+    from app.services.study_service import StudyService
+
+    create_call_count = {"value": 0}
+    fail_next_commit = {"value": False}
+
+    original_create = KnowledgeChunkRepository.create
+
+    async def _tracking_create(self, **kwargs):
+        create_call_count["value"] += 1
+        result = await original_create(self, **kwargs)
+        if create_call_count["value"] == 2:
+            # 두 번째 index_content() 호출(assistant_message, is_final_session_
+            # use=True)의 청크 생성 - 이 SAVEPOINT가 끝난 직후 나오는 "최종"
+            # _safe_commit()의 commit()만 실패하게 만든다.
+            fail_next_commit["value"] = True
+        return result
+
+    monkeypatch.setattr(KnowledgeChunkRepository, "create", _tracking_create)
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+            study_session = await StudySessionRepository(session).create(
+                user_id=user.id, title="세션", model="qwen2.5:3b"
+            )
+            await session.commit()
+
+            original_commit = session.commit
+
+            async def _flaky_commit():
+                if fail_next_commit["value"]:
+                    fail_next_commit["value"] = False
+                    raise RuntimeError("commit 자체가 실패했다고 가정")
+                return await original_commit()
+
+            monkeypatch.setattr(session, "commit", _flaky_commit)
+
+            ollama = FakeOllamaService()
+            settings = get_settings()
+            rag = RagService(session=session, ollama_service=ollama, settings=settings)
+            service = StudyService(session=session, ollama_service=ollama, rag_service=rag, settings=settings)
+
+            return await service.send_message(session_id=study_session.id, user_id=user.id, content="안녕")
+
+    user_message, assistant_message = asyncio.run(_run())
+
+    assert user_message.content == "안녕"
+    assert assistant_message.content == "assistant reply to: 안녕"
+    assert create_call_count["value"] == 2
+
+
+class GroundingFakeOllamaService:
+    """chat()에 전달된 메시지를 기록해두고, 태그가 포함된 텍스트만 서로 가까운 벡터로 임베딩한다."""
+
+    def __init__(self):
+        self.last_messages = None
+
+    async def chat(self, messages, model):
+        self.last_messages = messages
+        return "assistant reply"
+
+    async def chat_stream(self, messages, model):
+        self.last_messages = messages
+        yield "assistant reply"
+
+    async def embed(self, text, model):
+        if "기억할 사실" in text:
+            return [1.0, 0.0]
+        return [0.0, 1.0]
+
+
+def test_first_message_has_no_grounding_when_corpus_is_empty(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "그라운딩 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    assert fake.last_messages is not None
+    assert not any(m["role"] == "system" for m in fake.last_messages)
+
+
+def test_later_message_is_grounded_with_relevant_legacy_content(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "그라운딩 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실 관련해서 다시 설명해줘"},
+        headers=_auth_headers(token),
+    )
+
+    system_messages = [m for m in fake.last_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert "기억할 사실: 스레드는 프로세스 안에서 돈다" in system_messages[0]["content"]
+
+
+def test_stream_message_is_grounded_with_relevant_legacy_content(client):
+    fake = GroundingFakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "스트리밍 그라운딩 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    client.post(
+        f"/api/v1/study/sessions/{session_id}/messages",
+        json={"content": "기억할 사실: 스레드는 프로세스 안에서 돈다"},
+        headers=_auth_headers(token),
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "기억할 사실 관련해서 다시 설명해줘"})
+        ws.receive_json()  # user_message
+        ws.receive_json()  # delta
+        ws.receive_json()  # done
+        ws.close()
+
+    system_messages = [m for m in fake.last_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert "기억할 사실: 스레드는 프로세스 안에서 돈다" in system_messages[0]["content"]
+
+
 def test_user_message_preserved_when_ai_call_fails(client):
     client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
     token = _signup_and_get_token(client)
@@ -113,10 +995,871 @@ def test_user_message_preserved_when_ai_call_fails(client):
         json={"content": "이 메시지는 저장돼야 한다"},
         headers=_auth_headers(token),
     )
-    assert send.status_code == 500
+    assert send.status_code == 502
 
     detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
     messages = detail.json()["messages"]
     assert len(messages) == 1
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "이 메시지는 저장돼야 한다"
+
+
+def test_stream_message_sends_deltas_then_done(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "스트리밍 세션"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕?"})
+
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+        assert user_event["data"]["content"] == "안녕?"
+
+        delta_1 = ws.receive_json()
+        delta_2 = ws.receive_json()
+        assert delta_1 == {"type": "delta", "content": "안녕"}
+        assert delta_2 == {"type": "delta", "content": "하세요"}
+
+        done_event = ws.receive_json()
+        assert done_event["type"] == "done"
+        assert done_event["data"]["role"] == "assistant"
+        assert done_event["data"]["content"] == "안녕하세요"
+
+        # 테스트 클라이언트가 with 블록을 빠져나가며 서버 태스크를 강제 취소하면
+        # (aiosqlite StaticPool을 쓰는 테스트 DB에서) 공유 커넥션이 깨질 수 있다 -
+        # 명시적으로 정상 종료 이벤트를 먼저 보내 서버가 WebSocketDisconnect를
+        # 정상적으로 받아 세션을 깔끔히 정리하게 한다.
+        ws.close()
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 2
+    assert messages[1]["content"] == "안녕하세요"
+
+
+def test_stream_websocket_closes_ollama_service_dependency_on_disconnect(client):
+    """get_ollama_service는 요청/연결이 끝나면 finally에서 aclose()를 호출하는
+    async generator 의존성이다 (httpx.AsyncClient 커넥션 정리 목적). 다른 WS
+    테스트들은 dependency_overrides에 일반 함수(FakeOllamaService를 바로
+    반환)를 꽂아 이 정리 로직 자체를 우회하므로, 실제 async generator
+    형태로 오버라이드해 WebSocket 연결이 끊길 때도 FastAPI가 finally 블록을
+    정상적으로 실행해주는지 별도로 검증한다."""
+    closed = {"value": False}
+
+    class TrackingOllamaService(FakeOllamaService):
+        async def aclose(self):
+            closed["value"] = True
+
+    async def tracked_get_ollama_service():
+        service = TrackingOllamaService()
+        try:
+            yield service
+        finally:
+            await service.aclose()
+
+    client.app.dependency_overrides[get_ollama_service] = tracked_get_ollama_service
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "정리 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕?"})
+        ws.receive_json()  # user_message
+        ws.receive_json()  # delta
+        ws.receive_json()  # delta
+        ws.receive_json()  # done
+        ws.close()
+
+    assert closed["value"] is True
+
+
+def test_stream_message_rejects_missing_token(client):
+    from starlette.testclient import WebSocketDisconnect
+
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "인증 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/api/v1/study/sessions/{session_id}/stream") as ws:
+            ws.receive_json()
+
+
+def test_stream_message_rejects_malformed_token(client):
+    from starlette.testclient import WebSocketDisconnect
+
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "잘못된 토큰 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token=not-a-real-jwt"
+        ) as ws:
+            ws.receive_json()
+
+
+def test_stream_message_rejects_token_for_deleted_user(client):
+    from starlette.testclient import WebSocketDisconnect
+
+    signup = client.post(
+        "/api/v1/auth/signup", json={"email": "ws-deleted@example.com", "password": "supersecret"}
+    )
+    token = signup.json()["access_token"]
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "탈퇴 계정 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    delete = client.request(
+        "DELETE", "/api/v1/users/me", json={"current_password": "supersecret"}, headers=_auth_headers(token)
+    )
+    assert delete.status_code == 204
+
+    # 계정이 삭제되면 세션도 함께 CASCADE로 지워지지만, access token 자체는 만료
+    # 전까지 형식상 유효하다 - get_current_user_ws가 user_id로 사용자를 다시
+    # 조회해 존재하지 않음을 확인하고 거부해야 한다.
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.receive_json()
+
+
+def test_stream_message_closes_connection_after_idle_timeout(client, monkeypatch):
+    """이 WebSocket 연결은 살아있는 동안 DB 커넥션 풀의 커넥션 하나와 Ollama
+    클라이언트를 계속 붙잡고 있는다 - 클라이언트가 접속만 해두고 메시지를 하나도
+    안 보내면 그 자원이 무한정 잠긴다(방치된 연결 몇 개만으로도 풀 전체가
+    고갈될 수 있음). ws_idle_timeout_seconds를 짧게 줄여서, 아무것도 안 보내고
+    기다리기만 해도 서버가 먼저 연결을 끊는지 확인한다."""
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("WS_IDLE_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "유휴 타임아웃 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.receive_json()
+
+
+def test_stream_message_rejects_further_messages_after_token_expires_mid_connection(client):
+    """get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 - 그
+    뒤로 연결이 살아있는 동안(수명이 ws_idle_timeout_seconds로만 제한되는데,
+    메시지를 주고받을 때마다 매번 갱신되므로 활발히 쓰는 연결은 사실상
+    무기한 연장될 수 있다) 아무도 그 토큰의 만료를 다시 확인하지 않아서,
+    REST 엔드포인트(매 요청마다 get_current_user()가 다시 검증)와 달리
+    connect 시점엔 유효했던 토큰이 그 사이 만료돼도 계속 인증된 것처럼
+    메시지를 처리했다. 1초 뒤 만료되는 토큰으로 연결한 뒤 만료를 기다리고,
+    그 다음 메시지를 보내면 정상 처리되지 않고 연결이 거부되는지 확인한다
+    - 같은(이제 만료된) 토큰으로 REST 호출은 이미 401로 거부되는 것과
+    대조해, 두 경로가 이제는 일관되게 동작하는지 확인한다."""
+    import time as _time
+
+    import jwt as pyjwt
+    from starlette.testclient import WebSocketDisconnect
+
+    from app.core.tokens import ACCESS_TOKEN_TYPE, decode_access_token
+
+    token = _signup_and_get_token(client, email="ws-expiring-token@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "토큰 만료 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    settings = get_settings()
+    user_id = decode_access_token(token, settings)["sub"]
+    now_ts = int(_time.time())
+    # WS 핸드셰이크(get_current_user_ws의 토큰 검증)가 끝나기 전에 만료되면
+    # 연결 자체가 거부돼(이 테스트가 확인하려는 "연결 도중 만료"와는 다른
+    # 상황) __enter__에서 바로 실패해버린다 - 전체 스위트처럼 스레드가 많을
+    # 때는 핸드셰이크 자체가 지연될 수 있어 넉넉한 여유를 둔다.
+    short_lived_token = pyjwt.encode(
+        {"sub": user_id, "type": ACCESS_TOKEN_TYPE, "iat": now_ts, "exp": now_ts + 5},
+        settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={short_lived_token}"
+    ) as ws:
+        _time.sleep(5.5)
+
+        # 통제 확인: 같은(이제 만료된) 토큰으로 REST 호출은 이미 401을 낸다.
+        me = client.get("/api/v1/users/me", headers=_auth_headers(short_lived_token))
+        assert me.status_code == 401
+
+        ws.send_json({"content": "안녕"})
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+
+def test_stream_message_logs_connect_and_disconnect_to_access_log(client, caplog):
+    """AccessLogMiddleware(core/middleware.py)는 ASGI "http" scope만 다뤄서 이
+    WebSocket 연결은 지금까지 구조화된 접근 로그(haruhan.access)에 전혀 남지
+    않았다 - 이 라우트가 붙잡고 있는 DB 커넥션/Ollama 클라이언트를 누가 얼마나
+    오래 점유했는지 grep 한 줄로 확인할 방법이 없었다. connect/disconnect가
+    각각 한 줄씩 남는지, 클라이언트가 스스로 연결을 끊으면
+    reason=client_disconnect로 남는지 확인한다."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="haruhan.access")
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "접근 로그 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(f"/api/v1/study/sessions/{session_id}/stream?token={token}"):
+        pass
+
+    records = [r.getMessage() for r in caplog.records if r.name == "haruhan.access"]
+    connect_records = [m for m in records if m.startswith("ws_event=connect")]
+    disconnect_records = [m for m in records if m.startswith("ws_event=disconnect")]
+    assert len(connect_records) == 1
+    assert f"path=/api/v1/study/sessions/{session_id}/stream" in connect_records[0]
+    assert len(disconnect_records) == 1
+    assert "duration_ms=" in disconnect_records[0]
+    assert "reason=client_disconnect" in disconnect_records[0]
+
+
+def test_stream_message_idle_timeout_logs_disconnect_reason(client, monkeypatch, caplog):
+    """유휴 타임아웃으로 서버가 먼저 연결을 끊는 경우에도 disconnect 로그의
+    reason이 client_disconnect가 아니라 idle_timeout으로 정확히 구분되는지
+    확인한다 - 방치된 연결과 클라이언트가 스스로 끊은 연결을 로그만 보고
+    구분할 수 있어야 운영 중 원인 파악에 의미가 있다."""
+    import logging
+
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("WS_IDLE_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+
+    caplog.set_level(logging.INFO, logger="haruhan.access")
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "유휴 타임아웃 로그 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.receive_json()
+
+    records = [r.getMessage() for r in caplog.records if r.name == "haruhan.access"]
+    disconnect_records = [m for m in records if m.startswith("ws_event=disconnect")]
+    assert len(disconnect_records) == 1
+    assert "reason=idle_timeout" in disconnect_records[0]
+
+
+def test_stream_message_service_shutdown_disconnect_logs_distinct_reason(client, caplog):
+    """uvicorn의 세 WebSocket 프로토콜 구현(websockets/wsproto 계열) 전부
+    프로세스 종료(SIGTERM, 재배포 때마다 매번 일어남 - docker-compose.yml이
+    워커 1개로 uvicorn을 그대로 돌림) 시 살아있는 연결에 code=1012("Service
+    Restart")로 직접 종료를 건다 - 클라이언트가 스스로 끊은 게 아닌데도
+    고치기 전엔 항상 "client_disconnect"로 남아, 재배포로 끊긴 연결과
+    사용자가 실제로 끊은 연결을 로그만 보고 구분할 수 없었다(실제 uvicorn
+    프로세스에 SIGTERM을 보내 직접 재현해 확인함). Starlette TestClient의
+    WebSocket 세션이 `close(code=...)`로 보내는 값이 서버가 받는
+    `WebSocketDisconnect.code`로 그대로 전달되므로, 실제 프로세스 없이도
+    이 서버측 코드 경로 자체를 결정적으로 확인할 수 있다."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="haruhan.access")
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "서버 종료 로그 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(f"/api/v1/study/sessions/{session_id}/stream?token={token}") as ws:
+        ws.close(code=1012)
+
+    records = [r.getMessage() for r in caplog.records if r.name == "haruhan.access"]
+    disconnect_records = [m for m in records if m.startswith("ws_event=disconnect")]
+    assert len(disconnect_records) == 1
+    assert "reason=server_shutdown" in disconnect_records[0]
+
+
+def test_stream_message_rejects_when_at_max_concurrent_connections(client, monkeypatch):
+    """WebSocket 연결 하나는 accept부터 종료까지 DB 커넥션 풀의 커넥션 하나를
+    계속 점유한다(get_db가 연결 전체 수명 동안 열려 있는 FastAPI yield 의존성
+    이라, 메시지 하나 처리할 때만 잠깐 빌리는 게 아님) - 풀 크기(기본
+    pool_size=5 + max_overflow=5 = 10)보다 많은 동시 연결이 열리면 풀 전체가
+    고갈돼 이 라우트뿐 아니라 앱의 다른 모든 요청까지 막힐 수 있다.
+    MAX_CONCURRENT_WS_CONNECTIONS를 1로 줄여서, 이미 연결 하나가 열려 있는
+    동안 두 번째 연결 시도가 accept 전에 거부되는지 확인한다."""
+    from starlette.testclient import WebSocketDisconnect
+
+    monkeypatch.setenv("MAX_CONCURRENT_WS_CONNECTIONS", "1")
+    get_settings.cache_clear()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "동시 연결 제한 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(f"/api/v1/study/sessions/{session_id}/stream?token={token}"):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+            ) as second_ws:
+                second_ws.receive_json()
+
+
+def test_stream_message_accepts_new_connection_after_previous_one_closes(client, monkeypatch):
+    """연결이 끊기면(limit_ws_connections의 finally) 점유하던 슬롯이 반납돼,
+    바로 다음 연결은 같은 상한 아래서도 정상적으로 받아들여져야 한다 - 카운터가
+    증가만 하고 줄어들지 않는 회귀가 없는지 확인한다. 다른 WS 테스트들과 동일한
+    패턴(메시지를 실제로 주고받고 명시적으로 ws.close())으로 첫 연결을 정상
+    종료시킨 뒤 두 번째 연결을 연다."""
+    monkeypatch.setenv("MAX_CONCURRENT_WS_CONNECTIONS", "1")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "슬롯 반납 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as first_ws:
+        first_ws.send_json({"content": "첫 연결"})
+        first_ws.receive_json()  # user_message
+        first_ws.receive_json()  # delta
+        first_ws.receive_json()  # delta
+        first_ws.receive_json()  # done
+        first_ws.close()
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as second_ws:
+        second_ws.send_json({"content": "두 번째 연결"})
+        user_event = second_ws.receive_json()
+        assert user_event["type"] == "user_message"
+        second_ws.receive_json()  # delta
+        second_ws.receive_json()  # delta
+        second_ws.receive_json()  # done
+        second_ws.close()
+
+
+def test_stream_message_rejects_empty_content(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "빈 내용 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "   "})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_message_rejects_invisible_only_content(client):
+    """`str.strip()`은 공백류(`str.isspace()`가 True인 문자)만 제거하고,
+    zero-width space(U+200B)처럼 화면엔 안 보이지만 공백이 아닌 유니코드 Cf
+    카테고리 문자는 그대로 남긴다 - 그 결과 이런 문자로만 이루어진 content가
+    `not content.strip()` 검사를 통과해버렸다. is_blank()로 바꾼 뒤에도 REST
+    경로(test_send_message_rejects_whitespace_only_content)와 동일하게
+    거부되는지 WS 경로에서도 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "보이지 않는 문자 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "​​"})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_message_rejects_malformed_json_frame(client):
+    """websocket.receive_json()은 내부적으로 json.loads()를 그대로 호출하고
+    예외를 잡지 않는다 - 이 라우트는 asyncio.TimeoutError만 잡고 있어서,
+    깨진 JSON 프레임(느린 모바일 네트워크에서의 부분 전송, 클라이언트 버그
+    등)이 오면 서버 쪽에서 처리되지 않은 JSONDecodeError가 그대로 터져
+    연결이 비정상 종료됐다 - 다른 모든 잘못된 입력(빈 내용, 길이 초과 등)은
+    {"type": "error"} 프레임으로 우아하게 처리하면서 이 경우만 예외로
+    죽는 건 이 라우트 자신의 에러 처리 규약과 모순이다."""
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "깨진 JSON 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_text("이건 JSON이 아닙니다")
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        # 연결이 죽지 않고 계속 살아있는지, JSON이지만 객체가 아닌 페이로드로도
+        # 확인한다 (payload.get("content")가 그대로면 AttributeError가 났을 것).
+        ws.send_json([1, 2, 3])
+        second_error = ws.receive_json()
+        assert second_error["type"] == "error"
+
+
+def test_stream_message_rejects_binary_frame(client):
+    """203라운드: websocket.receive_json()은 기본(mode="text")으로
+    message["text"]에 바로 접근한다(starlette/websockets.py) - 클라이언트가
+    텍스트 대신 바이너리 프레임을 보내면 ASGI 메시지에 "text" 키가 없어(대신
+    "bytes"만 있음) json.loads()까지 가기도 전에 KeyError('text')가 그대로
+    새어나갔다. json.JSONDecodeError만 잡던 위 테스트와 같은 이유로, 이
+    경우만 이 라우트의 "잘못된 입력은 전부 {"type": "error"}로 우아하게
+    처리한다"는 규약에서 빠져 있었다 - 연결이 죽지 않고 에러 이벤트를 받은
+    뒤에도 정상 메시지를 계속 처리할 수 있는지 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "바이너리 프레임 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_bytes(b"\x00\x01\x02binary-frame-not-text")
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json({"content": "안녕"})
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
+def test_stream_message_rejects_deeply_nested_json_frame(client):
+    """204라운드: receive_json()이 결국 그대로 부르는 json.loads()는 배열/객체
+    중첩마다 재귀 호출을 쌓는다 - "["*2000 + "1" + "]"*2000처럼 4KB도 안 되는
+    텍스트 프레임 하나로 파이썬 기본 재귀 한도(1000)를 넘겨 RecursionError를
+    낼 수 있는 것까지 실제로 재현해 확인했다. RecursionError는 RuntimeError의
+    하위 클래스라 json.JSONDecodeError/KeyError(203라운드) 어느 쪽으로도 안
+    잡혀 그대로 새어나갔다 - Dockerfile의 --ws-max-size(바이트 크기 상한)도
+    이 재현 페이로드를 못 막는다(문제는 크기가 아니라 중첩 깊이). 연결이
+    죽지 않고 에러 이벤트를 받은 뒤에도 정상 메시지를 계속 처리할 수 있는지
+    확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "깊은 중첩 JSON 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        deeply_nested = "[" * 2000 + "1" + "]" * 2000
+        ws.send_text(deeply_nested)
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json({"content": "안녕"})
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
+def test_stream_message_rejects_huge_number_literal_frame(client):
+    """205라운드: 204라운드와 같은 receive_json()/json.loads() 호출부의 또 다른
+    형제 공백 - 파이썬 3.11+은 정수 문자열 변환 DoS(CVE-2020-10735) 방어로
+    자릿수가 sys.int_info.default_max_str_digits(기본 4300)를 넘는 정수
+    리터럴을 파싱하면 json.JSONDecodeError가 아니라 그냥 ValueError를 던진다 -
+    "9"*5000처럼 중첩이 전혀 없는 5KB 미만의 숫자 하나짜리 텍스트 프레임만으로
+    재현했다. json.JSONDecodeError는 ValueError의 하위 클래스이지만 이 예외는
+    그 반대 방향이 아니라(isinstance(exc, json.JSONDecodeError)가 False임을
+    직접 확인) 위 json.JSONDecodeError 분기로도, 중첩 깊이가 필요 없어
+    RecursionError 분기로도 안 잡혀 그대로 새어나갔다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "거대 숫자 리터럴 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_text("9" * 5000)
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json({"content": "안녕"})
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
+def test_stream_message_rejects_content_over_max_length(client, monkeypatch):
+    monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
+    get_settings.cache_clear()
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "길이 초과 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "이 메시지는 5자보다 훨씬 깁니다"})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+        assert "최대 5자" in error_event["detail"]
+
+
+def test_stream_message_other_users_session_returns_error_event(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token_a = _signup_and_get_token(client, email="stream-a@example.com")
+    token_b = _signup_and_get_token(client, email="stream-b@example.com")
+
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "A의 세션"}, headers=_auth_headers(token_a)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token_b}"
+    ) as ws:
+        ws.send_json({"content": "몰래 접근"})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+
+def test_stream_message_sends_error_event_when_ai_reply_is_blank(client):
+    """REST 버전(test_send_message_returns_502_when_ai_reply_is_blank)과 같은
+    확인을 스트리밍(WebSocket) 경로에도 반복한다 - chat_stream()은 content가
+    있는 조각만 yield하므로, 재시도 없이 그대로 끝나면 아무 delta도 못 보낸
+    채 빈 assistant 메시지가 커밋된다."""
+    fake = AlwaysBlankChatOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-blank-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "빈 스트리밍"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+    assert fake.chat_stream_call_count == 2
+
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+
+
+def test_stream_message_recovers_when_first_ai_reply_is_blank(client):
+    """스트리밍 경로에서도 재시도가 실제로 성공을 복구하는지 확인한다 - 첫
+    시도는 delta를 하나도 못 보내고 끝나고, 두 번째 시도부터 정상적으로
+    delta가 오는지."""
+    fake = RecoversOnRetryOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-recovers-reply@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "복구 스트리밍"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+
+        # done을 만날 때까지 읽는다(delta 개수를 미리 고정하지 않는다) - 만약
+        # 재시도가 없다면(회귀) 실패한 첫 시도가 delta 없이 곧장 done으로
+        # 끝나버리는데, 그 경우에도 여기서 자연스럽게 멈춘다. delta 슬롯
+        # 수를 미리 고정해 두면 그 회귀 상황에서 다음 receive_json()이 영원히
+        # 오지 않을 메시지를 기다리며 테스트가 멈춰버린다.
+        deltas = []
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+            assert event["type"] == "delta"
+            deltas.append(event["content"])
+
+    assert deltas == ["안녕", "하세요"]
+    assert fake.chat_stream_call_count == 2
+
+
+def test_stream_message_fails_instead_of_retrying_when_leaked_whitespace_delta_already_sent(
+    client,
+):
+    """공백뿐인 조각(" ")이라도 이미 "delta" 이벤트로 클라이언트에 전송된
+    뒤라면, 전체 응답이 결국 공백뿐이어도 조용히 재시도해선 안 된다 -
+    재시도하면 이미 보낸 그 delta가 새 시도의 delta들과 뒤섞여 클라이언트가
+    관찰하는 delta 연결 결과가 최종 done.data.content와 달라져(FRONTEND_
+    INTEGRATION.md가 명시하는 계약 위반) 실제로 재현해 확인했다. 이 경우엔
+    재시도 대신 곧바로 error 이벤트로 실패 처리되고, chat_stream이 딱 한
+    번만 호출되는지(=재시도가 실제로 일어나지 않는지) 확인한다."""
+    fake = WhitespaceDeltaLeakOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="whitespace-delta-leak@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "공백 델타 누출"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "안녕"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+
+        events = []
+        while True:
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] in ("done", "error"):
+                break
+
+    assert events[-1]["type"] == "error"
+    assert not any(e["type"] == "done" for e in events)
+    assert fake.chat_stream_call_count == 1
+
+
+def test_stream_message_ai_failure_sends_error_event(client):
+    client.app.dependency_overrides[get_ollama_service] = lambda: FailingOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "실패 스트리밍"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "실패해라"})
+        user_event = ws.receive_json()
+        assert user_event["type"] == "user_message"
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+    # AI 호출은 실패해도 사용자 메시지는 보존되어야 한다 (REST 버전과 동일한 보장).
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 1
+    assert messages[0]["content"] == "실패해라"
+
+
+def test_stream_message_unexpected_exception_sends_error_event_and_logs(client, caplog):
+    """OllamaServiceError가 아닌 예외(예: 임베딩/DB 계층에서 올라오는 예상 못 한
+    예외)는 main.py의 전역 unhandled_exception_handler로 안 잡힌다 - 그 핸들러가
+    걸리는 Starlette ServerErrorMiddleware는 websocket scope를 그냥 통과시키기만
+    한다. 라우트가 직접 잡아서 에러 이벤트를 보내고 로그도 남기는지 확인한다."""
+    from starlette.testclient import WebSocketDisconnect
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: CrashingOllamaService()
+    token = _signup_and_get_token(client, email="stream-crash@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "예상 못 한 예외"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with caplog.at_level("ERROR", logger="app.api.v1.routes.study"):
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.send_json({"content": "터져라"})
+            user_event = ws.receive_json()
+            assert user_event["type"] == "user_message"
+            error_event = ws.receive_json()
+            assert error_event["type"] == "error"
+
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+
+    assert "처리되지 않은 예외" in caplog.text
+
+
+def test_stream_message_disconnect_during_delta_send_logs_client_disconnect_not_error(
+    client, caplog
+):
+    """스트리밍 도중(2번째 이후 send_json) 클라이언트가 실제로 사라지면
+    Starlette의 WebSocket.send()가 전송 계층 OSError를 WebSocketDisconnect(1006)로
+    바꿔 던진다 - 이 예외를 study.py가 `except WebSocketDisconnect: raise`로 먼저
+    잡아 다시 던지지 않으면 그 아래 `except Exception:`이 이걸 "예상 못 한 서버
+    오류"로 오분류해 이미 DISCONNECTED인 소켓에 에러 메시지를 다시 보내려다
+    RuntimeError('Cannot call "send" once a close message has been sent.')로
+    새어나간다(186라운드 픽스). 실제 WebSocket.send()의 상태 전이 로직을 그대로
+    타도록 ASGI 전송 콜백(self._send)만 특정 시점에 OSError를 던지게 바꿔치기해
+    재현한다 - send_json 자체를 가로채면 application_state가 실제로
+    DISCONNECTED로 바뀌지 않아 버그가 재현되지 않는다."""
+    import logging
+    import threading
+    import weakref
+
+    from starlette.websockets import WebSocket
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+
+    # 전체 스위트에서 이 테스트가 드물게(간헐적으로) 실패하는 걸 발견했다 -
+    # WebSocket.send를 클래스 레벨로 바꿔치기하기 때문에, 다른 테스트가 남긴
+    # 아직 완전히 정리되지 않은 WebSocket 인스턴스(다른 백그라운드 anyio
+    # 포털 스레드에서 실행 중)가 있으면 그쪽의 send 호출까지 전역
+    # call_count를 함께 증가시켜, "3번째 호출 = 이 테스트의 첫 delta"라는
+    # 전제가 깨질 수 있다. WeakKeyDictionary로 인스턴스(self)별로 호출
+    # 횟수를 따로 세어, 다른 연결의 트래픽과 절대 섞이지 않게 한다.
+    per_instance_counts: "weakref.WeakKeyDictionary[WebSocket, int]" = weakref.WeakKeyDictionary()
+    original_send = WebSocket.send
+
+    async def _flaky_send(self, message):
+        n = per_instance_counts.get(self, 0) + 1
+        per_instance_counts[self] = n
+        # 1번째 send=accept, 2번째=user_message, 3번째=첫 delta("안녕") -
+        # 스트리밍이 이미 시작된 뒤(user_message는 정상 도착) 그 다음 전송에서
+        # 클라이언트가 사라지는 상황을 재현한다.
+        if n == 3:
+            original_transport_send = self._send
+
+            async def _raise_oserror(msg):
+                raise OSError("Broken pipe (simulated client disconnect)")
+
+            self._send = _raise_oserror
+            try:
+                await original_send(self, message)
+            finally:
+                self._send = original_transport_send
+        else:
+            await original_send(self, message)
+
+    caplog.set_level(logging.INFO)
+
+    # caplog.records를 폴링하는 대신 access_logger.info() 자체를 감싸 disconnect
+    # 로그가 실제로 기록되는 순간 threading.Event를 직접 세운다 - 폴링 주기
+    # 슬랙이나 caplog 내부 타이밍에 기대지 않는, 경합 없는 신호다. 처음엔
+    # 실제 로거 호출이 끝난 뒤 Event를 세우고 그 뒤 caplog.records에서
+    # 다시 찾는 방식이었는데, 그렇게 해도 전체 스위트 안에서 아주 드물게
+    # (Event는 세워졌는데 caplog.records엔 아직 없는 상태로) 실패하는 걸
+    # 다시 관찰했다 - pytest의 LogCaptureHandler 자체가 스레드 간에
+    # 정확히 언제 가시성이 보장되는지까지는 신뢰하지 않기로 하고, 이
+    # 콜백 안에서 메시지를 직접 캡처해(caplog와는 별개의, 이 테스트만의
+    # 로컬 리스트) 그 값 자체로 확인한다 - caplog의 내부 타이밍에 아예
+    # 의존하지 않는다.
+    access_logger = logging.getLogger("haruhan.access")
+    disconnect_logged = threading.Event()
+    disconnect_messages: list[str] = []
+    original_access_info = access_logger.info
+
+    def _tracking_info(msg, *args, **kwargs):
+        result = original_access_info(msg, *args, **kwargs)
+        if isinstance(msg, str) and msg.startswith("ws_event=disconnect"):
+            disconnect_messages.append(msg % args if args else msg)
+            disconnect_logged.set()
+        return result
+
+    access_logger.info = _tracking_info
+
+    monkeypatch_target = WebSocket.send
+    WebSocket.send = _flaky_send
+    try:
+        token = _signup_and_get_token(client, email="stream-mid-disconnect@example.com")
+        create = client.post(
+            "/api/v1/study/sessions", json={"title": "중간 끊김"}, headers=_auth_headers(token)
+        )
+        session_id = create.json()["id"]
+
+        with client.websocket_connect(
+            f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+        ) as ws:
+            ws.send_json({"content": "안녕"})
+            user_event = ws.receive_json()
+            assert user_event["type"] == "user_message"
+
+            # 서버가 실제로 3번째 send(첫 delta)에서 OSError를 만나 disconnect
+            # 처리(finally 블록의 접근 로그 기록까지)를 완전히 마칠 때까지
+            # 기다린다 - 이후로는 서버가 더 이상 아무것도 보내지 않으므로
+            # (정상 처리 시에도, 버그 상황에도) 여기서 receive_json()을 부르면
+            # 영원히 대기한다.
+            fired = disconnect_logged.wait(timeout=20)
+            assert fired, "disconnect 접근 로그가 제시간에 기록되지 않았다"
+    finally:
+        WebSocket.send = monkeypatch_target
+        access_logger.info = original_access_info
+
+    assert "처리되지 않은 예외" not in caplog.text
+    assert len(disconnect_messages) == 1
+    assert "reason=client_disconnect" in disconnect_messages[0]
+
+
+def test_stream_message_rate_limited_after_exceeding_chat_rate_limit(client, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("CHAT_RATE_LIMIT", "1/minute")
+    get_settings.cache_clear()
+
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client, email="stream-ratelimit@example.com")
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "레이트리밋 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_json({"content": "첫 메시지"})
+        ws.receive_json()  # user_message
+        ws.receive_json()  # delta
+        ws.receive_json()  # delta
+        ws.receive_json()  # done
+
+        ws.send_json({"content": "두 번째 메시지"})
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+        assert error_event["retry_after"] >= 0
+
+        ws.close()
+
+    # 레이트리밋에 걸린 두 번째 메시지는 세션에 저장되지 않았어야 한다.
+    detail = client.get(f"/api/v1/study/sessions/{session_id}", headers=_auth_headers(token))
+    messages = detail.json()["messages"]
+    assert len(messages) == 2
+    assert messages[0]["content"] == "첫 메시지"
