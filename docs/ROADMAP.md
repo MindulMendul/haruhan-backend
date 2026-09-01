@@ -7920,3 +7920,62 @@
       INTEGRATION.md` 갱신도, DB 스키마 변경이 없어 마이그레이션도
       필요 없었다.
 
+## 백로그 (202라운드)
+
+- [x] 226. 모든 모델의 `updated_at`(`study_sessions`/`interview_practice_
+      sessions` 등)은 `onupdate=func.now()`(Postgres 서버 자신의 클럭)로
+      정의돼 있는데, `study_session_repository.touch()`/`interview_
+      practice_repository.touch()` 같은 곳은 같은 컬럼을 `utcnow_naive()`
+      (파이썬 쪽 진짜 UTC 클럭)로 직접 덮어쓴다 - `update_title()`/
+      `update_topic()`(이름 변경)은 그 컬럼을 건드리지 않아 그대로
+      `func.now()`에 맡겨진다. 즉 같은 컬럼이 호출부에 따라 서로 다른 두
+      클럭 중 하나로 채워지는데, `func.now()`가 실제로 UTC를 내놓는다는
+      보장은 이 접속 문자열이 가리키는 Postgres 세션의 `timezone` GUC가
+      UTC라는 가정에 전적으로 의존한다 - 이 앱은 그 DB 인스턴스를 직접
+      프로비저닝하지 않고(Supabase 등 관리형 서비스나 운영자가 별도로
+      준비) `app/db/session.py`의 `init_engine()`은 그 GUC 기본값을
+      확인/강제하는 코드가 어디에도 없었다.
+
+      로컬 Postgres 16에 `ALTER DATABASE ... SET timezone TO 'Asia/Seoul'`
+      로 비-UTC 세션 타임존을 실제로 설정해 재현했다: 학습챗으로 방금
+      `touch()`된 세션(정확한 UTC)보다, 그 직후 이름만 바꿔 `func.now()`가
+      찍힌 세션(한국 표준시로 읽힌 "지역 시각"이 그대로 naive UTC인 것처럼
+      저장돼 실제보다 9시간 앞선 값)이 `list_for_user()`의 "최근 순" 정렬
+      에서 위로 올라오는 것까지 확인했다 - 방금 채팅한 세션이 목록에서
+      더 오래된 것처럼 보인다. `UtcDatetime` 직렬화(`schemas/validators.py`)
+      는 이 값에 그대로 "Z"를 붙여 내려보내므로, 프론트에는 그 세션의
+      "최근 수정 시각"이 몇 시간 뒤 미래로 보인다. SQLite(테스트/로컬)는
+      `CURRENT_TIMESTAMP`가 세션 설정과 무관하게 항상 UTC라 이 문제 자체가
+      없어(`FOR UPDATE` 잠금, 음수 `LIMIT` 등 이전 라운드가 이미 마주친
+      것과 같은 "Postgres 전용, SQLite로는 안 보이는" 성격), 200라운드
+      넘게 SQLite 기반 테스트 스위트로는 한 번도 드러나지 않았다.
+
+      `app/db/session.py`의 `init_engine()`에서 `create_async_engine()`에
+      넘기는 `connect_args`를 고르는 순수 함수 `_connect_args_for()`를
+      추출했다 - `to_asyncpg_url()`을 거친 뒤의 URL이 `postgresql+
+      asyncpg://`로 시작하면 `{"server_settings": {"timezone": "UTC"}}`를
+      반환해 이 세션의 timezone을 외부 DB의 기본 설정과 무관하게 명시적으로
+      UTC 고정하고, 그 외(SQLite 등)에는 빈 dict를 반환한다(aiosqlite의
+      `connect()`는 `server_settings` 키워드를 아예 모르므로 넘기면
+      `TypeError`가 난다 - `to_asyncpg_url()`이 이미 다루는 것과 같은 종류의
+      "그 드라이버가 이해 못 하는 키워드 인자" 문제). 실제로 이 함수를
+      끼워 넣은 `init_engine()`을 위 비-UTC Postgres에 다시 연결해, 세션의
+      `SHOW timezone`이 `UTC`로 나오고 `touch()`/`update_title()` 두 클럭이
+      다시 일치하는 것까지 확인했다.
+
+      `tests/test_db_session.py`에 새 테스트 3개를 추가했다: `_connect_
+      args_for()`가 Postgres URL에는 UTC 고정을, SQLite URL에는 빈 dict를
+      돌려주는지 각각 확인하는 단위 테스트 2개, `init_engine()`이 실제로
+      이 값을 `create_async_engine()`의 `connect_args`로 전달하는지
+      확인하는 엔드투엔드 테스트 1개(네트워크 연결 없이 `create_async_
+      engine` 호출만 가로채 확인 - 엔진 생성은 지연 연결이라 실제 서버
+      없이도 검증 가능). `git stash`로 `session.py` 수정만 되돌리면 새
+      테스트 3개 전부 실패하는 것까지 확인했다.
+
+      전체 664개 테스트 통과(661 → 664), `app/db/session.py` 커버리지
+      100% 유지, `mypy app tests scripts` 클린. SQLite 경로의 동작은 전혀
+      안 바뀌고(빈 connect_args, 기존과 동일) Postgres 접속에만 새
+      connect_args가 추가되는 순수 견고성 개선이라 `docs/FRONTEND_
+      INTEGRATION.md` 갱신도, DB 스키마 변경이 없어 마이그레이션도
+      필요 없었다.
+

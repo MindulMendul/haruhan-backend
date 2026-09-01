@@ -147,6 +147,49 @@ def test_init_engine_enables_pool_pre_ping():
     asyncio.run(_with_initialized_engine(_check))
 
 
+# 202라운드: 모든 모델의 updated_at 등은 onupdate=func.now()(Postgres 서버 자신의
+# 클럭)를 쓰는데, study_session_repository.touch() 같은 곳은 같은 컬럼을
+# utcnow_naive()(파이썬 쪽 진짜 UTC 클럭)로 직접 덮어쓴다 - func.now()가 실제로
+# UTC를 내놓는 건 이 접속 문자열이 가리키는 Postgres 세션의 timezone GUC가
+# UTC일 때뿐인데, 이 앱은 그 DB 인스턴스를 직접 프로비저닝하지 않아(Supabase 등
+# 관리형 서비스) 그 기본값을 확인/강제하는 코드가 없었다. 로컬 Postgres에
+# timezone='Asia/Seoul'을 설정해 실제로 재현한 결과, 같은 순간 touch()가 쓴
+# 값은 정확한 UTC인데 update_title()이 기댄 func.now()는 9시간 앞선 값이 나와
+# list_for_user()의 "최근 순" 정렬이 뒤집히고 API 응답의 UtcDatetime 직렬화가
+# 그 값에 그대로 "Z"를 붙여 프론트에 몇 시간 뒤 미래 시각으로 보이는 것까지
+# 확인했다(db/session.py의 _connect_args_for() docstring 참고).
+def test_connect_args_for_pins_utc_timezone_for_postgres_url():
+    assert db_session._connect_args_for("postgresql+asyncpg://u:p@host/db") == {
+        "server_settings": {"timezone": "UTC"}
+    }
+
+
+def test_connect_args_for_is_empty_for_sqlite_url():
+    """aiosqlite의 connect()는 server_settings 키워드를 아예 모르므로(TypeError),
+    SQLite URL에는 이 connect_args를 넘기면 안 된다."""
+    assert db_session._connect_args_for("sqlite+aiosqlite:///./x.db") == {}
+
+
+def test_init_engine_pins_utc_timezone_via_connect_args(monkeypatch):
+    """init_engine()이 실제로 to_asyncpg_url()을 거친 URL을 _connect_args_for()에
+    넘겨 create_async_engine()의 connect_args로 전달하는지, 엔드투엔드로 확인한다."""
+    captured = {}
+    original_create_async_engine = db_session.create_async_engine
+
+    def _capturing_create_async_engine(url, **kwargs):
+        captured["connect_args"] = kwargs.get("connect_args")
+        return original_create_async_engine(url, **kwargs)
+
+    monkeypatch.setattr(db_session, "create_async_engine", _capturing_create_async_engine)
+
+    async def _run():
+        await db_session.init_engine("postgresql://u:p@host/db")
+        await db_session.close_engine()
+
+    asyncio.run(_run())
+    assert captured["connect_args"] == {"server_settings": {"timezone": "UTC"}}
+
+
 def test_check_db_health_returns_false_when_uninitialized():
     assert asyncio.run(db_session.check_db_health(3.0)) is False
 

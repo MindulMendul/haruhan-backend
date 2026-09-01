@@ -81,6 +81,34 @@ def enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
         cursor.close()
 
 
+def _connect_args_for(resolved_url: str) -> dict[str, Any]:
+    """이 접속 문자열(to_asyncpg_url()을 거친 뒤)에 맞는 create_async_engine()의
+    connect_args를 고른다.
+
+    이 앱의 모든 모델은 updated_at 등에 onupdate=func.now()(DB 서버 자신의 클럭)를
+    쓰는데, study_session_repository.touch() 같은 곳은 그 대신 utcnow_naive()
+    (파이썬 쪽 진짜 UTC 클럭)로 같은 컬럼을 직접 덮어쓴다 - 즉 같은 컬럼이
+    호출부에 따라 서로 다른 두 클럭 중 하나로 채워진다. func.now()가 실제로
+    UTC를 내놓는다는 보장은, 이 접속 문자열이 가리키는 Postgres 세션의 timezone
+    GUC가 UTC라는 가정에 의존하는데, 이 앱은 그 DB 인스턴스를 직접 프로비저닝하지
+    않고(Supabase 등 관리형 서비스나 운영자가 별도로 준비) 그 GUC 기본값을
+    확인/강제하는 코드가 어디에도 없었다. 로컬 Postgres에 timezone='Asia/Seoul'을
+    설정해 재현한 결과: 같은 순간 touch()가 쓴 값은 정확한 UTC인데 update_title()이
+    기댄 func.now()는 9시간 앞선(=한국 표준시로 읽힌 "지역 시각"이 그대로 naive
+    UTC인 것처럼 저장된) 값이 나왔다 - list_for_user()의 "최근 순" 정렬이 방금
+    채팅한 세션보다 그보다 먼저 이름만 바꾼 세션을 위로 올리고, API가 UtcDatetime
+    으로 그 값에 그대로 "Z"를 붙여 내려보내(schemas/validators.py 참고) 프론트에는
+    몇 시간 뒤 미래 시각으로 보인다. server_settings로 이 세션의 timezone을
+    명시적으로 UTC 고정해 외부 DB의 기본 설정과 무관하게 func.now()가 항상 진짜
+    UTC를 내놓도록 보장한다. SQLite(테스트/로컬)는 CURRENT_TIMESTAMP가 세션
+    설정과 무관하게 항상 UTC라 이 문제 자체가 없고, aiosqlite의 connect()는
+    server_settings 키워드를 아예 모르므로(TypeError) Postgres URL일 때만
+    넘긴다."""
+    if resolved_url.startswith("postgresql+asyncpg://"):
+        return {"server_settings": {"timezone": "UTC"}}
+    return {}
+
+
 async def init_engine(database_url: str | None) -> None:
     """앱 시작 시 DB 엔진/세션 팩토리를 만든다. DATABASE_URL이 없으면 건너뛴다."""
     global _engine, _session_factory
@@ -94,8 +122,13 @@ async def init_engine(database_url: str | None) -> None:
     # 훨씬 잦은 주기로 개별 풀 커넥션이 끊기는 것까지는 막지 못한다. 이게 없으면
     # 끊긴 커넥션으로 첫 쿼리를 시도한 요청이 그대로 500으로 실패한다 - pre_ping을
     # 켜면 SQLAlchemy가 끊긴 커넥션을 감지해 조용히 새 커넥션으로 교체해준다.
+    resolved_url = to_asyncpg_url(database_url)
     _engine = create_async_engine(
-        to_asyncpg_url(database_url), pool_size=5, max_overflow=5, pool_pre_ping=True
+        resolved_url,
+        pool_size=5,
+        max_overflow=5,
+        pool_pre_ping=True,
+        connect_args=_connect_args_for(resolved_url),
     )
     enable_sqlite_foreign_keys(_engine)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
