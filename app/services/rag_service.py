@@ -21,6 +21,15 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _is_valid_embedding(embedding: list) -> bool:
+    """embedding 컬럼은 pgvector 없이 그냥 JSON 배열이라(knowledge_chunk.py 참고)
+    DB/ORM 레벨에서 원소 타입을 전혀 강제하지 않는다 - Ollama가(혹은 앞단
+    프록시가) `{"embedding": [0.1, 0.2, null]}`처럼 숫자가 아닌 원소가 섞인
+    응답을 줘도 ollama_service.py의 embed()는 `or []`로 None/누락 키만 걸러낼
+    뿐 원소 타입까지는 검증하지 않아 그대로 통과한다."""
+    return all(isinstance(value, int | float) for value in embedding)
+
+
 def _rank_top_k(
     query_embedding: list[float], candidates: list[tuple[list[float], str]], top_k: int
 ) -> list[str]:
@@ -49,6 +58,21 @@ def _rank_top_k(
                 len(query_embedding),
                 len(embedding),
             )
+            continue
+        if not _is_valid_embedding(embedding):
+            # 209라운드: 위 차원 검사와 같은 이유지만 한 단계 더 깊다 - 원소
+            # 타입이 숫자가 아닌 청크 하나가 이미 DB에 들어가 있으면(색인
+            # 시점에 이 검증이 없었거나, 이 검증이 생기기 전에 저장된 데이터),
+            # 이 함수는 그 청크를 만날 때마다 `x * y`에서 TypeError를 던져
+            # 후보 목록 전체(그 청크와 무관한, 정상적인 다른 후보까지 포함)의
+            # 채점 자체를 중단시킨다 - retrieve_relevant()가 이 함수 호출을
+            # 통째로 감싸는 `except Exception: return []`(189라운드)로 앱
+            # 자체가 죽지는 않지만, 이 사용자는 그 뒤로 학습챗/면접연습 턴마다
+            # 매번 RAG 검색이 "조용히" 빈 결과만 받게 된다 - 한 번 잘못
+            # 저장된 청크 하나가 그 사용자의 RAG 전체를 사실상 영구히
+            # 무력화하는 셈이다. 차원이 다른 경우와 같은 원칙으로, 이 청크
+            # 하나만 채점에서 제외하고 나머지 정상 후보는 계속 살린다.
+            logger.warning("RAG 검색에서 원소 타입이 숫자가 아닌 임베딩 건너뜀")
             continue
         scored.append((_cosine_similarity(query_embedding, embedding), content))
     scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -188,7 +212,7 @@ class RagService:
             await self._safe_commit(f"index_content 임베딩 실패: source_id={source_id}", is_final_session_use)
             return
 
-        if embedding:
+        if embedding and _is_valid_embedding(embedding):
             try:
                 async with self._session.begin_nested():
                     await self._chunks.create(
@@ -207,6 +231,22 @@ class RagService:
                     source_id,
                 )
                 return
+        elif embedding:
+            # 209라운드: embedding 컬럼은 JSON 배열이라 원소 타입을 DB가 강제하지
+            # 않는다(_is_valid_embedding() docstring 참고) - 원소 타입이 숫자가
+            # 아닌 채로 여기서 그대로 저장하면, 이 청크가 앞으로 _rank_top_k()가
+            # 도는 매 검색마다 TypeError를 던져 이 사용자의 RAG 검색 결과 전체를
+            # 영구히 빈 리스트로 만든다("빈 임베딩" 케이스와 증상은 같지만, 그건
+            # 애초에 저장을 안 해서 검색 후보에도 안 끼는 반면 이쪽은 저장된 뒤
+            # 매번 다른 정상 후보까지 함께 채점을 망친다는 점이 다르다). 빈
+            # 임베딩과 같은 원칙으로 아예 저장하지 않는다.
+            logger.warning(
+                "RAG 색인 건너뜀 (원소 타입이 숫자가 아닌 임베딩 반환): user_id=%s source_type=%s "
+                "source_id=%s",
+                user_id,
+                source_type,
+                source_id,
+            )
         else:
             logger.warning(
                 "RAG 색인 건너뜀 (빈 임베딩 반환): user_id=%s source_type=%s source_id=%s",

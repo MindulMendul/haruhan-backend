@@ -8282,3 +8282,57 @@
       99.97%), `mypy app tests scripts` 클린. DB 스키마 변경이 없어
       마이그레이션도 필요 없었다.
 
+## 백로그 (209라운드)
+
+- [x] 233. `app/services/rag_service.py`의 `knowledge_chunks.embedding`은
+      pgvector 없이 그냥 JSON 배열이라(`knowledge_chunk.py` 참고) DB/ORM이
+      원소 타입을 전혀 강제하지 않는다. `ollama_service.py`의 `embed()`는
+      `or []`로 응답이 `None`/누락일 때만 걸러낼 뿐 원소 타입까지는
+      검증하지 않아, Ollama가(혹은 앞단 프록시가) `{"embedding": [0.1, 0.2,
+      null]}`처럼 숫자가 아닌 원소가 섞인 응답을 줘도 그대로 저장될 수
+      있었다. `_rank_top_k()`는 이미 차원(벡터 길이)이 다른 후보를 개별적
+      으로 걸러내는 방어를 갖추고 있었는데(이전 라운드), 원소 "타입"
+      쪽에는 같은 방어가 없어서 `_cosine_similarity()`의 `x * y`가
+      `TypeError`를 던졌다 - 문제는 이 예외가 그 청크 하나만이 아니라
+      "채점 루프 전체"를 중단시킨다는 점이다. `retrieve_relevant()`가 이
+      호출 전체를 감싸는 `except Exception: return []`(189라운드)로 앱이
+      죽지는 않지만, 그 사용자는 그 뒤로 학습챗/면접연습 턴마다 매번 RAG
+      검색이 조용히 빈 결과만 받게 된다 - 오염된 청크와 무관한, 그 사용자의
+      다른 모든 정상 기록까지 함께 랭킹에서 사라지는 셈이라, 한 번 잘못
+      저장된 청크 하나가 그 사용자의 RAG 전체를 사실상 영구히 무력화한다.
+      직접 재현 스크립트로 `TypeError: can't multiply sequence by non-int
+      of type 'float'`가 나는 것까지 확인했다.
+
+      (이번 라운드는 "동시에 같은 리소스를 삭제하는 두 요청이 경쟁하면
+      `StaleDataError`가 새는가"라는 가설도 먼저 조사했는데, 실제
+      SQLite 세션으로 재현한 결과 SQLAlchemy는 DELETE 행 수 불일치에는
+      `StaleDataError`가 아니라 무해한 `SAWarning`만 내는 것으로 확인돼
+      - UPDATE 행 수 불일치와 달리 - 코드 변경 없이 폐기했다.)
+
+      `_is_valid_embedding()` 헬퍼를 추가해 두 군데에 적용했다 - (1)
+      `_rank_top_k()`는 바로 위 차원 불일치 방어와 같은 원칙으로, 원소
+      타입이 숫자가 아닌 후보만 채점에서 개별적으로 제외하고 나머지 정상
+      후보는 그대로 살린다(이미 DB에 들어가 있는 데이터에 대한 방어). (2)
+      `index_content()`는 기존 "빈 임베딩" 건너뛰기 분기와 같은 원칙으로,
+      원소 타입이 숫자가 아닌 임베딩을 아예 저장하지 않는다(앞으로 새로
+      들어오는 데이터에 대한 방어).
+
+      `tests/test_rag_service.py`에 세 테스트를 추가했다 -
+      `test_rank_top_k_skips_candidate_with_non_numeric_embedding_element`
+      (단위 테스트, 기존 차원 불일치 테스트와 같은 형태),
+      `test_index_content_skips_when_embedding_has_non_numeric_element`
+      (기존 "빈 임베딩" 테스트와 같은 형태), 그리고 가장 핵심적인
+      `test_retrieve_relevant_survives_pre_existing_malformed_embedding_
+      chunk`(`KnowledgeChunkRepository.create()`로 오염된 청크를 DB에
+      직접 심어 "이 검증이 생기기 전에 이미 저장된 데이터"를 재현하고,
+      `retrieve_relevant()`를 실제로 호출했을 때 그 사용자의 다른 정상
+      청크가 여전히 정상적으로 반환되는지 확인). `git stash`로
+      `app/services/rag_service.py`만 되돌리면 새 테스트 3개 전부 정확히
+      재현한 증상(`TypeError`)으로 실패하는 것까지 확인했다.
+
+      RAG 그라운딩 품질에 대한 내부 수정이라 클라이언트에 보이는 프로토콜
+      변화가 없어 `docs/FRONTEND_INTEGRATION.md` 갱신은 필요 없었다. 전체
+      679개 테스트 통과(676 → 679), `app/services/rag_service.py` 커버리지
+      100% 유지(전체 99.97%), `mypy app tests scripts` 클린. DB 스키마
+      변경이 없어 마이그레이션도 필요 없었다.
+

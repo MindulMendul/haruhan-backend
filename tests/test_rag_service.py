@@ -37,6 +37,14 @@ class EmptyEmbeddingOllamaService:
         return []
 
 
+class MalformedEmbeddingOllamaService:
+    """호출은 성공하지만 원소 타입이 숫자가 아닌 벡터를 돌려주는(Ollama나 앞단
+    프록시의 이상 응답) 경우를 흉내낸다."""
+
+    async def embed(self, text: str, model: str) -> list[float]:
+        return [0.1, 0.2, None]  # type: ignore[list-item]
+
+
 def test_cosine_similarity_identical_vectors_is_one():
     assert _cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
 
@@ -69,6 +77,31 @@ def test_rank_top_k_skips_candidate_with_mismatched_embedding_dimension():
             (true_relevant, "진짜 관련 있는 청크"),
         ],
         top_k=1,
+    )
+
+    assert result == ["진짜 관련 있는 청크"]
+
+
+def test_rank_top_k_skips_candidate_with_non_numeric_embedding_element():
+    """209라운드: embedding 컬럼은 pgvector 없이 그냥 JSON 배열이라(knowledge_
+    chunk.py 참고) DB/ORM이 원소 타입을 강제하지 않는다 - Ollama가(혹은 앞단
+    프록시가) `{"embedding": [0.1, 0.2, null]}`처럼 숫자가 아닌 원소가 섞인
+    응답을 줘도 그대로 저장될 수 있었다. 위 차원 불일치 테스트와 같은
+    이유로, 그런 청크 하나가 채점 루프에 섞이면 `_cosine_similarity()`의
+    `x * y`가 TypeError를 던져 그 청크뿐 아니라 함께 채점 중이던 다른
+    정상 후보까지 전부 랭킹에서 사라진다 - 원소 타입이 숫자가 아닌 후보만
+    채점에서 제외되고 나머지 정상 후보는 살아남는지 확인한다."""
+    query = [1.0, 0.0, 0.0]
+    malformed = [0.1, 0.2, None]
+    true_relevant = [0.99, 0.01, 0.05]
+
+    result = _rank_top_k(
+        query,
+        [
+            (malformed, "원소 타입이 이상한 청크"),
+            (true_relevant, "진짜 관련 있는 청크"),
+        ],
+        top_k=5,
     )
 
     assert result == ["진짜 관련 있는 청크"]
@@ -276,6 +309,78 @@ def test_index_content_skips_when_embedding_is_empty(db_session_factory, caplog)
 
             results = await rag.retrieve_relevant(user_id=user.id, query="아무 질문")
             assert results == []
+
+    asyncio.run(_run())
+
+
+def test_index_content_skips_when_embedding_has_non_numeric_element(db_session_factory, caplog):
+    """209라운드: 위 `_rank_top_k` 테스트와 같은 이유 - 원소 타입이 숫자가
+    아닌 임베딩은 "빈 임베딩" 케이스와 같은 원칙으로 아예 저장하지 않는지
+    확인한다(저장해버리면 이후 이 사용자의 모든 검색이 이 청크를 만날 때마다
+    깨진다)."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            rag = RagService(
+                session=session, ollama_service=MalformedEmbeddingOllamaService(), settings=settings
+            )
+            with caplog.at_level("WARNING", logger="app.services.rag_service"):
+                await rag.index_content(
+                    user_id=user.id, source_type="study_message", source_id=uuid.uuid4(), content="내용"
+                )
+            assert any("RAG 색인 건너뜀" in record.message for record in caplog.records)
+
+            results = await rag.retrieve_relevant(user_id=user.id, query="아무 질문")
+            assert results == []
+
+    asyncio.run(_run())
+
+
+def test_retrieve_relevant_survives_pre_existing_malformed_embedding_chunk(db_session_factory):
+    """209라운드: `index_content()`가 원소 타입이 숫자가 아닌 임베딩을 이제
+    걸러내더라도(위 테스트), 이 검증이 생기기 전에 이미 저장된 청크나 다른
+    경로로 들어온 데이터는 여전히 DB에 남아있을 수 있다 -
+    `KnowledgeChunkRepository.create()`로 그런 청크를 실제 DB에 직접 심어(이
+    시나리오를 재현하기 위해), `retrieve_relevant()`를 실제로 호출했을 때
+    그 청크 하나 때문에 같은 사용자의 다른 정상 청크까지 함께 랭킹에서
+    사라지지 않고(빈 리스트가 아니라) 정상 후보가 그대로 반환되는지
+    확인한다 - 고치기 전에는 이 청크가 있으면 그 사용자는 이후 모든 검색이
+    영구히 빈 결과만 받았다."""
+    settings = get_settings()
+
+    async def _run():
+        async with db_session_factory() as session:
+            user = await UserRepository(session).create_guest()
+            await session.commit()
+
+            fake_ollama = FakeEmbeddingOllamaService({"질문": [1.0, 0.0, 0.0]})
+            rag = RagService(session=session, ollama_service=fake_ollama, settings=settings)
+
+            chunks = KnowledgeChunkRepository(session)
+            await chunks.create(
+                user_id=user.id,
+                source_type="study_message",
+                source_id=uuid.uuid4(),
+                content="원소 타입이 이상한 청크(가짜)",
+                embedding=[0.1, 0.2, None],
+                embedding_model=settings.embedding_model,
+            )
+            await chunks.create(
+                user_id=user.id,
+                source_type="study_message",
+                source_id=uuid.uuid4(),
+                content="진짜 관련 있는 청크",
+                embedding=[0.99, 0.01, 0.05],
+                embedding_model=settings.embedding_model,
+            )
+            await session.commit()
+
+            results = await rag.retrieve_relevant(user_id=user.id, query="질문")
+            assert results == ["진짜 관련 있는 청크"]
 
     asyncio.run(_run())
 
