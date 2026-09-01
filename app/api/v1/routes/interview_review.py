@@ -205,6 +205,17 @@ async def stream_create_review(
                 # 쪽으로도 안 잡힌다.
                 await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
                 continue
+            except ValueError:
+                # 205라운드: study.py의 stream_message()와 같은 이유(그쪽 주석 참고) -
+                # 파이썬 3.11+은 정수 문자열 변환 DoS(CVE-2020-10735) 방어로 자릿수가
+                # sys.int_info.default_max_str_digits(기본 4300)를 넘는 정수 리터럴을
+                # 파싱하면 json.JSONDecodeError가 아니라 그냥 ValueError를 던진다 -
+                # 중첩 없이 "9"*5000처럼 숫자 하나짜리 텍스트 프레임만으로 재현된다.
+                # json.JSONDecodeError는 ValueError의 하위 클래스라 이 except를 그 뒤에
+                # 둬야 그 구체적인 하위 클래스가 먼저 잡히고 남는 순수 ValueError만
+                # 여기로 떨어진다.
+                await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
+                continue
 
             # get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 -
             # 그 뒤로는 REST(매 요청마다 get_current_user()가 다시 검증)와

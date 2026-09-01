@@ -1099,6 +1099,30 @@ def test_stream_create_review_rejects_deeply_nested_json_frame(client):
                 break
 
 
+def test_stream_create_review_rejects_huge_number_literal_frame(client):
+    """205라운드: study.py의 stream_message()와 같은 이유(그쪽 주석 참고) -
+    파이썬 3.11+은 정수 문자열 변환 DoS(CVE-2020-10735) 방어로 자릿수가
+    sys.int_info.default_max_str_digits(기본 4300)를 넘는 정수 리터럴을
+    파싱하면 json.JSONDecodeError가 아니라 그냥 ValueError를 던진다 - 중첩
+    없이 "9"*5000처럼 숫자 하나짜리 텍스트 프레임만으로 재현된다. json.
+    JSONDecodeError는 ValueError의 하위 클래스라 그 반대 방향으로는 안 잡혀
+    그대로 새어나갔다."""
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-review-hugenum@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_text("9" * 5000)
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json(_create_payload())
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
 def test_stream_create_review_sends_error_event_when_feedback_is_blank(client):
     """REST 버전(test_create_review_returns_502_when_feedback_is_blank)과 같은
     확인을 스트리밍(WebSocket) 경로에도 반복한다 - chat_stream()은 content가

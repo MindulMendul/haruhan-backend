@@ -8072,3 +8072,49 @@
       따르는 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (205라운드)
+
+- [x] 229. 203/204라운드가 고친 것과 같은 `websocket.receive_json()` 호출부에,
+      또 다른 형제 예외 타입이 여전히 안 잡히고 있었다. 파이썬 3.11+는
+      정수→문자열 변환 DoS(CVE-2020-10735) 방어로, 자릿수가 `sys.int_info.
+      default_max_str_digits`(기본 4300)를 넘는 정수 리터럴을 파싱하면
+      `json.JSONDecodeError`가 아니라 그냥 `ValueError`를 던진다는 것을
+      직접 확인했다 - `"9"*5000`처럼 중첩이 전혀 없는 5KB 미만의 숫자
+      하나짜리 텍스트 프레임만으로 재현된다(204라운드의 `RecursionError`와
+      달리 깊은 중첩이 필요 없다). `json.JSONDecodeError`가 `ValueError`의
+      하위 클래스이긴 하지만 이 관계는 반대 방향으로는 성립하지 않는다는
+      것도 `isinstance(exc, json.JSONDecodeError)`가 `False`임을 직접
+      확인해 검증했다 - 그래서 위 `json.JSONDecodeError`/`KeyError`(203
+      라운드)/`RecursionError`(204라운드) 어느 분기로도 안 잡혀 그대로
+      새어나갔다. `KeyError`를 처음 잡은 203라운드의 원칙("같은 `receive_
+      json()` 호출부, 다른 예외 타입도 마저 잡는다")이 이 세 번째 형제
+      타입에도 아직 안 미쳐 있었던 셈이다.
+
+      재현 과정에서 이전 두 라운드와 같은 access 로그 왜곡도 다시
+      확인했다 - 서버 쪽 크래시인데도 `disconnect_reason`이 기본값
+      `"client_disconnect"`로 잘못 남고, 어디에도 `logger.exception(...)`
+      이 없어 로그만 봐서는 정상 종료처럼 보였다.
+
+      두 라우트(`study.py`의 `stream_message`, `interview_review.py`의
+      `stream_create_review`) 모두 기존 `except RecursionError:` 바로
+      뒤에 `except ValueError:`를 추가해, 다른 잘못된 입력과 똑같이
+      `{"type": "error", "detail": "잘못된 JSON 형식입니다."}`로 응답하고
+      연결은 계속 유지한다 - `json.JSONDecodeError`가 `ValueError`의
+      하위 클래스이므로, 이 새 분기가 그보다 먼저 오는 `except json.
+      JSONDecodeError:` 뒤에 와야 그 구체적인 하위 클래스는 이미 위에서
+      잡히고 남는 순수 `ValueError`만 이 분기로 떨어진다는 점을 주석에
+      남겼다. `tests/test_study.py`/`tests/test_interview_review.py`에
+      기존 `..._rejects_deeply_nested_json_frame` 테스트와 같은 스타일로
+      `..._rejects_huge_number_literal_frame` 테스트를 각각 추가했다 -
+      거대 숫자 리터럴 프레임 전송 뒤 `{"type": "error"}`를 받는지, 그
+      뒤로도 연결이 살아있어 정상 메시지를 끝까지(`"done"`까지) 처리할
+      수 있는지 확인한다. `git stash`로 두 라우트 수정만 되돌리면 새
+      테스트 2개 전부 정확히 재현한 증상(`ValueError`)으로 실패하는
+      것까지 확인했다.
+
+      전체 670개 테스트 통과(668 → 670), `app/api/v1/routes/study.py`/
+      `interview_review.py` 커버리지 100% 유지, `mypy app tests scripts`
+      클린. 클라이언트 프로토콜은 기존 `{"type": "error"}` 규약을 그대로
+      따르는 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
+      DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
+

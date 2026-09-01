@@ -1494,6 +1494,37 @@ def test_stream_message_rejects_deeply_nested_json_frame(client):
                 break
 
 
+def test_stream_message_rejects_huge_number_literal_frame(client):
+    """205라운드: 204라운드와 같은 receive_json()/json.loads() 호출부의 또 다른
+    형제 공백 - 파이썬 3.11+은 정수 문자열 변환 DoS(CVE-2020-10735) 방어로
+    자릿수가 sys.int_info.default_max_str_digits(기본 4300)를 넘는 정수
+    리터럴을 파싱하면 json.JSONDecodeError가 아니라 그냥 ValueError를 던진다 -
+    "9"*5000처럼 중첩이 전혀 없는 5KB 미만의 숫자 하나짜리 텍스트 프레임만으로
+    재현했다. json.JSONDecodeError는 ValueError의 하위 클래스이지만 이 예외는
+    그 반대 방향이 아니라(isinstance(exc, json.JSONDecodeError)가 False임을
+    직접 확인) 위 json.JSONDecodeError 분기로도, 중첩 깊이가 필요 없어
+    RecursionError 분기로도 안 잡혀 그대로 새어나갔다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "거대 숫자 리터럴 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_text("9" * 5000)
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json({"content": "안녕"})
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
 def test_stream_message_rejects_content_over_max_length(client, monkeypatch):
     monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
     get_settings.cache_clear()

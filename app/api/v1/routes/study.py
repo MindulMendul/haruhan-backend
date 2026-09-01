@@ -241,6 +241,21 @@ async def stream_message(
                 # 재귀 한도를 넘길 수 있다. 다른 잘못된 입력과 똑같이 삼킨다.
                 await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
                 continue
+            except ValueError:
+                # 205라운드: 204라운드와 같은 receive_json()/json.loads() 호출부의 또
+                # 다른 형제 공백 - 파이썬 3.11+은 정수 문자열 변환 DoS(CVE-2020-10735)
+                # 방어로 자릿수가 sys.int_info.default_max_str_digits(기본 4300)를
+                # 넘는 정수 리터럴을 파싱하면 json.JSONDecodeError가 아니라 그냥
+                # ValueError를 던진다("9"*5000처럼 중첩이 전혀 없는 5KB 미만의 숫자
+                # 하나짜리 텍스트 프레임만으로 재현). json.JSONDecodeError는
+                # ValueError의 하위 클래스이지만 이 예외는 그 반대 방향이 아니라서
+                # (isinstance(exc, json.JSONDecodeError)가 False임을 직접 확인)
+                # 위 json.JSONDecodeError 분기로도 안 잡히고, 204라운드의 RecursionError
+                # 처럼 중첩 깊이가 필요한 것도 아니라 그 분기로도 안 잡힌다 - 이
+                # except를 json.JSONDecodeError보다 뒤에 둬야 그 구체적인 하위 클래스가
+                # 먼저 잡히고 남는 순수 ValueError만 여기로 떨어진다.
+                await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
+                continue
 
             # get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 -
             # 그 뒤로는 REST(매 요청마다 get_current_user()가 다시 검증)와
