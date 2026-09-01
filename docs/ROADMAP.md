@@ -8241,3 +8241,44 @@
       커버리지 100% 유지(전체 99.97%), `mypy app tests scripts` 클린. DB
       스키마 변경이 없어 마이그레이션은 필요 없었다.
 
+## 백로그 (208라운드)
+
+- [x] 232. `app/services/ollama_service.py`의 `generate()`는 Ollama가 200을
+      응답해도 본문에 `response` 키가 없거나 모델이 빈/공백 텍스트만 뱉으면
+      예외를 던지지 않고 그냥 빈 문자열을 돌려준다(`or ""`로 접어 항상 `str`을
+      반환한다는 반환 타입 선언을 지키는 동작 - 관련 코드는 이미 여러 라운드
+      전에 정리돼 있다). 188라운드가 이 실패 클래스를 `study_service`/
+      `interview_practice_service`/`interview_review_service`의 모든
+      `generate()`/`chat()` 호출부에 재시도(`_MAX_..._ATTEMPTS`) + `.strip()`
+      공백 검증으로 막았는데, `app/api/v1/routes/chat.py`(범용 Ollama 프록시
+      엔드포인트 `POST /api/chat`)만 그 감사 대상에서 빠진 채 `ollama_service.
+      generate()`를 검증 없이 그대로 호출하고 있었다 - 직접 재현해 확인한 것처럼
+      Ollama가 빈 응답을 주면 이 라우트는 재시도도, 에러 응답도 없이 그냥
+      `200 { "result": "" }`를 돌려줘서, 이 API를 쓰는 클라이언트는 "모델이
+      정말 빈 답을 했다"와 "호출 자체가 사실상 실패했다"를 구분할 방법이
+      없었다. `docs/FRONTEND_INTEGRATION.md`가 이 엔드포인트를 "4개 핵심
+      기능과 무관한 초기 프로토타입, 신규 프론트 작업에는 비권장"으로 이미
+      명시하고 있어 실사용 영향은 제한적이지만, 라우트 자체는 여전히
+      살아 있고 인증 없이도(API_KEY 미설정 시) 호출 가능하다.
+
+      `interview_practice_service.py`의 `_generate_first_question`/
+      `_generate_feedback_text`와 같은 패턴(`_MAX_GENERATION_ATTEMPTS=2`
+      재시도 루프 + `.strip()` 공백 검증, 재시도를 다 써도 계속 공백이면
+      다른 생성 실패와 같은 502)을 `chat.py`의 라우트 함수 자체에 그대로
+      적용했다 - 이 라우트는 별도 서비스 계층이 없는 얇은 프록시라 서비스
+      메서드로 옮기지 않고 라우트에 바로 넣었다.
+
+      `tests/test_chat.py`에 두 테스트를 추가했다 - `test_chat_retries_
+      once_and_recovers_from_blank_response`(첫 시도가 공백이어도 재시도에서
+      성공하면 그 결과를 그대로 돌려주는지)와 `test_chat_returns_502_
+      after_exhausting_retries_on_blank_response`(재시도를 다 써도 계속
+      공백이면 502로 응답하는지). `git stash`로 `app/api/v1/routes/chat.py`만
+      되돌리면 새 테스트 2개 전부 정확히 재현한 증상(재시도/에러 응답 없이
+      그대로 `200 { "result": "" }`)으로 실패하는 것까지 확인했다.
+
+      이 엔드포인트가 문서화한 동작(정상 결과 또는 에러 응답)은 그대로라
+      `docs/FRONTEND_INTEGRATION.md` 갱신은 필요 없었다. 전체 676개 테스트
+      통과(674 → 676), `app/api/v1/routes/chat.py` 커버리지 100% 유지(전체
+      99.97%), `mypy app tests scripts` 클린. DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+
