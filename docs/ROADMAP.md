@@ -8118,3 +8118,71 @@
       따르는 순수 견고성 개선이라 `docs/FRONTEND_INTEGRATION.md` 갱신도,
       DB 스키마 변경이 없어 마이그레이션도 필요 없었다.
 
+## 백로그 (206라운드)
+
+- [x] 230. `StudySession.updated_at`/`InterviewPracticeSession.updated_at`이
+      `server_default=func.now()`/`onupdate=func.now()`(DB 서버 자신의 클럭)
+      였는데, 새 메시지/답변이 추가될 때 목록 정렬 순서를 최신으로 올리는
+      `touch()`는 이 컬럼을 `utcnow_naive()`(파이썬 쪽 클럭)로 직접
+      덮어쓰는 반면, 세션 이름 변경(`update_title()`/`update_topic()`)은
+      이 컬럼을 건드리지 않고 그대로 `onupdate=func.now()`에 맡겨져 있었다
+      - 같은 컬럼이 호출부에 따라 서로 다른 두 물리적 시계(앱 호스트 vs
+      이 앱이 직접 프로비저닝하지 않는, 보통 관리형인 Postgres 인스턴스)
+      중 하나로 채워졌다. 202라운드가 고친 세션 timezone GUC 문제(타임존
+      "이름표"가 잘못돼 값 자체가 몇 시간씩 어긋나던 문제)와는 별개로, 두
+      시계가 올바르게 UTC로 합의하고 있어도 서로 다른 물리적 기계인 이상
+      완벽히 동기화된다는 보장은 없어(NTP 드리프트, 관리형 DB의 클럭이 이
+      앱과 별도로 관리됨 등), `list_for_user()`의 "최근 순" 정렬이 거의
+      동시에 일어난 `touch()`/이름 변경 사이에서 뒤집힐 수 있었다 - 방금
+      실제로 채팅/답변한 세션이 그보다 먼저 이름만 바꾼 세션보다 아래로
+      정렬되는 식.
+
+      두 모델의 `updated_at`을 `default=utcnow_naive, onupdate=utcnow_naive`
+      로 바꿔, 이름 변경 경로도 이제 SQLAlchemy의 ORM 레벨 `onupdate`(DB
+      트리거가 아니라 UPDATE를 실제로 낼 때 파이썬 콜러블을 호출해 SET
+      절에 넣는 동작이라는 것을 `migrations/versions/`의 관련 마이그레이션
+      DDL을 직접 읽어 확인했다)를 통해 `touch()`와 정확히 같은 파이썬
+      클럭을 쓰게 된다. `QuizAttempt.submitted_at`/`StudyMessage.created_at`
+      도 이미 같은 패턴(`server_default` 대신 `default=utcnow_naive`)을
+      쓰고 있지만, 그건 다른 이유(SQLite의 `CURRENT_TIMESTAMP`가 초 단위라
+      짧은 간격의 재제출 순서를 못 구분하던 문제)로 그렇게 된 것이라 이번
+      라운드의 클럭 불일치 문제와는 별개다. 마이그레이션의
+      `server_default=CURRENT_TIMESTAMP`는 INSERT 시 SQLAlchemy가 항상
+      명시적 값을 채워 넣어 사실상 안 쓰이는 채로 남아도 무해해서(이미
+      `QuizAttempt`가 DDL을 안 건드리고 이 전환을 한 전례가 있음) 새
+      마이그레이션은 필요 없었다.
+
+      `tests/test_session_updated_at_clock_consistency.py`에 두 모델 각각
+      `touch()`/이름 변경이 같은 (고정된) 값을 만드는지 확인하는 회귀
+      테스트를 추가했다. 처음에는 시각을 고정하려고 `Column.default`/
+      `.onupdate`(`CallableColumnDefault`)의 `.arg`를 직접 몽키패치했는데
+      (`mapped_column(default=utcnow_naive, ...)`에 넘긴 함수 객체는 클래스
+      정의 시점에 그대로 붙잡혀서, `utcnow_naive`라는 이름 자체를
+      몽키패치해도 이미 붙잡은 함수 객체엔 영향이 없다는 것까지 확인한
+      뒤였다) - 격리 실행에서는 안정적으로 통과했지만, 다른 테스트
+      파일(`test_interview_practice.py` 등)이 같은 테이블에 실제 INSERT를
+      먼저 실행해둔 뒤에 전체 스위트로 같이 돌리면 그 패치가 반영되지
+      않는 경우가 간헐적으로 있었다(정확한 SQLAlchemy 내부 캐싱 메커니즘
+      까지는 특정하지 못함 - `pytest-randomly`가 설치돼 있어 파일/테스트
+      순서가 매번 랜덤이라는 것도 재현이 들쭉날쭉해 보인 원인 중 하나였다).
+      `utcnow_naive()` 본문이 `datetime.now(timezone.utc)`처럼 자기 모듈
+      전역 이름 `datetime`을 매 호출마다 새로 조회한다는 점을 이용해,
+      `app.core.clock.datetime`을 `.now()`가 고정값을 반환하는 가짜
+      클래스로 바꿔치는 방식으로 바꿨다 - 이러면 이 함수 객체가 ORM
+      `default=`/`onupdate=`로 호출되든 `touch()`가 직접 호출하든 관계없이
+      전부 같은 고정 시각을 보게 되고, SQLAlchemy 내부 상태를 전혀
+      건드리지 않아 그 간헐적 실패가 사라졌다(수정 전 코드로 `git stash`
+      해서 새 테스트 2개가 정확히 재현한 증상 - 이름 변경 뒤 `updated_at`
+      이 `touch()`가 만든 고정값과 달라짐 - 으로 실패하는 것도 확인했다).
+
+      전체 672개 테스트 통과(670 → 672, `test_session_updated_at_clock_
+      consistency.py`의 새 테스트 2개), 새로 건드린 `app/db/models/study_
+      session.py`/`interview_practice_session.py`/`app/repositories/
+      study_session_repository.py` 커버리지 100% 유지(전체 99.97%),
+      `mypy app tests scripts` 클린. 이 세션의 `test_session_updated_at_
+      clock_consistency.py tests/test_study.py tests/test_interview_
+      practice.py tests/test_db_session.py` 조합을 5회 연속 재실행해도
+      전부 통과해 그 간헐적 실패가 재발하지 않음을 확인했다. 클라이언트
+      프로토콜 변경이 없는 내부 DB 클럭 일관성 수정이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
+

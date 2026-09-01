@@ -71,8 +71,9 @@ class StudySessionRepository:
     async def touch(self, study_session: StudySession) -> None:
         """새 메시지가 추가될 때 목록 정렬 순서가 최신으로 오도록 updated_at을 갱신한다.
 
-        컬럼을 직접 건드리지 않으면 onupdate=func.now()가 발동하지 않는다
-        (이 로우에 대한 UPDATE 자체가 안 나가므로).
+        컬럼을 직접 건드리지 않으면 onupdate=utcnow_naive가 발동하지 않는다
+        (이 로우 자체에 대한 UPDATE가 안 나가므로 - 새 메시지는 별도 테이블에 INSERT될
+        뿐이라 이 로우의 어떤 컬럼도 자동으로 dirty해지지 않는다).
         """
         study_session.updated_at = utcnow_naive()
         await self._session.flush()
