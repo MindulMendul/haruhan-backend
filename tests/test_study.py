@@ -1432,6 +1432,36 @@ def test_stream_message_rejects_malformed_json_frame(client):
         assert second_error["type"] == "error"
 
 
+def test_stream_message_rejects_binary_frame(client):
+    """203라운드: websocket.receive_json()은 기본(mode="text")으로
+    message["text"]에 바로 접근한다(starlette/websockets.py) - 클라이언트가
+    텍스트 대신 바이너리 프레임을 보내면 ASGI 메시지에 "text" 키가 없어(대신
+    "bytes"만 있음) json.loads()까지 가기도 전에 KeyError('text')가 그대로
+    새어나갔다. json.JSONDecodeError만 잡던 위 테스트와 같은 이유로, 이
+    경우만 이 라우트의 "잘못된 입력은 전부 {"type": "error"}로 우아하게
+    처리한다"는 규약에서 빠져 있었다 - 연결이 죽지 않고 에러 이벤트를 받은
+    뒤에도 정상 메시지를 계속 처리할 수 있는지 확인한다."""
+    client.app.dependency_overrides[get_ollama_service] = lambda: FakeOllamaService()
+    token = _signup_and_get_token(client)
+    create = client.post(
+        "/api/v1/study/sessions", json={"title": "바이너리 프레임 테스트"}, headers=_auth_headers(token)
+    )
+    session_id = create.json()["id"]
+
+    with client.websocket_connect(
+        f"/api/v1/study/sessions/{session_id}/stream?token={token}"
+    ) as ws:
+        ws.send_bytes(b"\x00\x01\x02binary-frame-not-text")
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json({"content": "안녕"})
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
 def test_stream_message_rejects_content_over_max_length(client, monkeypatch):
     monkeypatch.setenv("MAX_PROMPT_LENGTH", "5")
     get_settings.cache_clear()

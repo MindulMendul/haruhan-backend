@@ -210,6 +210,22 @@ async def stream_message(
             except json.JSONDecodeError:
                 await websocket.send_json({"type": "error", "detail": "잘못된 JSON 형식입니다."})
                 continue
+            except KeyError:
+                # 203라운드: WebSocket.receive_json()은 기본(mode="text")으로
+                # message["text"]에 바로 접근한다(starlette/websockets.py) - 클라이언트가
+                # 텍스트 대신 바이너리 프레임을 보내면 ASGI 메시지에 "text" 키 자체가
+                # 없어(대신 "bytes"만 있음) json.loads()까지 가기도 전에 KeyError('text')가
+                # 난다. json.JSONDecodeError만 잡던 바로 위 분기와 똑같은 이유(그 테스트의
+                # docstring 참고)로, 이 예외 하나만 이 라우트 자신의 "잘못된 입력은 전부
+                # {"type": "error"}로 우아하게 처리한다"는 규약에서 빠져 그대로 연결을
+                # 죽였다 - 실제로 ws.send_bytes(...) 뒤 receive_json()에서 이 KeyError가
+                # 코루틴 밖으로 그대로 새어나가는 것까지 재현해 확인했다. 이 while 루프를
+                # 감싸는 바깥쪽 `except WebSocketDisconnect`(308번째 줄)도 KeyError는
+                # 못 잡아서, 그대로 처리되지 않은 예외로 앱을 뚫고 나가며 access 로그의
+                # disconnect_reason도 기본값 "client_disconnect"로 잘못 남는다(서버 쪽
+                # 예외인데 클라이언트가 끊은 것처럼 보임).
+                await websocket.send_json({"type": "error", "detail": "잘못된 요청 형식입니다."})
+                continue
 
             # get_current_user_ws()는 accept() 전 딱 한 번만 토큰을 검증한다 -
             # 그 뒤로는 REST(매 요청마다 get_current_user()가 다시 검증)와

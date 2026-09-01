@@ -1051,6 +1051,30 @@ def test_stream_create_review_rejects_malformed_json_frame(client):
         assert second_error["type"] == "error"
 
 
+def test_stream_create_review_rejects_binary_frame(client):
+    """203라운드: websocket.receive_json()은 기본(mode="text")으로
+    message["text"]에 바로 접근한다(starlette/websockets.py) - 클라이언트가
+    텍스트 대신 바이너리 프레임을 보내면 ASGI 메시지에 "text" 키가 없어(대신
+    "bytes"만 있음) json.loads()까지 가기도 전에 KeyError('text')가 그대로
+    새어나갔다. study.py의 동일한 문제와 같은 방식으로 고쳤다 - 연결이 죽지
+    않고 에러 이벤트를 받은 뒤에도 정상 메시지를 계속 처리할 수 있는지
+    확인한다."""
+    fake = FakeOllamaService()
+    client.app.dependency_overrides[get_ollama_service] = lambda: fake
+    token = _signup_and_get_token(client, email="stream-review-binary@example.com")
+
+    with client.websocket_connect(f"/api/v1/interview/reviews/stream?token={token}") as ws:
+        ws.send_bytes(b"\x00\x01\x02binary-frame-not-text")
+        error_event = ws.receive_json()
+        assert error_event["type"] == "error"
+
+        ws.send_json(_create_payload())
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "done":
+                break
+
+
 def test_stream_create_review_sends_error_event_when_feedback_is_blank(client):
     """REST 버전(test_create_review_returns_502_when_feedback_is_blank)과 같은
     확인을 스트리밍(WebSocket) 경로에도 반복한다 - chat_stream()은 content가

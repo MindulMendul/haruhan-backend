@@ -7979,3 +7979,53 @@
       INTEGRATION.md` 갱신도, DB 스키마 변경이 없어 마이그레이션도
       필요 없었다.
 
+## 백로그 (203라운드)
+
+- [x] 227. 학습챗/면접복기 WebSocket 스트리밍 라우트(`study.py`의
+      `stream_message`, `interview_review.py`의 `stream_create_review`)는
+      `websocket.receive_json()`이 던지는 `json.JSONDecodeError`(깨진 JSON
+      프레임)만 잡고 있었다. `WebSocket.receive_json()`은 기본값
+      `mode="text"`로 ASGI 메시지의 `message["text"]`에 바로 접근하는데
+      (Starlette 소스로 확인), 클라이언트가 텍스트 프레임 대신 **바이너리**
+      프레임을 보내면 그 메시지엔 `"text"` 키 자체가 없고(`"bytes"`만 있음)
+      `json.loads()`까지 가지도 못한 채 `KeyError('text')`가 그대로 난다 -
+      이 예외는 `receive_json()`을 감싸는 안쪽 try(TimeoutError/
+      JSONDecodeError만 잡음)에도, 스트리밍 서비스 호출을 감싸는 바깥쪽
+      try(HTTPException/WebSocketDisconnect/Exception을 잡음, 하지만
+      receive_json() 호출부보다 더 안쪽의 별개 블록)에도, 맨 바깥의
+      `except WebSocketDisconnect`에도 안 잡혀 코루틴 밖으로 그대로
+      새어나갔다.
+
+      `client.websocket_connect(...)`로 실제 앱에 `ws.send_bytes(...)`를
+      보내 `receive_json()`에서 `KeyError: 'text'`가 실제로 코루틴을 뚫고
+      나가는 것까지 재현해 확인했다 - 이미 존재하는 `test_stream_message_
+      rejects_malformed_json_frame` 테스트(같은 `receive_json()` 호출부의
+      `json.JSONDecodeError`를 고친 187/186라운드 언저리 테스트)가 정확히
+      "다른 모든 잘못된 입력은 {"type": "error"}로 우아하게 처리하면서 이
+      경우만 예외로 죽는 건 모순"이라고 지적한 바로 그 원칙이, 텍스트가
+      아닌 "프레임 타입" 자체가 잘못된 이 케이스에는 아직 적용돼 있지
+      않았던 셈이다. 재현 과정에서 access 로그도 함께 확인했는데,
+      `disconnect_reason`이 서버 쪽 크래시인데도 기본값 `"client_
+      disconnect"`로 잘못 남아(184/173라운드가 구축한 "grep 한 줄로 종료
+      사유를 구분한다"는 구조화 로깅의 취지와 반대로) 이 크래시를 감출
+      뿐더러, 어디에도 `logger.exception(...)`이 없어 로그만 봐서는 그냥
+      정상 종료처럼 보였다.
+
+      두 라우트 모두 기존 `except json.JSONDecodeError:` 바로 뒤에
+      `except KeyError:`를 추가해, 다른 잘못된 입력과 똑같이 `{"type":
+      "error", "detail": "잘못된 요청 형식입니다."}`로 응답하고 연결은
+      계속 유지한다. `tests/test_study.py`/`tests/test_interview_review.py`
+      에 기존 `..._rejects_malformed_json_frame` 테스트와 같은 스타일로
+      `..._rejects_binary_frame` 테스트를 각각 추가했다 - 바이너리 프레임
+      전송 뒤 `{"type": "error"}`를 받는지, 그 뒤로도 연결이 살아있어
+      정상 메시지를 끝까지(`"done"`까지) 처리할 수 있는지 확인한다. `git
+      stash`로 두 라우트 수정만 되돌리면 새 테스트 2개 전부 정확히
+      재현한 증상(`KeyError: 'text'`)으로 실패하는 것까지 확인했다.
+
+      전체 666개 테스트 통과(664 → 666), `app/api/v1/routes/study.py`/
+      `interview_review.py` 커버리지 100% 유지, `mypy app tests scripts`
+      클린. 클라이언트 프로토콜은 기존 `{"type": "error"}` 규약을 그대로
+      따르는(새 필드/이벤트 타입 없음) 순수 견고성 개선이라
+      `docs/FRONTEND_INTEGRATION.md` 갱신도, DB 스키마 변경이 없어
+      마이그레이션도 필요 없었다.
+
