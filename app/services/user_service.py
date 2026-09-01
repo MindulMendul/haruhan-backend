@@ -61,17 +61,6 @@ class UserService:
                 user.hashed_password = await asyncio.to_thread(hash_password, password)
             except PasswordTooLongError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-            # 비밀번호를 바꾸는 건 보통 "계정이 뚫린 것 같다"는 의심에서 나오는
-            # 행동인데, 여기서 refresh token을 그대로 두면 공격자가 훔친 refresh
-            # token으로 최대 refresh_token_expire_days(기본 14일)까지 계속
-            # 로그인 상태를 유지할 수 있어 비밀번호 변경의 의미가 없어진다 -
-            # auth_service.py가 재사용 탐지/전체 로그아웃에 이미 쓰고 있는
-            # revoke_all_for_user()로 이 계정의 모든 refresh token을 함께
-            # 폐기한다(지금 이 요청을 보낸 클라이언트 자신의 refresh token도
-            # 포함 - access token만으로는 어느 refresh token이 이 세션 것인지
-            # 구분할 수 없어 DELETE /auth/sessions 전체 로그아웃과 똑같이
-            # 다시 로그인해야 한다).
-            await self._refresh_tokens.revoke_all_for_user(user.id)
 
         # 위 get_by_email 확인과 이 commit 사이에는(비밀번호 해싱 시간까지 포함해)
         # 시간차가 있다 - 같은 이메일로 두 프로필 변경/가입 요청이 동시에 오면 둘 다
@@ -79,6 +68,25 @@ class UserService:
         # 나머지 흐름과 다르게 처리되지 않은 예외(500)가 되므로, 정상적인 "이미
         # 존재함" 케이스와 같은 409로 변환한다.
         try:
+            if password is not None:
+                # 비밀번호를 바꾸는 건 보통 "계정이 뚫린 것 같다"는 의심에서 나오는
+                # 행동인데, 여기서 refresh token을 그대로 두면 공격자가 훔친 refresh
+                # token으로 최대 refresh_token_expire_days(기본 14일)까지 계속
+                # 로그인 상태를 유지할 수 있어 비밀번호 변경의 의미가 없어진다 -
+                # auth_service.py가 재사용 탐지/전체 로그아웃에 이미 쓰고 있는
+                # revoke_all_for_user()로 이 계정의 모든 refresh token을 함께
+                # 폐기한다(지금 이 요청을 보낸 클라이언트 자신의 refresh token도
+                # 포함 - access token만으로는 어느 refresh token이 이 세션 것인지
+                # 구분할 수 없어 DELETE /auth/sessions 전체 로그아웃과 똑같이
+                # 다시 로그인해야 한다). revoke_all_for_user()는 내부에서
+                # session.flush()를 호출하는데, 이 시점에 이미 위에서 건드린
+                # user.email/hashed_password의 dirty 상태도 같은 flush로 함께
+                # 나간다 - 이 commit()의 try/except 바깥에서 flush가 먼저
+                # 일어나면(계정이 이 요청 도중 지워진 경쟁 상황에서) users 테이블
+                # UPDATE가 0행에 매치되는 StaleDataError가 이 try 블록 밖으로
+                # 새어나가 버린다. 그래서 revoke_all_for_user()도 반드시 이
+                # try 안, commit() 바로 앞에서 호출한다.
+                await self._refresh_tokens.revoke_all_for_user(user.id)
             await self._session.commit()
         except IntegrityError:
             await self._session.rollback()
@@ -112,6 +120,25 @@ class UserService:
         # update_profile()과 같은 이유(check-then-act 경쟁 상태)로, DB unique
         # 제약 위반이 그대로 새어나가지 않도록 같은 409로 변환한다.
         try:
+            # 게스트는 hashed_password가 없어(=승격 전까지 자격 증명 검증 자체가
+            # 불가능) refresh_token만 가지고 있으면 사실상 계정을 통째로 쥐고
+            # 있는 것과 같다 - 그 refresh_token이 로그/공유 기기/XSS 등으로
+            # 새어나갔더라도 여기서 그대로 두면, 사용자가 방금 비밀번호를 설정해
+            # "이제 계정이 보호된다"고 믿는 것과 달리 공격자는 계속 그
+            # refresh_token으로 최대 refresh_token_expire_days(기본 14일)까지
+            # 로그인 상태를 유지할 수 있다 - update_profile()의 비밀번호 변경
+            # 분기가 같은 이유로 이미 쓰고 있는 revoke_all_for_user()로 이 계정의
+            # 모든 refresh token을 함께 폐기한다(지금 이 요청을 보낸 클라이언트
+            # 자신의 refresh token도 포함 - access token만으로는 어느 refresh
+            # token이 이 세션 것인지 구분할 수 없다). access token은 만료 전까지는
+            # 계속 유효해 즉시 재로그인할 필요는 없지만, 그 뒤 refresh를 시도하면
+            # 새 email/password로 다시 로그인해야 한다. update_profile()에서와
+            # 같은 이유로(revoke_all_for_user()가 내부에서 호출하는 flush()가
+            # 위에서 건드린 user.email/hashed_password의 dirty 상태까지 함께
+            # 내보내므로) 이 try 안, commit() 바로 앞에서 호출해야 한다 - 그래야
+            # 계정이 이 요청 도중 지워진 경쟁 상황에서 나는 StaleDataError가 이
+            # 블록의 except로 잡힌다.
+            await self._refresh_tokens.revoke_all_for_user(user.id)
             await self._session.commit()
         except IntegrityError:
             await self._session.rollback()

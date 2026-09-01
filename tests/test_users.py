@@ -225,6 +225,33 @@ def test_upgrade_guest_success(client):
     assert login.status_code == 200
 
 
+def test_upgrade_guest_revokes_existing_refresh_tokens(client):
+    """206라운드 다음(207라운드): 게스트는 hashed_password가 없어 승격 전까지
+    자격 증명 검증 자체가 불가능하므로, refresh_token만 가지고 있으면 사실상
+    계정을 통째로 쥐고 있는 것과 같다 - 그 refresh_token이 로그/공유 기기/XSS
+    등으로 새어나갔더라도 승격 후 그대로 두면, 사용자가 방금 비밀번호를 설정해
+    "이제 계정이 보호된다"고 믿는 것과 달리 공격자는 계속 그 refresh_token으로
+    로그인 상태를 유지할 수 있다 - update_profile()의 비밀번호 변경 분기를
+    검증하는 위 test_update_password_revokes_existing_refresh_tokens와 같은
+    방식으로, 승격 전에 발급된 refresh_token이 승격 후에는 더 이상 쓸 수 없는지
+    확인한다."""
+    guest = client.post("/api/v1/auth/guest")
+    assert guest.status_code == 201
+    guest_tokens = guest.json()
+
+    upgrade = client.post(
+        "/api/v1/users/me/upgrade",
+        json={"email": "upgrade-revoke@example.com", "password": "supersecret"},
+        headers=_auth_headers(guest_tokens["access_token"]),
+    )
+    assert upgrade.status_code == 200
+
+    refresh = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": guest_tokens["refresh_token"]}
+    )
+    assert refresh.status_code == 401
+
+
 def test_upgrade_guest_rejects_already_real_account(client):
     tokens = _signup_and_get_tokens(client, email="already-real@example.com")
     response = client.post(
@@ -458,6 +485,57 @@ def test_update_profile_returns_401_when_account_deleted_during_request(db_sessi
             try:
                 await service.update_profile(
                     user=user, email="new@example.com", password=None, current_password=None
+                )
+                return None
+            except HTTPException as exc:
+                return exc
+
+    exc = asyncio.run(_run())
+
+    assert exc is not None
+    assert exc.status_code == 401
+    assert exc.detail == {"code": "invalid_token", "message": "Could not validate credentials"}
+
+
+def test_update_profile_with_password_change_returns_401_when_account_deleted_during_request(
+    db_session_factory, monkeypatch
+):
+    """207라운드: 위 테스트와 같은 경쟁을, 이메일뿐 아니라 비밀번호까지 함께
+    바꾸는 경우로 재현한다. revoke_all_for_user()는 내부에서 session.flush()를
+    호출하는데, 이 flush()가 이 계정이 이미 지워진 상태에서 위쪽 get_by_email
+    직후 반영된 user.email/hashed_password의 dirty 상태를 함께 내보내면서 그
+    자체로 StaleDataError를 낼 수 있다 - 이 fixture 값이 commit()을 감싸는
+    try/except보다 앞에서(207라운드가 고치기 전에는 실제로 그 순서였다) 나가면,
+    새는 StaleDataError가 이 메서드 밖으로 그대로 전파돼 처리되지 않은 예외가
+    된다. revoke_all_for_user()도 반드시 같은 try 안, commit() 바로 앞에서
+    호출해야 함을 확인한다."""
+
+    async def _run():
+        async with db_session_factory() as session:
+            users = UserRepository(session)
+            user = await users.create_guest()
+            await session.commit()
+            user_id = user.id
+
+            original_get_by_email = UserRepository.get_by_email
+
+            async def _deleting_get_by_email(self, email):
+                async with db_session_factory() as session_b:
+                    users_b = UserRepository(session_b)
+                    target = await users_b.get_by_id(user_id)
+                    await users_b.delete(target)
+                    await session_b.commit()
+                return await original_get_by_email(self, email)
+
+            monkeypatch.setattr(UserRepository, "get_by_email", _deleting_get_by_email)
+
+            service = UserService(session=session)
+            try:
+                await service.update_profile(
+                    user=user,
+                    email="new-with-pw@example.com",
+                    password="supersecret",
+                    current_password=None,
                 )
                 return None
             except HTTPException as exc:

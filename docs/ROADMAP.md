@@ -8186,3 +8186,58 @@
       프로토콜 변경이 없는 내부 DB 클럭 일관성 수정이라
       `docs/FRONTEND_INTEGRATION.md` 갱신도 필요 없었다.
 
+## 백로그 (207라운드)
+
+- [x] 231. `app/services/user_service.py`의 `upgrade_guest()`(게스트 → 실계정
+      전환)가 처음으로 비밀번호를 설정하는데도 기존 refresh_token을 그대로
+      살려두고 있었다. 게스트는 hashed_password가 없어(=승격 전까지 자격
+      증명 검증 자체가 불가능) refresh_token만 가지고 있으면 사실상 계정을
+      통째로 쥐고 있는 것과 같은데, 그 토큰이 로그/공유 기기/XSS 등으로
+      새어나간 상태였다면 승격 후에도 그대로 유효해서, 사용자가 방금
+      비밀번호를 설정해 "이제 계정이 보호된다"고 믿는 것과 달리 공격자는
+      계속 그 refresh_token으로 `refresh_token_expire_days`(기본 14일)까지
+      로그인 상태를 유지할 수 있었다 - `update_profile()`의 비밀번호 변경
+      분기가 107라운드에 정확히 같은 이유로 이미 `revoke_all_for_user()`를
+      쓰고 있는데, "첫 비밀번호 설정"이라는 사실상 동일한 케이스인
+      `upgrade_guest()`에는 그 보호가 아직 안 미쳐 있었다.
+
+      `upgrade_guest()`에도 같은 `revoke_all_for_user()` 호출을 추가하던
+      중, 기존 `update_profile()`에도 있던 잠재적 버그를 하나 더 발견했다 -
+      `revoke_all_for_user()`는 내부에서 `session.flush()`를 부르는데, 이
+      메서드가 `commit()`을 감싸는 `try/except IntegrityError/
+      StaleDataError` 블록 "밖"에서 먼저 호출되고 있었다(두 메서드 다).
+      그런데 그 시점엔 이미 `user.email`/`hashed_password`가 같은 세션에서
+      dirty 상태로 대기 중이라, 이 flush가 그 변경사항까지 함께 내보낸다 -
+      계정이 이 요청 도중(`get_by_email` 조회와 commit 사이) 지워지는
+      경쟁(143~171/197라운드가 다룬 것과 같은 클래스) 상황에서는 이
+      flush() 자체가 `StaleDataError`를 내는데, 그게 `try` 블록 밖이라 잡히지
+      않고 그대로 새어나가 처리되지 않은 예외가 됐다. `update_profile()`은
+      이 경쟁이 "이메일 변경 + 비밀번호 변경을 동시에" 요청할 때만
+      드러나는데, 기존 회귀 테스트(`test_update_profile_returns_401_
+      when_account_deleted_during_request`)는 `password=None`으로만
+      돌고 있어 지금까지 이 조합이 한 번도 실제로 실행되지 않았었다.
+      `revoke_all_for_user()` 호출을 두 메서드 다 `commit()`을 감싸는 그
+      `try` 안, `commit()` 바로 앞으로 옮겨서 고쳤다.
+
+      `tests/test_users.py`에 두 테스트를 추가했다 - `test_upgrade_guest_
+      revokes_existing_refresh_tokens`(기존 `test_update_password_
+      revokes_existing_refresh_tokens`와 같은 방식으로, 승격 전 발급된
+      refresh_token이 승격 후 `POST /auth/refresh`에서 `401`이 되는지 실제
+      WS/REST 왕복으로 확인)과 `test_update_profile_with_password_change_
+      returns_401_when_account_deleted_during_request`(이메일+비밀번호를
+      함께 바꾸면서 `get_by_email` 직후 계정이 지워지는 경쟁을 재현). `git
+      stash`로 `app/services/user_service.py`만 되돌리면 새 테스트 2개
+      전부 정확히 재현한 증상(전자는 폐기 안 된 refresh_token으로 refresh
+      성공, 후자는 처리되지 않은 `StaleDataError`)으로 실패하는 것까지
+      확인했다.
+
+      `docs/FRONTEND_INTEGRATION.md`의 "1-0-1. 게스트 → 실계정 전환"
+      섹션을 갱신해 승격 시 현재 기기의 refresh_token도 함께 폐기된다는
+      점(access_token은 만료 전까지 그대로 유효해 즉시 재로그인은 필요
+      없지만, 이후 refresh 시도는 `401`이 되어 새 email/password로 다시
+      로그인해야 함)을 명시했다.
+
+      전체 674개 테스트 통과(672 → 674), `app/services/user_service.py`
+      커버리지 100% 유지(전체 99.97%), `mypy app tests scripts` 클린. DB
+      스키마 변경이 없어 마이그레이션은 필요 없었다.
+

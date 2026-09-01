@@ -34,7 +34,7 @@ POST /api/v1/auth/guest        (바디 없음)
 
 ### 1-0-1. 게스트 → 실계정 전환 (데이터 유지)
 
-지금 로그인한 게스트에게 email/password를 등록해서, **같은 계정(같은 데이터)을 그대로 유지한 채** 실계정으로 승격시킵니다. access token은 그대로 유효하니 새로 로그인할 필요 없습니다.
+지금 로그인한 게스트에게 email/password를 등록해서, **같은 계정(같은 데이터)을 그대로 유지한 채** 실계정으로 승격시킵니다. access token은 그대로 유효하니 즉시 로그인할 필요는 없습니다. 단, 승격 전에 발급된 refresh_token은 (1-6의 비밀번호 변경과 마찬가지 이유로 — 게스트는 비밀번호가 없어 그 refresh_token만으로 계정 전체를 쥐고 있는 것과 같으므로) 승격과 동시에 폐기됩니다 — **지금 쓰고 있는 이 기기의 refresh_token도 포함**됩니다. access_token이 만료된 뒤 refresh를 시도하면 `401`을 받으니, 그때는 방금 설정한 email/password로 다시 로그인해야 합니다.
 
 ```
 POST /api/v1/users/me/upgrade
