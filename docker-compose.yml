@@ -194,6 +194,12 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Caddy 2.6+는 자동 HTTPS가 켜진 사이트에 별도 설정 없이 HTTP/3(QUIC)를
+      # 기본으로 함께 서빙하는데, QUIC은 TCP가 아니라 UDP 위에서 동작한다 -
+      # 도커 포트 매핑은 프로토콜을 명시하지 않으면 TCP만 뚫어주므로, 이 한 줄이
+      # 없으면 Caddy 컨테이너 안에서는 HTTP/3가 켜져 있어도 QUIC 패킷 자체가
+      # 호스트에 도달하지 못해 클라이언트가 항상 HTTP/2로만 폴백한다.
+      - "443:443/udp"
     environment:
       # 발급받을 도메인 (예: api.haruhan.example.com). DNS가 이 서버 IP를 가리켜야
       # Let's Encrypt HTTP-01 챌린지가 통과해서 인증서가 자동 발급/갱신된다.

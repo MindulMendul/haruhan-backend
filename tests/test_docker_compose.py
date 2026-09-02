@@ -82,6 +82,18 @@ def test_every_env_example_setting_reaches_haruhan_backend_container():
     assert not missing, f"docker-compose.yml에 전달되지 않는 .env.example 설정: {sorted(missing)}"
 
 
+def test_caddy_exposes_udp_443_for_http3():
+    """Caddy 2.6+는 자동 HTTPS가 켜진 사이트에 별도 설정 없이 HTTP/3(QUIC)를
+    기본으로 함께 서빙하는데, QUIC은 TCP가 아니라 UDP 위에서 동작한다 - 도커
+    포트 매핑은 프로토콜을 명시하지 않으면 TCP만 뚫어주므로, UDP 443 매핑이
+    없으면 컨테이너 안에서는 HTTP/3가 켜져 있어도 QUIC 패킷 자체가 호스트에
+    도달하지 못해 클라이언트가 항상 HTTP/2로만 폴백한다. 이미 있는 TCP 443
+    매핑을 건드리다 UDP 쪽이 조용히 빠지는 회귀를 막는다."""
+    compose = _parse_docker_compose()
+    ports = compose["services"]["caddy"]["ports"]
+    assert "443:443/udp" in ports
+
+
 def test_every_service_has_a_memory_limit():
     """이 호스트는 mindul-net으로 다른 스택(Ollama 포함)과 리소스를 공유한다 -
     서비스 하나가 메모리 누수/버그로 폭주하면 호스트 전체 메모리를 잠식해 같은
